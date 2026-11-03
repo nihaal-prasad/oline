@@ -52,5 +52,6 @@ Skip the wizard and start directly:
 oline -mode pentester -env <wsl-distro> -scope "10.0.0.5, 10.0.0.0/24" -goal "prove RCE" [-manual]
 ```
 
-Set your model provider API key before running (default `FIREWORKS_API_KEY`); see
+oline ships with no provider. On the first run, the setup wizard asks for your
+OpenAI-compatible provider (name, base URL, API key, and a model per tier); see
 [Getting started](docs/getting-started.md).

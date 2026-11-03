@@ -40,13 +40,35 @@ func load(t *testing.T, mode config.Mode) (*config.Store, *agents.Roster) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Models ship empty (no defaults); configure the three tiers for the tests.
+	// oline ships no provider; define one and configure the three tiers for tests.
+	store.DefineProvider("fireworks", fireworksProvider())
 	store.SetModelRoles(
 		"fireworks/accounts/fireworks/models/deepseek-v4p1-flash",            // big
 		"fireworks/accounts/fireworks/models/glm-5p3-flash",                  // medium
 		"fireworks/accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b", // small
 	)
 	return store, roster
+}
+
+// fireworksProvider is a provider fixture for tests (oline ships none by default).
+// The models carry the thinking default levels and context windows the wire tests
+// assert on (for example recon on the medium GLM resolves to "medium" effort).
+func fireworksProvider() config.Provider {
+	mk := func(id, name string, ctx int, def string) config.ModelDef {
+		return config.ModelDef{
+			ID: id, Name: name, ContextWindow: ctx, MaxTokens: 32768, Reasoning: true,
+			Thinking: config.ThinkingSpec{Mode: "effort", Efforts: []string{"low", "medium", "high"}, DefaultLevel: def},
+			Compat:   config.Compat{ThinkingFormat: "openai"},
+		}
+	}
+	return config.Provider{
+		BaseURL: "https://api.fireworks.ai/inference/v1", API: "openai", APIKeyRef: "env:FIREWORKS_API_KEY",
+		Models: []config.ModelDef{
+			mk("accounts/fireworks/models/deepseek-v4p1-flash", "DeepSeek V4.1 Flash", 163840, "low"),
+			mk("accounts/fireworks/models/glm-5p3-flash", "GLM 5.3 Flash", 131072, "medium"),
+			mk("accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b", "Nemotron Lightning", 131072, "low"),
+		},
+	}
 }
 
 // TestResolverReadsLiveConfig checks the per-spawn ConfigResolver reflects a model

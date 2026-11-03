@@ -6,7 +6,8 @@
 - A sandbox backend on the machine you run it on:
   - WSL on Windows (a distro oline creates, or one you point it at), or
   - QEMU (`qemu-system-x86_64` and `qemu-img`) on Windows or Linux.
-- An API key for an OpenAI-compatible model provider (Fireworks by default).
+- An OpenAI-compatible model provider and an API key for it. oline ships with no
+  default provider; you configure one in the first-run setup wizard.
 
 ## Build
 
@@ -16,18 +17,16 @@ go test ./...
 make dist                 # cross-compiled binaries into dist/ (or: pwsh ./build.ps1)
 ```
 
-## Set your API key
+## Provider and API key
 
-oline reads the key from an environment variable named by each provider's
-`apiKeyRef` in `models.yml`. The default is `FIREWORKS_API_KEY`:
+oline ships with no provider. On the first run, the setup wizard asks for your
+OpenAI-compatible provider: a name, a base URL, an API key, and a model for each
+tier. It saves the provider to `~/oline/config/<mode>/models.yml` and the key to
+`~/oline/config/secrets.yml`.
 
-```bash
-export FIREWORKS_API_KEY=...        # Linux / WSL
-$env:FIREWORKS_API_KEY = "..."      # Windows PowerShell
-```
-
-You can also save a key in the in-app editor, which writes it to
-`~/oline/config/secrets.yml`. See [configuration.md](configuration.md).
+A provider's key can instead come from an environment variable: set its `apiKeyRef`
+in `models.yml` to `env:NAME` and export `NAME`. See
+[configuration.md](configuration.md).
 
 ## Run
 

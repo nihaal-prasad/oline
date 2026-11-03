@@ -11,6 +11,7 @@ import (
 // billed at the cache-read rate, not the full input rate.
 func TestCostCachedBilling(t *testing.T) {
 	m := testModel(t)
+	withFireworks(m.store)
 	const id = "accounts/fireworks/models/deepseek-v4p1-flash" // input 0.30, output 1.2, cacheRead 0.006
 
 	m.apply(event.Usage{
@@ -31,6 +32,7 @@ func TestCostCachedBilling(t *testing.T) {
 // cached tokens.
 func TestCostNoCacheData(t *testing.T) {
 	m := testModel(t)
+	withFireworks(m.store)
 	const id = "accounts/fireworks/models/deepseek-v4p1-flash"
 	m.apply(event.Usage{Model: id, PromptTokens: 1_000_000, CompletionTokens: 0})
 	want := 1.0 * 0.30

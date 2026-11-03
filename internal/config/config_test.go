@@ -20,6 +20,14 @@ func TestEnsureModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// oline ships no provider; define one with two models for this test.
+	s.DefineProvider("fireworks", config.Provider{
+		BaseURL: "https://api.fireworks.ai/inference/v1", API: "openai", APIKeyRef: "env:FIREWORKS_API_KEY",
+		Models: []config.ModelDef{
+			{ID: "accounts/fireworks/models/deepseek-v4p1-flash", Name: "DeepSeek", ContextWindow: 163840, MaxTokens: 32768},
+			{ID: "accounts/fireworks/models/glm-5p3-flash", Name: "GLM", ContextWindow: 131072, MaxTokens: 32768},
+		},
+	})
 	const newID = "accounts/fireworks/models/gpt-oss-120b"
 
 	// Adding a brand-new model id reports added=true and makes it resolvable.
@@ -91,36 +99,44 @@ func TestSaveModeFile(t *testing.T) {
 	}
 }
 
-// TestProviderOverrideKeepsEmbeddedFields: a user models.yml that overrides only
-// a provider's baseUrl must NOT wipe that provider's embedded models / api /
-// apiKeyRef (yaml replaces map values wholesale, so Load re-merges).
-func TestProviderOverrideKeepsEmbeddedFields(t *testing.T) {
+// TestAddProviderRoundTrips: a provider defined with AddProvider (oline ships none)
+// persists to the user models.yml and reloads with its base URL, api, apiKeyRef,
+// and models intact.
+func TestAddProviderRoundTrips(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("OLINE_HOME", home)
-	dir := filepath.Join(home, "config", "pentester")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "models.yml"),
-		[]byte("providers:\n  fireworks:\n    baseUrl: https://changed.example\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	s, err := config.Load(config.ModePentester, assets.PentesterFS)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, ok := s.Effective().Providers["fireworks"]
+	if len(s.Providers()) != 0 {
+		t.Fatalf("expected no default providers, got %d", len(s.Providers()))
+	}
+	models := []config.ModelDef{
+		{ID: "gpt-4o", Name: "GPT-4o", ContextWindow: 128000, MaxTokens: 16384},
+		{ID: "gpt-4o-mini", Name: "GPT-4o mini", ContextWindow: 128000, MaxTokens: 16384},
+	}
+	if err := s.AddProvider("openai", "https://api.openai.com/v1", "secret:openai", models); err != nil {
+		t.Fatalf("AddProvider: %v", err)
+	}
+
+	// Reload from disk and confirm the provider survives in full.
+	s2, err := config.Load(config.ModePentester, assets.PentesterFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, ok := s2.Effective().Providers["openai"]
 	if !ok {
-		t.Fatal("fireworks provider missing after override")
+		t.Fatal("openai provider missing after reload")
 	}
-	if p.BaseURL != "https://changed.example" {
-		t.Errorf("baseUrl = %q, want the override", p.BaseURL)
+	if p.BaseURL != "https://api.openai.com/v1" {
+		t.Errorf("baseUrl = %q", p.BaseURL)
 	}
-	if len(p.Models) != 3 {
-		t.Errorf("models = %d, want 3 preserved from embedded", len(p.Models))
+	if p.APIKeyRef != "secret:openai" {
+		t.Errorf("apiKeyRef = %q", p.APIKeyRef)
 	}
-	if p.APIKeyRef == "" {
-		t.Error("apiKeyRef was wiped by the override")
+	if len(p.Models) != 2 || p.Models[0].ID != "gpt-4o" {
+		t.Errorf("models not preserved: %+v", p.Models)
 	}
 }
 
@@ -147,15 +163,21 @@ func TestLoadDefaultsAndRoles(t *testing.T) {
 	if eff.MaxConcurrency != 5 {
 		t.Errorf("maxConcurrency = %d, want 5", eff.MaxConcurrency)
 	}
-	if _, ok := eff.Providers["fireworks"]; !ok {
-		t.Error("fireworks provider not loaded from models.yml")
+	// No provider ships by default; the user configures one in setup.
+	if len(eff.Providers) != 0 {
+		t.Errorf("no providers should ship by default, got %d", len(eff.Providers))
 	}
-	if len(eff.Providers["fireworks"].Models) != 3 {
-		t.Errorf("fireworks models = %d, want 3", len(eff.Providers["fireworks"].Models))
-	}
-	// Once the tiers point at real catalog models and the provider key resolves,
-	// validation passes.
+	// Once a provider is defined, the tiers point at its models, and the key
+	// resolves, validation passes.
 	t.Setenv("FIREWORKS_API_KEY", "test-key")
+	s.DefineProvider("fireworks", config.Provider{
+		BaseURL: "https://api.fireworks.ai/inference/v1", API: "openai", APIKeyRef: "env:FIREWORKS_API_KEY",
+		Models: []config.ModelDef{
+			{ID: "accounts/fireworks/models/deepseek-v4p1-flash"},
+			{ID: "accounts/fireworks/models/glm-5p3-flash"},
+			{ID: "accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b"},
+		},
+	})
 	s.SetModelRoles(
 		"fireworks/accounts/fireworks/models/deepseek-v4p1-flash",
 		"fireworks/accounts/fireworks/models/glm-5p3-flash",
@@ -211,6 +233,7 @@ func TestResolveKeyFromEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	s.DefineProvider("fireworks", config.Provider{APIKeyRef: "env:FIREWORKS_API_KEY"})
 	got, err := s.ResolveKey("fireworks")
 	if err != nil {
 		t.Fatal(err)

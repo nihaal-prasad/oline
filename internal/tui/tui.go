@@ -184,7 +184,8 @@ type wizStep int
 
 const (
 	wMode   wizStep = iota
-	wModels         // first run: pick a model for each tier (big/medium/small)
+	wSetup          // first run, no provider yet: define a provider + a model per tier
+	wModels         // a provider exists but tiers unset: pick a model for each tier
 	wKey            // shown only if a chosen model's provider has no API key yet
 	wStart
 	wEnv
@@ -227,6 +228,10 @@ type model struct {
 	roleSel   [3]int         // selected catalog index per tier (0=big,1=medium,2=small)
 	roleFocus int            // which tier row the wizard is on
 	keyQueue  []string       // providers still needing an API key (wKey walks this)
+
+	// first-run provider+models form (wSetup step): shown when no provider exists.
+	setupRows  []*setupRow
+	setupFocus int // index into setupRows of the focused row
 
 	// preparing: a sandbox open/create + egress setup is running off the UI
 	// goroutine (a QEMU first boot can take minutes); prepCand is the chosen env.
@@ -676,14 +681,37 @@ func (m *model) wizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.reloadForMode()
 			m.buildCatalog()
 			if !m.store.ModelsConfigured() {
-				m.seedRoleSel()
-				m.roleFocus = 0
-				m.step = wModels
+				m.gotoModelSetup()
 			} else {
 				m.gotoKeyOrStart()
 			}
 		}
 		return m, nil
+
+	case wSetup:
+		r := m.setupRows[m.setupFocus]
+		switch k {
+		case "up", "shift+tab":
+			m.moveSetupFocus(-1)
+			return m, nil
+		case "down", "tab":
+			m.moveSetupFocus(1)
+			return m, nil
+		case "enter":
+			m.submitSetupForm()
+			return m, nil
+		}
+		if r.toggle {
+			switch k {
+			case "left", "right", " ", "h", "l":
+				r.on = !r.on
+				m.syncSetupFocus() // toggling may show/hide rows
+			}
+			return m, nil
+		}
+		var cmd tea.Cmd
+		r.ti, cmd = r.ti.Update(msg)
+		return m, cmd
 
 	case wModels:
 		switch k {
@@ -1018,6 +1046,341 @@ func (m *model) gotoKeyOrStart() {
 	m.step = wStart
 }
 
+// gotoModelSetup enters the right first-run model-config step: the full
+// provider+models form when no provider is configured, otherwise the per-tier
+// picker over the existing catalog.
+func (m *model) gotoModelSetup() {
+	if len(m.store.Providers()) == 0 {
+		m.initSetupForm()
+		m.step = wSetup
+		return
+	}
+	m.seedRoleSel()
+	m.roleFocus = 0
+	m.step = wModels
+}
+
+// setupRow is one row of the first-run provider+models form (wSetup): a text field
+// or a yes/no toggle, optionally preceded by a section header.
+type setupRow struct {
+	key    string // stable id, e.g. "provider.name", "big.id", "medium.same"
+	label  string
+	header string // section header shown above this row (empty = none)
+	toggle bool
+	ti     textinput.Model
+	on     bool // toggle state
+}
+
+// initSetupForm builds the provider+models form, prefilled with an OpenAI example.
+func (m *model) initSetupForm() {
+	text := func(key, label, header, val string, mask bool) *setupRow {
+		ti := textinput.New()
+		ti.SetValue(val)
+		ti.Width = 48
+		if mask {
+			ti.EchoMode = textinput.EchoPassword
+		}
+		return &setupRow{key: key, label: label, header: header, ti: ti}
+	}
+	toggle := func(key, label, header string, on bool) *setupRow {
+		return &setupRow{key: key, label: label, header: header, toggle: true, on: on}
+	}
+	// A model's config rows (id, limits, reasoning, prices), shared by every tier.
+	modelRows := func(name, header, idPrefill string) []*setupRow {
+		return []*setupRow{
+			text(name+".id", "Model id", header, idPrefill, false),
+			text(name+".context", "Context window (tokens)", "", "128000", false),
+			text(name+".maxTokens", "Max output tokens", "", "16384", false),
+			toggle(name+".reasoning", "Reasoning model (send a thinking effort)", "", false),
+			text(name+".efforts", "Thinking efforts (comma-separated)", "", "low,medium,high", false),
+			text(name+".defaultEffort", "Default thinking effort", "", "medium", false),
+			text(name+".in", "Price: input $ per 1M tokens", "", "0", false),
+			text(name+".out", "Price: output $ per 1M tokens", "", "0", false),
+			text(name+".cacheRead", "Price: cache-read $ per 1M tokens", "", "0", false),
+			text(name+".cacheWrite", "Price: cache-write $ per 1M tokens", "", "0", false),
+		}
+	}
+	rows := []*setupRow{
+		text("provider.name", "Provider name", "Inference provider (OpenAI-compatible)", "openai", false),
+		text("provider.baseURL", "Base URL", "", "https://api.openai.com/v1", false),
+		text("provider.key", "API key", "", "", true),
+	}
+	rows = append(rows, modelRows("big", "Big tier model (orchestrator, exploiters, thinkers)", "gpt-4o")...)
+	rows = append(rows, toggle("medium.same", "Use the same model as the big tier", "Medium tier model (recon, installer, reporter)", true))
+	rows = append(rows, modelRows("medium", "", "gpt-4o-mini")...)
+	rows = append(rows, toggle("small.same", "Use the same model as the medium tier", "Small tier model (summaries, context compaction)", true))
+	rows = append(rows, modelRows("small", "", "gpt-4o-mini")...)
+	m.setupRows = rows
+	m.setupFocus = 0
+	m.syncSetupFocus()
+}
+
+func (m *model) setupRowByKey(key string) *setupRow {
+	for _, r := range m.setupRows {
+		if r.key == key {
+			return r
+		}
+	}
+	return nil
+}
+
+func (m *model) setupToggleOn(key string) bool {
+	if r := m.setupRowByKey(key); r != nil {
+		return r.on
+	}
+	return false
+}
+
+func (m *model) setupVal(key string) string {
+	if r := m.setupRowByKey(key); r != nil {
+		return strings.TrimSpace(r.ti.Value())
+	}
+	return ""
+}
+
+// setupRowVisible hides a tier's model fields when it reuses another tier's model,
+// and a model's thinking-effort fields when it is not a reasoning model.
+func (m *model) setupRowVisible(r *setupRow) bool {
+	tierField := func(prefix string) bool { return strings.HasPrefix(r.key, prefix+".") && r.key != prefix+".same" }
+	if tierField("medium") && m.setupToggleOn("medium.same") {
+		return false
+	}
+	if tierField("small") && m.setupToggleOn("small.same") {
+		return false
+	}
+	if strings.HasSuffix(r.key, ".efforts") || strings.HasSuffix(r.key, ".defaultEffort") {
+		tier := strings.SplitN(r.key, ".", 2)[0]
+		if !m.setupToggleOn(tier + ".reasoning") {
+			return false
+		}
+	}
+	return true
+}
+
+// moveSetupFocus moves focus to the next/previous visible row.
+func (m *model) moveSetupFocus(d int) {
+	for i := m.setupFocus + d; i >= 0 && i < len(m.setupRows); i += d {
+		if m.setupRowVisible(m.setupRows[i]) {
+			m.setupFocus = i
+			m.syncSetupFocus()
+			return
+		}
+	}
+}
+
+// syncSetupFocus keeps focus on a visible row and focuses that row's text input.
+func (m *model) syncSetupFocus() {
+	if m.setupFocus < 0 || m.setupFocus >= len(m.setupRows) || !m.setupRowVisible(m.setupRows[m.setupFocus]) {
+		m.setupFocus = 0
+		for i, r := range m.setupRows {
+			if m.setupRowVisible(r) {
+				m.setupFocus = i
+				break
+			}
+		}
+	}
+	for _, r := range m.setupRows {
+		r.ti.Blur()
+	}
+	if r := m.setupRows[m.setupFocus]; !r.toggle {
+		r.ti.Focus()
+	}
+}
+
+// submitSetupForm validates the form, writes the provider and its models to the
+// user models.yml, saves the API key, assigns the three tiers, and advances.
+func (m *model) submitSetupForm() {
+	name := m.setupVal("provider.name")
+	if name == "" || strings.ContainsAny(name, "/ \t") {
+		m.wizErr = "provider name is required and may not contain spaces or '/'"
+		return
+	}
+	baseURL := m.setupVal("provider.baseURL")
+	if baseURL == "" {
+		m.wizErr = "base URL is required"
+		return
+	}
+
+	// Resolve each tier to a model config, honouring the "same as" reuse toggles.
+	models := map[string]config.ModelDef{}
+	var order []string
+	tierModel := map[string]string{}
+	resolve := func(tier string) error {
+		src := tier
+		if tier == "medium" && m.setupToggleOn("medium.same") {
+			src = "big"
+		}
+		if tier == "small" && m.setupToggleOn("small.same") {
+			src = "medium"
+			if m.setupToggleOn("medium.same") {
+				src = "big"
+			}
+		}
+		if src != tier { // reuse the already-resolved source tier's model
+			tierModel[tier] = tierModel[src]
+			return nil
+		}
+		id := m.setupVal(tier + ".id")
+		if id == "" {
+			return fmt.Errorf("%s tier model id is required", tier)
+		}
+		ctxTok, err := setupInt(m.setupVal(tier + ".context"))
+		if err != nil {
+			return fmt.Errorf("%s context window must be a whole number", tier)
+		}
+		maxTok, err := setupInt(m.setupVal(tier + ".maxTokens"))
+		if err != nil {
+			return fmt.Errorf("%s max output tokens must be a whole number", tier)
+		}
+		prices := map[string]float64{}
+		for _, f := range []string{"in", "out", "cacheRead", "cacheWrite"} {
+			v, perr := setupFloat(m.setupVal(tier + "." + f))
+			if perr != nil {
+				return fmt.Errorf("%s prices must be non-negative numbers", tier)
+			}
+			prices[f] = v
+		}
+		md := config.ModelDef{ID: id, Name: id, ContextWindow: ctxTok, MaxTokens: maxTok}
+		if m.setupToggleOn(tier + ".reasoning") {
+			md.Reasoning = true
+			var efforts []string
+			for _, e := range strings.Split(m.setupVal(tier+".efforts"), ",") {
+				if e = strings.TrimSpace(e); e != "" {
+					efforts = append(efforts, e)
+				}
+			}
+			if len(efforts) == 0 {
+				return fmt.Errorf("%s is a reasoning model but has no thinking efforts", tier)
+			}
+			md.Thinking = config.ThinkingSpec{Mode: "effort", Efforts: efforts, DefaultLevel: m.setupVal(tier + ".defaultEffort")}
+			md.Compat = config.Compat{ThinkingFormat: "openai"}
+		}
+		md.Cost = config.Cost{Input: prices["in"], Output: prices["out"], CacheRead: prices["cacheRead"], CacheWrite: prices["cacheWrite"]}
+		if _, seen := models[id]; !seen {
+			models[id] = md
+			order = append(order, id)
+		}
+		tierModel[tier] = id
+		return nil
+	}
+	for _, tier := range tierNames {
+		if err := resolve(tier); err != nil {
+			m.wizErr = err.Error()
+			return
+		}
+	}
+
+	modelList := make([]config.ModelDef, 0, len(order))
+	for _, id := range order {
+		modelList = append(modelList, models[id])
+	}
+	if err := m.store.AddProvider(name, baseURL, "secret:"+name, modelList); err != nil {
+		m.wizErr = "save provider: " + err.Error()
+		return
+	}
+	if key := m.setupVal("provider.key"); key != "" {
+		if err := m.store.SaveSecret(name, key); err != nil {
+			m.wizErr = "save key: " + err.Error()
+			return
+		}
+	}
+	for _, tier := range tierNames {
+		if err := m.store.SaveModelRole(tier, name+"/"+tierModel[tier]); err != nil {
+			m.wizErr = "save model: " + err.Error()
+			return
+		}
+	}
+	m.wizErr = ""
+	m.buildCatalog()
+	m.gotoKeyOrStart() // prompts for the key here if it was left blank
+}
+
+// setupInt parses a non-negative whole number; blank is 0.
+func setupInt(s string) (int, error) {
+	if s == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("invalid")
+	}
+	return n, nil
+}
+
+// setupFloat parses a non-negative number; blank is 0.
+func setupFloat(s string) (float64, error) {
+	if s == "" {
+		return 0, nil
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil || v < 0 {
+		return 0, fmt.Errorf("invalid")
+	}
+	return v, nil
+}
+
+// setupBodyView renders the provider+models form, a window of its visible rows
+// around the focused one.
+func (m *model) setupBodyView() string {
+	var vis []*setupRow
+	focusPos := 0
+	for _, r := range m.setupRows {
+		if m.setupRowVisible(r) {
+			if r == m.setupRows[m.setupFocus] {
+				focusPos = len(vis)
+			}
+			vis = append(vis, r)
+		}
+	}
+	win := 14
+	if m.h > 0 {
+		win = clampInt(m.h-12, 6, 26)
+	}
+	start := 0
+	if len(vis) > win {
+		start = focusPos - win/2
+		if start < 0 {
+			start = 0
+		}
+		if start+win > len(vis) {
+			start = len(vis) - win
+		}
+	}
+	end := start + win
+	if end > len(vis) {
+		end = len(vis)
+	}
+	var b strings.Builder
+	if start > 0 {
+		b.WriteString(styleMuted.Render("    ↑ more above") + "\n")
+	}
+	for i := start; i < end; i++ {
+		r := vis[i]
+		if r.header != "" {
+			b.WriteString("  " + styleAccent.Render(r.header) + "\n")
+		}
+		marker := "    "
+		if r == m.setupRows[m.setupFocus] {
+			marker = styleAccent.Render("  ▸ ")
+		}
+		if r.toggle {
+			box := "[ ]"
+			if r.on {
+				box = styleAccent.Render("[x]")
+			}
+			b.WriteString(marker + box + " " + r.label + "\n")
+		} else {
+			b.WriteString(marker + r.label + "\n")
+			b.WriteString("      " + r.ti.View() + "\n")
+		}
+	}
+	if end < len(vis) {
+		b.WriteString(styleMuted.Render("    ↓ more below") + "\n")
+	}
+	b.WriteString("\n    " + styleMuted.Render("↑/↓ or Tab move · ←/→ or Space toggle · type to edit · Enter saves & continues"))
+	return b.String()
+}
+
 // engNameFromPath derives an engagement name from an import path.
 func engNameFromPath(p string) string {
 	base := filepath.Base(strings.TrimRight(p, `/\`))
@@ -1057,9 +1420,7 @@ func (m *model) startEngagement() (tea.Model, tea.Cmd) {
 			m.direct = false
 			m.buildCatalog()
 			if !m.store.ModelsConfigured() {
-				m.seedRoleSel()
-				m.roleFocus = 0
-				m.step = wModels
+				m.gotoModelSetup()
 			} else {
 				m.gotoKeyOrStart()
 			}
@@ -2577,6 +2938,9 @@ func (m *model) viewWizard() string {
 	}
 
 	step(m.step == wMode, "1. Mode", radio(m.modeSel, "Pentester", "Exploiter"))
+	if m.step == wSetup {
+		step(true, "Models — set up your provider (first-run setup)", m.setupBodyView())
+	}
 	if m.step == wModels {
 		step(true, "Models — pick one per tier (first-run setup)", m.modelsBodyView())
 	}

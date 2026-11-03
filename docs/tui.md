@@ -15,11 +15,16 @@ The wizard asks for the engagement settings in order; steps that do not apply ar
 skipped. Press Enter to advance.
 
 1. **Mode**: pentester or exploiter.
-2. **Models**: pick a model for `big`, `medium`, and `small` from the providers in
-   `models.yml` (up/down to choose a tier, left/right to change its model). The
-   choices are saved and this step is skipped on later runs.
-3. **API key**: shown for any provider your chosen models use that has no key yet.
-   Saved to `secrets.yml`.
+2. **Models**: oline ships with no provider, so on the first run this is a form that
+   defines one: the provider name, base URL, and API key, plus a model for each tier
+   (`big`, `medium`, `small`) with its id, context window, max tokens, whether it is
+   a reasoning model, and its prices. The fields are prefilled with an OpenAI
+   example; the medium and small tiers can reuse the tier above. Your choices are
+   saved, so later runs skip this step (or, when a provider already exists but the
+   tiers are unset, show a short picker instead). Up/down or Tab move between fields,
+   left/right or Space toggle, Enter saves.
+3. **API key**: shown only if a chosen model's provider still has no key (for
+   example you left the key blank). Saved to `secrets.yml`.
 4. **Start**: a new engagement, or resume a previous one.
 5. **Environment**: pick a sandbox. The wizard lists WSL distros and QEMU images
    and offers a "create new" option. See [sandbox.md](sandbox.md).

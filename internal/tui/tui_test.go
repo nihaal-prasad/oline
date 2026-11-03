@@ -47,21 +47,57 @@ func enter() tea.KeyMsg       { return tea.KeyMsg{Type: tea.KeyEnter} }
 
 func down() tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyDown} }
 
+// fireworksProvider is a provider fixture for tests (oline ships none by default).
+func fireworksProvider() config.Provider {
+	mk := func(id, name string, ctx, max int, def string, in, out, cr, cw float64) config.ModelDef {
+		return config.ModelDef{
+			ID: id, Name: name, ContextWindow: ctx, MaxTokens: max, Reasoning: true,
+			Thinking: config.ThinkingSpec{Mode: "effort", Efforts: []string{"low", "medium", "high"}, DefaultLevel: def},
+			Compat:   config.Compat{ThinkingFormat: "openai"},
+			Cost:     config.Cost{Input: in, Output: out, CacheRead: cr, CacheWrite: cw},
+		}
+	}
+	return config.Provider{
+		BaseURL: "https://api.fireworks.ai/inference/v1", API: "openai", APIKeyRef: "env:FIREWORKS_API_KEY",
+		Models: []config.ModelDef{
+			mk("accounts/fireworks/models/deepseek-v4p1-flash", "DeepSeek V4.1 Flash", 163840, 32768, "low", 0.30, 1.2, 0.006, 1.2),
+			mk("accounts/fireworks/models/glm-5p3-flash", "GLM 5.3 Flash", 131072, 32768, "medium", 0.15, 0.50, 0.03, 0.15),
+			mk("accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b", "Nemotron Lightning 3.5 30B A3B", 131072, 32768, "low", 0.05, 0.20, 0.01, 0.05),
+		},
+	}
+}
+
+// withFireworks defines the fireworks provider fixture in the store (in-memory).
+func withFireworks(s *config.Store) { s.DefineProvider("fireworks", fireworksProvider()) }
+
+// completeSetup drives the first-run provider+models form to a valid submission:
+// the prefilled OpenAI defaults plus the given API key (blank to let the key step
+// appear). It asserts the form is on screen and returns the model after submit.
+func completeSetup(t *testing.T, tm tea.Model, apiKey string) tea.Model {
+	t.Helper()
+	m := tm.(*model)
+	if m.step != wSetup {
+		t.Fatalf("expected wSetup, got %v", m.step)
+	}
+	if r := m.setupRowByKey("provider.key"); r != nil {
+		r.ti.SetValue(apiKey)
+	}
+	tm, _ = tm.Update(enter()) // submit the prefilled form
+	return tm
+}
+
 func TestWizardNewFlow(t *testing.T) {
 	t.Setenv("FIREWORKS_API_KEY", "test-key") // key present -> no key step
 	m, _ := tempHomeModel(t)                  // isolated empty home: models unconfigured
 	var tm tea.Model = m
 	tm, _ = tm.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 
-	// Mode -> Models (first run, no models configured yet)
+	// Mode -> Setup form (first run, no provider configured yet)
 	tm, _ = tm.Update(enter())
-	if tm.(*model).step != wModels {
-		t.Fatalf("after mode: step=%v, want wModels", tm.(*model).step)
-	}
-	// Models (accept the default picks) -> Start (key present via env, so no key step)
-	tm, _ = tm.Update(enter())
+	// Fill the provider+models form (prefilled defaults + a key) -> Start
+	tm = completeSetup(t, tm, "test-key")
 	if tm.(*model).step != wStart {
-		t.Fatalf("after models: step=%v, want wStart", tm.(*model).step)
+		t.Fatalf("after setup: step=%v, want wStart", tm.(*model).step)
 	}
 	// Start=new -> Env (scan cmd)
 	tm, cmd := tm.Update(enter())
@@ -100,8 +136,8 @@ func TestWizardResumeImportAndVPN(t *testing.T) {
 	var tm tea.Model = m
 	tm, _ = tm.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 
-	tm, _ = tm.Update(enter())    // mode -> models (first run)
-	tm, _ = tm.Update(enter())    // models (default picks) -> start (key present)
+	tm, _ = tm.Update(enter()) // mode -> setup form (first run)
+	tm = completeSetup(t, tm, "test-key")
 	tm, _ = tm.Update(down())     // start: select "resume"
 	tm, cmd := tm.Update(enter()) // -> env (scan cmd)
 	if tm.(*model).step != wEnv || !tm.(*model).resume || cmd == nil {

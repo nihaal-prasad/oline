@@ -111,21 +111,23 @@ agents: {}                   # per-agent overrides
 
 ## models.yml and providers
 
-`models.yml` defines the OpenAI-compatible providers and their models:
+oline ships with no provider. The first-run wizard writes the one you configure
+here; you can also add or edit providers directly. `models.yml` defines the
+OpenAI-compatible providers and their models:
 
 ```yaml
 providers:
-  fireworks:
-    baseUrl: https://api.fireworks.ai/inference/v1
+  openai:                                 # any name; it prefixes the model selector
+    baseUrl: https://api.openai.com/v1
     api: openai
-    apiKeyRef: env:FIREWORKS_API_KEY
+    apiKeyRef: secret:openai              # or env:NAME to read a key from the environment
     models:
-      - id: accounts/fireworks/models/deepseek-v4p1-flash
-        name: DeepSeek v4.1 Flash
-        contextWindow: 163840
+      - id: gpt-4o
+        name: GPT-4o
+        contextWindow: 128000
         maxTokens: 16384
-        reasoning: true
-        thinking: { mode: ..., efforts: [...], defaultLevel: ... }
+        reasoning: false
+        thinking: { mode: ..., efforts: [...], defaultLevel: ... }   # reasoning models only
         cost: { input: 0.0, output: 0.0, cacheRead: 0.0, cacheWrite: 0.0 }
 ```
 
@@ -149,9 +151,9 @@ Keys are never written to `config.yml` or `models.yml`. Each provider's
 - `env:NAME` reads the key from that environment variable.
 - `secret:<provider>` reads it from `<root>/config/secrets.yml`.
 
-A key saved in `secrets.yml` takes precedence. The in-app editor writes keys only
-to `secrets.yml` (mode 0600). That file and the user `config.yml` / `models.yml`
-are git-ignored.
+A key saved in `secrets.yml` takes precedence. The setup wizard and the in-app
+editor write keys only to `secrets.yml` (mode 0600). That file and the user
+`config.yml` / `models.yml` are git-ignored.
 
 ## The in-app editor
 

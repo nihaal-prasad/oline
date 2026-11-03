@@ -531,10 +531,16 @@ func (s *Store) EnsureModel(provider, modelID string) (added bool, err error) {
 }
 
 // writeUserProviderModels rewrites one provider's full model list in the user
-// models.yml override, preserving the rest of that file and the provider's other
-// keys. The override layer replaces a provider's model list wholesale, so writing
-// the full list is what keeps every model intact.
+// models.yml override.
 func (s *Store) writeUserProviderModels(provider string, models []ModelDef) error {
+	return s.writeUserProviderEntry(provider, map[string]any{"models": models})
+}
+
+// writeUserProviderEntry merges fields into one provider's entry in the user
+// models.yml override, preserving the rest of that file and the provider's other
+// keys. The override layer replaces a provider's model list wholesale, so a models
+// field must carry the full list.
+func (s *Store) writeUserProviderEntry(provider string, fields map[string]any) error {
 	userPath := filepath.Join(s.userDir, "models.yml")
 	var userRoot map[string]any
 	if data, err := os.ReadFile(userPath); err == nil {
@@ -551,7 +557,9 @@ func (s *Store) writeUserProviderModels(provider string, models []ModelDef) erro
 	if entry == nil {
 		entry = map[string]any{}
 	}
-	entry["models"] = models
+	for k, v := range fields {
+		entry[k] = v
+	}
 	provMap[provider] = entry
 	userRoot["providers"] = provMap
 
@@ -563,6 +571,40 @@ func (s *Store) writeUserProviderModels(provider string, models []ModelDef) erro
 		return err
 	}
 	return os.WriteFile(userPath, data, 0o600)
+}
+
+// DefineProvider sets a provider in the in-memory store only (no disk write). Used
+// by the setup wizard before it persists, and by tests.
+func (s *Store) DefineProvider(name string, p Provider) {
+	if s.eff.Providers == nil {
+		s.eff.Providers = map[string]Provider{}
+	}
+	s.eff.Providers[name] = p
+}
+
+// AddProvider defines a new OpenAI-compatible provider (base URL, api-key
+// reference, and its models) in the user models.yml and the in-memory store. This
+// is how a provider is configured: oline ships none by default. The name is the
+// selector prefix, so it must be non-empty with no space or '/'.
+func (s *Store) AddProvider(name, baseURL, apiKeyRef string, models []ModelDef) error {
+	name = strings.TrimSpace(name)
+	if name == "" || strings.ContainsAny(name, "/ \t") {
+		return fmt.Errorf("config: provider name must be non-empty with no spaces or '/'")
+	}
+	p := s.eff.Providers[name]
+	p.BaseURL = strings.TrimSpace(baseURL)
+	if strings.TrimSpace(p.API) == "" {
+		p.API = "openai"
+	}
+	p.APIKeyRef = strings.TrimSpace(apiKeyRef)
+	p.Models = models
+	s.DefineProvider(name, p)
+	return s.writeUserProviderEntry(name, map[string]any{
+		"baseUrl":   p.BaseURL,
+		"api":       p.API,
+		"apiKeyRef": p.APIKeyRef,
+		"models":    p.Models,
+	})
 }
 
 // SaveModeFile writes a user override file under ~/oline/config/<mode>/<rel>

@@ -154,6 +154,7 @@ func findItem(m *model, kind, name string) int {
 
 func TestEditorSaveProvider(t *testing.T) {
 	m, home := tempHomeModel(t)
+	withFireworks(m.store)
 	m.openEditor()
 	i := findItem(m, "provider", "fireworks")
 	if i < 0 {
@@ -194,6 +195,7 @@ func TestEditorSaveProvider(t *testing.T) {
 // without losing the model's other fields or the provider's other models.
 func TestEditorRoleCost(t *testing.T) {
 	m, home := tempHomeModel(t)
+	withFireworks(m.store)
 	const id = "accounts/fireworks/models/deepseek-v4p1-flash"
 	m.store.SetModelRoles("fireworks/"+id, "fireworks/accounts/fireworks/models/glm-5p3-flash", "fireworks/accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b")
 
@@ -247,6 +249,7 @@ func TestEditorRoleCost(t *testing.T) {
 func TestEditorRoleNewModelAutoAdded(t *testing.T) {
 	t.Setenv("FIREWORKS_API_KEY", "test-key") // so ValidateModels can resolve the key
 	m, _ := tempHomeModel(t)
+	withFireworks(m.store)
 	const glm = "fireworks/accounts/fireworks/models/glm-5p3-flash"
 	m.store.SetModelRoles(glm, glm, glm) // start valid
 
@@ -278,6 +281,7 @@ func TestEditorRoleNewModelAutoAdded(t *testing.T) {
 // switches the model and re-seeds the price fields from the new model instead.
 func TestEditorRoleModelChangeReseedsPrices(t *testing.T) {
 	m, _ := tempHomeModel(t)
+	withFireworks(m.store)
 	const deepseek = "accounts/fireworks/models/deepseek-v4p1-flash"
 	const glm = "accounts/fireworks/models/glm-5p3-flash"
 	m.store.SetModelRoles("fireworks/"+deepseek, "fireworks/"+glm, "fireworks/"+glm)
@@ -305,19 +309,15 @@ func TestEditorRoleModelChangeReseedsPrices(t *testing.T) {
 }
 
 func TestWizardApiKeyStep(t *testing.T) {
-	t.Setenv("FIREWORKS_API_KEY", "") // force "no key" so the setup step appears
 	m, home := tempHomeModel(t)
 	var tm tea.Model = m
 	tm, _ = tm.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
-	// Mode -> models step (no models configured by default).
+	// Mode -> the provider+models setup form (no provider configured).
 	tm, _ = tm.Update(enter())
-	if tm.(*model).step != wModels {
-		t.Fatalf("expected wModels step first-run, got %v", tm.(*model).step)
-	}
-	// Confirm the default tier picks -> provider still needs a key -> wKey.
-	tm, _ = tm.Update(enter())
+	// Submit the prefilled form with the API key left BLANK -> the key step appears.
+	tm = completeSetup(t, tm, "")
 	if tm.(*model).step != wKey {
-		t.Fatalf("expected wKey step after choosing models with no API key, got %v", tm.(*model).step)
+		t.Fatalf("expected wKey step after setup with no API key, got %v", tm.(*model).step)
 	}
 	// enter a key -> saved and advance to Start
 	tm, _ = tm.Update(key("fw_setup_key_123"))
@@ -325,7 +325,7 @@ func TestWizardApiKeyStep(t *testing.T) {
 	if tm.(*model).step != wStart {
 		t.Fatalf("after key entry: step=%v, want wStart", tm.(*model).step)
 	}
-	got, err := tm.(*model).store.ResolveKey("fireworks")
+	got, err := tm.(*model).store.ResolveKey("openai") // the default provider name in the form
 	if err != nil || got != "fw_setup_key_123" {
 		t.Errorf("ResolveKey after setup = %q, %v", got, err)
 	}

@@ -16,6 +16,7 @@ import (
 // reaches it (setting costCapHit) and does not re-trip on further spend.
 func TestCostCapFiresOnce(t *testing.T) {
 	m := testModel(t)
+	withFireworks(m.store)
 	m.costCap = 0.0001 // tiny cap so a single Usage crosses it
 	const id = "accounts/fireworks/models/deepseek-v4p1-flash"
 
