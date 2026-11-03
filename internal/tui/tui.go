@@ -1,0 +1,3157 @@
+package tui
+
+import (
+	"context"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+
+	"github.com/nihaal-prasad/oline/assets"
+	"github.com/nihaal-prasad/oline/internal/agents"
+	"github.com/nihaal-prasad/oline/internal/config"
+	"github.com/nihaal-prasad/oline/internal/core"
+	"github.com/nihaal-prasad/oline/internal/engine"
+	"github.com/nihaal-prasad/oline/internal/event"
+	"github.com/nihaal-prasad/oline/internal/sandbox"
+	"github.com/nihaal-prasad/oline/internal/scope"
+	"github.com/nihaal-prasad/oline/internal/wire"
+)
+
+// ---- messages ------------------------------------------------------------
+
+// engineBatchMsg carries a batch of engine events drained in one go, so the TUI
+// renders ONCE per batch instead of once per event (which, under a token burst
+// from several agents, let the event channel fill and drop events).
+type engineBatchMsg struct{ evs []event.Event }
+type scanDoneMsg struct {
+	cands []sandbox.Candidate
+	err   error
+}
+type resultMsg struct{ res engine.Result }
+type startMsg struct{}
+
+// tickMsg drives the once-a-second re-render that keeps the roster's time-left
+// countdowns current.
+type tickMsg struct{}
+
+// tickCmd drives the once-a-second roster re-render. It uses tea.Every, which
+// aligns to the wall clock (it fires at the next whole-second boundary), so the
+// cadence stays steady instead of drifting by the per-tick handling time the way
+// tea.Tick (which measures from when the command runs) would.
+func tickCmd() tea.Cmd {
+	return tea.Every(time.Second, func(time.Time) tea.Msg { return tickMsg{} })
+}
+
+type engListMsg struct {
+	names []string
+	err   error
+}
+
+func listEngagementsCmd(distro string) tea.Cmd {
+	return func() tea.Msg {
+		names, err := sandbox.ListWSLEngagements(context.Background(), distro)
+		return engListMsg{names: names, err: err}
+	}
+}
+
+func listen(ch chan event.Event) tea.Cmd {
+	return func() tea.Msg {
+		ev, ok := <-ch
+		if !ok {
+			return nil
+		}
+		// Block for the first event, then greedily drain whatever else is already
+		// queued (bounded) so a burst is applied + rendered in one pass.
+		batch := []event.Event{ev}
+		for len(batch) < 512 {
+			select {
+			case e, ok := <-ch:
+				if !ok {
+					return engineBatchMsg{batch}
+				}
+				batch = append(batch, e)
+			default:
+				return engineBatchMsg{batch}
+			}
+		}
+		return engineBatchMsg{batch}
+	}
+}
+
+func waitResult(ch chan engine.Result) tea.Cmd {
+	return func() tea.Msg { return resultMsg{<-ch} }
+}
+
+func scanEnvsCmd() tea.Cmd {
+	return func() tea.Msg {
+		var all []sandbox.Candidate
+		cs, err := sandbox.NewWSL().Scan(context.Background())
+		all = append(all, cs...)
+		qs, qerr := sandbox.NewQEMU().Scan(context.Background())
+		all = append(all, qs...)
+		// If QEMU is installed but no Debian base is present yet, offer a synthetic
+		// entry that downloads + boots one on first use.
+		if sandbox.QEMUAvailable() {
+			hasDebian := false
+			for _, c := range all {
+				if c.Backend == sandbox.BackendQEMU && c.ID == sandbox.QEMUDebianID {
+					hasDebian = true
+					break
+				}
+			}
+			if !hasDebian {
+				all = append(all, sandbox.Candidate{
+					ID: sandbox.QEMUDebianID, Name: "Debian 13 VM (download on first use)",
+					Backend: sandbox.BackendQEMU, Managed: true, NeedsCreate: true,
+				})
+			}
+		}
+		if err == nil {
+			err = qerr // surface a QEMU scan error when the WSL scan was fine
+		}
+		return scanDoneMsg{cands: all, err: err}
+	}
+}
+
+// sandboxReadyMsg reports the result of preparing a sandbox (open/create + egress)
+// off the UI goroutine, so a slow QEMU boot/download doesn't freeze the TUI.
+type sandboxReadyMsg struct {
+	h   sandbox.Handle
+	err error
+}
+
+// prepareSandboxCmd opens (or creates) the chosen environment and sets up
+// per-agent egress, all off the UI goroutine.
+func prepareSandboxCmd(cand sandbox.Candidate, scopeStr string, allowIPv6 bool) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		var h sandbox.Handle
+		var err error
+		switch cand.Backend {
+		case sandbox.BackendQEMU:
+			qs := sandbox.NewQEMU()
+			if cand.NeedsCreate {
+				h, err = qs.Create(ctx, sandbox.Spec{Backend: sandbox.BackendQEMU})
+			} else {
+				h, err = qs.Open(ctx, cand.ID)
+			}
+		default:
+			h, err = sandbox.NewWSL().Open(ctx, cand.ID)
+		}
+		if err != nil {
+			return sandboxReadyMsg{err: fmt.Errorf("open %s: %w", cand.ID, err)}
+		}
+		pol := scope.Parse(scopeStr)
+		if err := h.SetupEgress(ctx, sandbox.Scope{Targets: append(pol.CIDRs(), pol.Domains()...), AllowIPv6: allowIPv6}); err != nil {
+			// Don't strand the sandbox we just opened/booted (a QEMU VM may be
+			// running) when egress fails and we abort back to the wizard.
+			if sd, ok := h.(sandbox.Shutdowner); ok {
+				_ = sd.Shutdown(context.Background())
+			}
+			return sandboxReadyMsg{err: fmt.Errorf("egress hardening failed (%v) — refusing to start without per-agent network isolation", err)}
+		}
+		return sandboxReadyMsg{h: h}
+	}
+}
+
+// ---- model ---------------------------------------------------------------
+
+// catalogModel is one selectable provider/model-id in the first-run model picker.
+type catalogModel struct {
+	sel   string // "provider/model-id"
+	label string // human label for display
+}
+
+// tierNames are the three model tiers in wModels order.
+var tierNames = [3]string{"big", "medium", "small"}
+
+type wizStep int
+
+const (
+	wMode   wizStep = iota
+	wModels         // first run: pick a model for each tier (big/medium/small)
+	wKey            // shown only if a chosen model's provider has no API key yet
+	wStart
+	wEnv
+	wResume
+	wImport
+	wHistory // resume only: load the prior conversation, or start from a clean slate
+	wScope
+	wGoal
+	wVPN
+	wVPNInput
+	wAuto
+)
+
+type model struct {
+	mode   config.Mode
+	store  *config.Store
+	roster *agents.Roster
+
+	w, h int
+
+	// wizard
+	running  bool
+	step     wizStep
+	modeSel  int
+	startSel int // 0 = new engagement, 1 = resume previous
+	resume   bool
+	histSel  int  // wHistory: 0 = load previous conversation, 1 = clean slate
+	loadHist bool // resume with the saved conversation history (vs a clean slate)
+	autoSel  int
+	scopeIn  textinput.Model
+	goalIn   textinput.Model
+	cands    []sandbox.Candidate
+	envSel   int
+	scanned  bool
+	wizErr   string
+
+	// first-run model configuration (wModels step): the user must pick a model for
+	// each of the three tiers from the provider catalog before an engagement can run.
+	catalog   []catalogModel // available provider/model-id choices
+	roleSel   [3]int         // selected catalog index per tier (0=big,1=medium,2=small)
+	roleFocus int            // which tier row the wizard is on
+	keyQueue  []string       // providers still needing an API key (wKey walks this)
+
+	// preparing: a sandbox open/create + egress setup is running off the UI
+	// goroutine (a QEMU first boot can take minutes); prepCand is the chosen env.
+	preparing bool
+	prepCand  sandbox.Candidate
+
+	// resume
+	selDistro   string
+	engagements []string
+	engSel      int // index into engagements, or len(engagements) == "import from host"
+	engagement  string
+	importIn    textinput.Model
+
+	// vpn
+	vpnSel  int
+	vpnMode string // none | running | envfile | hostfile
+	vpnIn   textinput.Model
+
+	// api key (setup)
+	keyProvider string
+	keyIn       textinput.Model
+
+	// engagement
+	sess           *engine.Session
+	router         *engine.Router
+	events         chan event.Event
+	cancel         context.CancelFunc
+	resultCh       chan engine.Result
+	transcripts    map[core.AgentID]*transcript
+	order          []core.AgentID
+	states         map[core.AgentID]core.State
+	awaitingAnswer map[core.AgentID]bool // agents blocked on an `ask`, waiting for a user answer
+	dirty          map[core.AgentID]bool // agents whose pane needs re-rendering after a batch
+
+	// panes: tmux-style split view of agent transcripts. paneRoot/focusPane/zoom
+	// are the ACTIVE window's live state; windows holds every window (tab), with
+	// winIdx the active one. saveWindow/activateWindow swap state in and out.
+	paneRoot     *pane
+	focusPane    *pane
+	zoom         bool
+	windows      []*windowState
+	winIdx       int
+	showThoughts bool
+	showRoster   bool // the whole right-side Options pane (on by default; Ctrl-b ? toggles)
+
+	// shells: user-driven shell panes, keyed by synthetic id (e.g. "shell#1").
+	shellCh     chan shellMsg
+	shells      map[core.AgentID]*shellState
+	shellSeq    int
+	histMu      sync.Mutex    // serializes saveHistory across the UI and ticker goroutines
+	savedLayout []savedWindow // last UI-goroutine snapshot of the window/pane layout (under histMu)
+	savedWinIdx int           // active window index for that snapshot
+	hideLogo    bool          // a Sixel splash already showed the banner; skip the block-art logo
+	quitArmedAt time.Time     // first Ctrl-c; a second within 3s confirms quit
+	log         *englog       // per-engagement host activity log
+
+	budgetInput   bool         // the command line is entering a time budget
+	budgetTarget  core.AgentID // which agent the budget entry applies to
+	totalCost     float64
+	costCap       float64 // engagement spend cap in USD (budget.maxCostUSD); 0 = no cap
+	costCapHit    bool    // the cap was reached and all agents paused (fires once)
+	summaryCost   float64 // cumulative spend of the summarizer (compaction) model
+	summaryCap    float64 // summarizer spend ceiling (budget.maxSummaryCostUSD); 0 = none
+	summaryCapHit bool    // the summarizer ceiling was reached and agents paused (fires once)
+	summary       string  // orchestrator's live state-of-play (set via update_summary)
+	diagram       string  // orchestrator's live ASCII map (set via update_diagram)
+	// diagramW is the Diagram pane's current content width in columns, published for
+	// the engine's update_diagram width check. Written on the TUI goroutine whenever
+	// the diagram pane is laid out, read on an agent goroutine; accessed only via
+	// sync/atomic. 0 = not laid out yet / no diagram pane.
+	diagramW int64
+	mdCache  map[int]*glamour.TermRenderer
+
+	// copy mode: one pane's transcript as plain fullscreen text for clean copying
+	copyMode  bool
+	copyAgent core.AgentID
+	copyVP    viewport.Model
+
+	// layout, computed each render (for mouse hit-testing)
+	rightW             int
+	mainW              int
+	bodyTop            int
+	bodyH              int
+	rosterX            int
+	rosterAgentRows    map[int]core.AgentID // absolute screen Y -> agent, for roster click hit-testing
+	rosterUserPaneRows map[int]core.AgentID // absolute screen Y -> opened shell id (user panes section)
+	rosterScroll       int                  // scroll offset (content lines) of the Options pane
+	rosterFollow       bool                 // on the next render, scroll the Options pane to show the selection
+
+	// mouse drag state for resizing / moving panes
+	dragBoundary *pane // the internal split node whose divider is being dragged (resize)
+	dragPane     *pane // the leaf pressed for a potential move/click
+	dragStartX   int   // press position, to distinguish a click from a drag
+	dragStartY   int
+	dragMoved    bool // whether the cursor moved since the press (=> a drag, not a click)
+
+	input  textinput.Model
+	prefix bool
+	status string
+	envID  string
+	direct bool
+
+	// model/provider editor
+	editorOnly bool // launched directly into the editor (no engagement)
+	editing    bool
+	eItems     []eItem
+	eSel       int
+	// eFocus: -1 = navigating the item list; 0..len(eFields)-1 = editing that
+	// text field; len(eFields) = editing the system-prompt box (when ePrompt != nil).
+	eFocus   int
+	eFields  []textinput.Model
+	ePrompt  *textarea.Model // the resizable system-prompt box (nil when the item has no prompt)
+	ePromptH int             // current prompt-box height in rows (user-resizable)
+	eStatus  string
+}
+
+// configureDirect pre-fills the wizard answers and arms a direct start.
+func (m *model) configureDirect(o Options) {
+	m.scopeIn.SetValue(o.Scope)
+	m.goalIn.SetValue(o.Goal)
+	// Direct start (scripting/CI) is automatic unless -manual is passed. Set it
+	// explicitly so the wizard's manual-by-default doesn't carry into this path.
+	if o.Manual {
+		m.autoSel = 1
+	} else {
+		m.autoSel = 0
+	}
+	m.cands = []sandbox.Candidate{{ID: o.EnvID, Name: o.EnvID, Backend: sandbox.BackendWSL}}
+	m.envSel = 0
+	m.scanned = true
+	m.step = wEnv
+	m.direct = true
+}
+
+func newModel(mode config.Mode, store *config.Store, roster *agents.Roster) *model {
+	si := textinput.New()
+	si.Placeholder = "in-scope only — e.g. 10.0.0.5, 10.0.0.0/24, app.example.com"
+	si.CharLimit = 1024
+	si.Width = 64
+	gi := textinput.New()
+	gi.Placeholder = "goal — e.g. capture the flag at /root/flag.txt; prove RCE"
+	gi.Width = 64
+	ci := textinput.New()
+	ci.Placeholder = "message the focused agent…  (Ctrl-b then a key for commands)"
+	ci.Width = 64
+	ci.Prompt = "" // the running view prepends its own " > "; avoid a double ">"
+	ii := textinput.New()
+	ii.Placeholder = "host path (folder or .tar.gz) OR a path already inside the environment"
+	ii.CharLimit = 1024
+	ii.Width = 64
+	vi := textinput.New()
+	vi.Placeholder = "path to the .ovpn file"
+	vi.CharLimit = 1024
+	vi.Width = 64
+	ki := textinput.New()
+	ki.Placeholder = "paste your API key (stored only in ~/oline/config/secrets.yml)"
+	ki.CharLimit = 512
+	ki.Width = 64
+	ki.EchoMode = textinput.EchoPassword
+
+	m := &model{
+		mode: mode, store: store, roster: roster,
+		step:           wMode,
+		scopeIn:        si,
+		goalIn:         gi,
+		input:          ci,
+		importIn:       ii,
+		vpnIn:          vi,
+		keyIn:          ki,
+		transcripts:    map[core.AgentID]*transcript{},
+		dirty:          map[core.AgentID]bool{},
+		states:         map[core.AgentID]core.State{},
+		awaitingAnswer: map[core.AgentID]bool{},
+		showThoughts:   false, // agent thoughts are hidden by default (Ctrl-b t toggles)
+		showRoster:     true,  // the right-side Options pane shows by default (Ctrl-b ? toggles)
+		autoSel:        1,     // manual mode is selected by default in the wizard (0 = automatic, 1 = manual)
+		mdCache:        map[int]*glamour.TermRenderer{},
+	}
+	if mode == config.ModeExploiter {
+		m.modeSel = 1
+	}
+	return m
+}
+
+func (m *model) Init() tea.Cmd {
+	if m.editorOnly {
+		m.openEditor()
+		return textinput.Blink
+	}
+	if m.direct {
+		return func() tea.Msg { return startMsg{} }
+	}
+	return textinput.Blink
+}
+
+// ---- update --------------------------------------------------------------
+
+func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.w, m.h = msg.Width, msg.Height
+		m.resize()
+		return m, nil
+	case tea.KeyMsg:
+		if msg.String() == "ctrl+c" {
+			// Don't quit on a single Ctrl-c (easy to hit by accident and it would
+			// tear down a live engagement). Require a second Ctrl-c within a few
+			// seconds to confirm.
+			if !m.quitArmedAt.IsZero() && time.Since(m.quitArmedAt) < 3*time.Second {
+				m.shutdown()
+				return m, tea.Quit
+			}
+			m.quitArmedAt = time.Now()
+			m.status = "Press Ctrl-c again to quit (or Ctrl-b q)"
+			return m, nil
+		}
+	case startMsg:
+		return m.startEngagement()
+	}
+	if m.editing {
+		return m.updateEditor(msg)
+	}
+	if m.running {
+		return m.updateRunning(msg)
+	}
+	return m.updateWizard(msg)
+}
+
+func (m *model) resize() {
+	if m.showRoster {
+		// 33 is the narrowest width that fits the widest roster line without wrapping:
+		// an active-agent row is cursor(2) + name(10) + " " + state(≤7) + " mm:ss ctx%"
+		// badge (≤11) = 31 glyphs, +2 for the pane border. Keeping it tight hands the
+		// freed columns to the main panes.
+		m.rightW = 33
+		if m.w < 96 {
+			m.rightW = m.w / 3
+		}
+		if m.rightW < 18 {
+			m.rightW = 18
+		}
+		m.mainW = m.w - m.rightW - 1 // -1 for the gap column between main and roster
+	} else {
+		// Options pane hidden: the main panes take the whole width.
+		m.rightW = 0
+		m.mainW = m.w
+	}
+	m.bodyTop = 1
+	m.bodyH = m.h - 3 // header line + status + input
+	if m.bodyH < 3 {
+		m.bodyH = 3
+	}
+	if m.mainW < 20 {
+		m.mainW = 20
+	}
+	m.rosterX = m.mainW + 1
+	if w := m.w - 4; w > 0 {
+		m.input.Width = w
+	} else {
+		m.input.Width = 1
+	}
+	m.relayout()
+}
+
+// relayout recomputes pane rectangles and refreshes their content.
+func (m *model) relayout() {
+	if m.paneRoot == nil {
+		return
+	}
+	if m.zoom && m.focusPane != nil {
+		computeRects(m.focusPane, 0, m.bodyTop, m.mainW, m.bodyH)
+		m.refreshLeaf(m.focusPane)
+		return
+	}
+	computeRects(m.paneRoot, 0, m.bodyTop, m.mainW, m.bodyH)
+	for _, l := range leaves(m.paneRoot) {
+		m.refreshLeaf(l)
+	}
+}
+
+// layoutRectsOnly recomputes pane rectangles and resizes each viewport WITHOUT
+// re-rendering its (markdown) content. It is used during a live resize drag so a
+// burst of mouse-motion events only moves the borders — the expensive markdown
+// reflow is deferred to the drag's release (a single relayout). Content keeps its
+// previous wrapping until then, which is imperceptible mid-drag.
+func (m *model) layoutRectsOnly() {
+	if m.paneRoot == nil {
+		return
+	}
+	root := m.paneRoot
+	if m.zoom && m.focusPane != nil {
+		root = m.focusPane
+	}
+	computeRects(root, 0, m.bodyTop, m.mainW, m.bodyH)
+	for _, l := range leaves(root) {
+		vpW, vpH := l.w-2, l.h-3
+		if vpW < 1 {
+			vpW = 1
+		}
+		if vpH < 1 {
+			vpH = 1
+		}
+		l.vp.Width, l.vp.Height = vpW, vpH
+	}
+}
+
+// refreshLeaf sizes a pane's viewport and re-renders its agent's transcript.
+func (m *model) refreshLeaf(p *pane) {
+	vpW := p.w - 2
+	vpH := p.h - 3 // border (2) + header (1)
+	if vpW < 1 {
+		vpW = 1
+	}
+	if vpH < 1 {
+		vpH = 1
+	}
+	p.vp.Width, p.vp.Height = vpW, vpH
+	content := ""
+	switch {
+	case p.summary:
+		content = m.summaryContent(vpW)
+	case p.diagram:
+		// Publish the pane's live content width so update_diagram can reject a map
+		// that would be clipped; a resize re-lays-out the pane and updates it here.
+		atomic.StoreInt64(&m.diagramW, int64(vpW))
+		content = m.diagramContent(vpW)
+	default:
+		if t := m.transcripts[p.agent]; t != nil {
+			// Trim the trailing newline the transcript appends after the last segment:
+			// otherwise the viewport counts an extra blank line and GotoBottom shifts the
+			// real last line partly out of view (looks like the bottom is cut off).
+			content = strings.TrimRight(t.render(vpW, m.showThoughts, m.getMD(vpW)), "\n")
+		}
+	}
+	// The info panes (summary, diagram) pin to the TOP: the orchestrator rewrites
+	// them in place, so the top is where to start reading. Stay pinned only while the
+	// user is already at the top, so scrolling down to read the rest isn't yanked
+	// back. Agent/shell panes keep their follow-the-bottom behavior.
+	if p.summary || p.diagram {
+		atTop := p.vp.AtTop()
+		p.vp.SetContent(content)
+		if atTop {
+			p.vp.GotoTop()
+		}
+		return
+	}
+	atBottom := p.vp.AtBottom()
+	p.vp.SetContent(content)
+	if atBottom {
+		p.vp.GotoBottom()
+	}
+}
+
+// refreshFor re-renders every pane currently showing an agent.
+func (m *model) refreshFor(id core.AgentID) {
+	if m.paneRoot == nil {
+		return
+	}
+	for _, l := range leaves(m.paneRoot) {
+		if l.agent == id {
+			m.refreshLeaf(l)
+		}
+	}
+}
+
+// getMD returns a markdown renderer sized for width w (cached). The cache is keyed
+// by width; only a handful of distinct widths occur in practice, but bound it so a
+// pathological resize storm can't grow it without limit.
+func (m *model) getMD(w int) *glamour.TermRenderer {
+	if r, ok := m.mdCache[w]; ok {
+		return r
+	}
+	const maxMDRenderers = 24
+	if len(m.mdCache) >= maxMDRenderers {
+		m.mdCache = map[int]*glamour.TermRenderer{} // drop the lot; they rebuild on demand
+	}
+	r := newMarkdownRenderer(w)
+	m.mdCache[w] = r
+	return r
+}
+
+func (m *model) focusedAgent() core.AgentID {
+	if m.focusPane != nil {
+		return m.focusPane.agent
+	}
+	return core.Main
+}
+
+// focusInfoPane reports whether the focused pane is a read-only info pane (Summary
+// or Diagram) rather than an agent or shell pane.
+func (m *model) focusInfoPane() bool {
+	return m.focusPane != nil && (m.focusPane.summary || m.focusPane.diagram)
+}
+
+// ---- wizard --------------------------------------------------------------
+
+func (m *model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case scanDoneMsg:
+		m.scanned = true
+		m.cands = managedFirst(msg.cands)
+		if m.envSel >= len(m.cands) {
+			m.envSel = 0 // a rescan may return fewer candidates than were listed before
+		}
+		if msg.err != nil {
+			m.wizErr = "scan error: " + msg.err.Error()
+		}
+		return m, nil
+	case engListMsg:
+		m.engagements = msg.names
+		m.engSel = 0
+		if msg.err != nil {
+			m.wizErr = "list engagements: " + msg.err.Error()
+		}
+		return m, nil
+	case sandboxReadyMsg:
+		m.preparing = false
+		if msg.err != nil {
+			m.wizErr = msg.err.Error()
+			return m, nil
+		}
+		return m.beginSession(msg.h)
+	case tea.KeyMsg:
+		if m.preparing {
+			return m, nil // ignore input while the sandbox is being prepared
+		}
+		return m.wizardKey(msg)
+	}
+	return m, nil
+}
+
+func (m *model) wizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	k := msg.String()
+	switch m.step {
+	case wMode:
+		switch k {
+		case "up", "k":
+			m.modeSel = 0
+		case "down", "j":
+			m.modeSel = 1
+		case "enter":
+			if m.modeSel == 1 {
+				m.mode = config.ModeExploiter
+			} else {
+				m.mode = config.ModePentester
+			}
+			m.reloadForMode()
+			m.buildCatalog()
+			if !m.store.ModelsConfigured() {
+				m.seedRoleSel()
+				m.roleFocus = 0
+				m.step = wModels
+			} else {
+				m.gotoKeyOrStart()
+			}
+		}
+		return m, nil
+
+	case wModels:
+		switch k {
+		case "up", "k":
+			if m.roleFocus > 0 {
+				m.roleFocus--
+			}
+		case "down", "j":
+			if m.roleFocus < 2 {
+				m.roleFocus++
+			}
+		case "left", "h":
+			if len(m.catalog) > 0 {
+				m.roleSel[m.roleFocus] = (m.roleSel[m.roleFocus] - 1 + len(m.catalog)) % len(m.catalog)
+			}
+		case "right", "l", " ":
+			if len(m.catalog) > 0 {
+				m.roleSel[m.roleFocus] = (m.roleSel[m.roleFocus] + 1) % len(m.catalog)
+			}
+		case "enter":
+			if len(m.catalog) == 0 {
+				m.wizErr = "no models available in models.yml — add a provider/model there first"
+				return m, nil
+			}
+			for i, tier := range tierNames {
+				if err := m.store.SaveModelRole(tier, m.catalog[m.roleSel[i]].sel); err != nil {
+					m.wizErr = "save model: " + err.Error()
+					return m, nil
+				}
+			}
+			m.wizErr = ""
+			m.gotoKeyOrStart()
+		}
+		return m, nil
+
+	case wKey:
+		if k == "enter" {
+			if v := strings.TrimSpace(m.keyIn.Value()); v != "" {
+				if err := m.store.SaveSecret(m.keyProvider, v); err != nil {
+					m.wizErr = "save key: " + err.Error()
+					return m, nil
+				}
+				m.wizErr = ""
+			}
+			m.keyIn.Blur()
+			m.keyIn.SetValue("")
+			// Advance through any further providers that still need a key, else start.
+			if len(m.keyQueue) > 0 {
+				m.keyQueue = m.keyQueue[1:]
+			}
+			m.gotoKeyOrStart()
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.keyIn, cmd = m.keyIn.Update(msg)
+		return m, cmd
+
+	case wStart:
+		switch k {
+		case "up", "k":
+			m.startSel = 0
+		case "down", "j":
+			m.startSel = 1
+		case "enter":
+			m.resume = m.startSel == 1
+			m.step = wEnv
+			if !m.scanned {
+				return m, scanEnvsCmd()
+			}
+		}
+		return m, nil
+
+	case wEnv:
+		switch k {
+		case "up", "k":
+			if m.envSel > 0 {
+				m.envSel--
+			}
+		case "down", "j":
+			if m.envSel < len(m.cands)-1 {
+				m.envSel++
+			}
+		case "r":
+			m.scanned = false
+			return m, scanEnvsCmd()
+		case "enter":
+			if len(m.cands) == 0 {
+				m.wizErr = "no environments found. Press r to rescan."
+				return m, nil
+			}
+			cand := m.cands[m.envSel]
+			if cand.Backend == sandbox.BackendQEMU && !sandbox.QEMUAvailable() {
+				m.wizErr = "QEMU not found — install QEMU (on PATH or in Program Files), or pick a WSL distro."
+				return m, nil
+			}
+			if cand.Backend == sandbox.BackendQEMU && m.resume {
+				m.wizErr = "QEMU VMs are disposable — resume isn't available; start a new engagement."
+				return m, nil
+			}
+			m.selDistro = cand.ID
+			if m.resume {
+				m.step = wResume
+				return m, listEngagementsCmd(cand.ID)
+			}
+			m.step = wScope
+			m.scopeIn.Focus()
+		}
+		return m, nil
+
+	case wResume:
+		n := len(m.engagements) // index of the "import from host" option
+		switch k {
+		case "up", "k":
+			if m.engSel > 0 {
+				m.engSel--
+			}
+		case "down", "j":
+			if m.engSel < n {
+				m.engSel++
+			}
+		case "enter":
+			if m.engSel == n { // import from host
+				m.step = wImport
+				m.importIn.Focus()
+				return m, nil
+			}
+			m.engagement = m.engagements[m.engSel]
+			// Prefill the scope field with the saved targets as a convenience, but
+			// still ask: a reverted lab may have changed the target IPs.
+			if data, err := sandbox.ReadWSLFile(context.Background(), m.selDistro, sandbox.WSLWorkspace+"/"+m.engagement+"/00-scope.md"); err == nil && data != "" {
+				m.scopeIn.SetValue(strings.Join(scope.Parse(data).CIDRs(), ", "))
+			}
+			// If this engagement has saved conversation history, offer to load it or
+			// start clean; otherwise there is nothing to load, so go straight on.
+			if historyExists(m.engagement) {
+				m.histSel = 0
+				m.step = wHistory
+			} else {
+				m.step = wScope
+				m.scopeIn.Focus()
+			}
+		}
+		return m, nil
+
+	case wHistory:
+		switch k {
+		case "up", "k":
+			m.histSel = 0
+		case "down", "j":
+			m.histSel = 1
+		case "enter":
+			m.loadHist = m.histSel == 0
+			m.step = wScope
+			m.scopeIn.Focus()
+		}
+		return m, nil
+
+	case wImport:
+		if k == "enter" {
+			p := strings.TrimSpace(m.importIn.Value())
+			if p == "" {
+				m.wizErr = "enter a host path to a folder or .tar.gz"
+				return m, nil
+			}
+			m.engagement = engNameFromPath(p)
+			m.importIn.Blur()
+			m.step = wScope // still confirm scope (imported scope may be stale)
+			m.scopeIn.Focus()
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.importIn, cmd = m.importIn.Update(msg)
+		return m, cmd
+
+	case wScope:
+		if k == "enter" {
+			m.scopeIn.Blur()
+			if m.resume {
+				m.step = wVPN // goal is kept from the saved engagement
+			} else {
+				m.step = wGoal
+				m.goalIn.Focus()
+			}
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.scopeIn, cmd = m.scopeIn.Update(msg)
+		return m, cmd
+
+	case wGoal:
+		if k == "enter" {
+			m.goalIn.Blur()
+			m.step = wVPN
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.goalIn, cmd = m.goalIn.Update(msg)
+		return m, cmd
+
+	case wVPN:
+		switch k {
+		case "up", "k":
+			if m.vpnSel > 0 {
+				m.vpnSel--
+			}
+		case "down", "j":
+			if m.vpnSel < 3 {
+				m.vpnSel++
+			}
+		case "enter":
+			switch m.vpnSel {
+			case 0:
+				m.vpnMode = "none"
+				m.step = wAuto
+			case 1:
+				m.vpnMode = "running"
+				m.step = wAuto
+			case 2:
+				m.vpnMode = "envfile"
+				m.vpnIn.Placeholder = "path to the .ovpn file inside the environment"
+				m.vpnIn.SetValue("")
+				m.vpnIn.Focus()
+				m.step = wVPNInput
+			case 3:
+				m.vpnMode = "hostfile"
+				m.vpnIn.Placeholder = "host path to the .ovpn file to upload"
+				m.vpnIn.SetValue("")
+				m.vpnIn.Focus()
+				m.step = wVPNInput
+			}
+		}
+		return m, nil
+
+	case wVPNInput:
+		if k == "enter" {
+			if strings.TrimSpace(m.vpnIn.Value()) == "" {
+				m.wizErr = "enter the .ovpn path"
+				return m, nil
+			}
+			m.vpnIn.Blur()
+			m.step = wAuto
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.vpnIn, cmd = m.vpnIn.Update(msg)
+		return m, cmd
+
+	case wAuto:
+		switch k {
+		case "up", "k":
+			m.autoSel = 0
+		case "down", "j":
+			m.autoSel = 1
+		case "enter":
+			return m.startEngagement()
+		}
+		return m, nil
+	}
+	return m, nil
+}
+
+// buildCatalog gathers every provider/model-id the config knows about, so the
+// first-run picker and the editor can offer them as choices.
+func (m *model) buildCatalog() {
+	m.catalog = m.catalog[:0]
+	provs := make([]string, 0, len(m.store.Providers()))
+	for name := range m.store.Providers() {
+		provs = append(provs, name)
+	}
+	sort.Strings(provs)
+	for _, pn := range provs {
+		p := m.store.Providers()[pn]
+		for _, md := range p.Models {
+			sel := pn + "/" + md.ID
+			label := sel
+			if md.Name != "" {
+				label = md.Name + "  (" + sel + ")"
+			}
+			m.catalog = append(m.catalog, catalogModel{sel: sel, label: label})
+		}
+	}
+}
+
+// seedRoleSel points each tier's picker at its currently-configured model (if any),
+// else leaves it at the first catalog entry.
+func (m *model) seedRoleSel() {
+	roles := m.store.ModelRoles()
+	cur := [3]string{roles.Big, roles.Medium, roles.Small}
+	for i := range cur {
+		m.roleSel[i] = 0
+		for j, c := range m.catalog {
+			if c.sel == cur[i] {
+				m.roleSel[i] = j
+				break
+			}
+		}
+	}
+}
+
+// providersNeedingKeys returns the providers used by the three configured tier
+// models whose API key is not yet resolvable, in a stable order.
+func (m *model) providersNeedingKeys() []string {
+	roles := m.store.ModelRoles()
+	var out []string
+	seen := map[string]bool{}
+	for _, sel := range []string{roles.Big, roles.Medium, roles.Small} {
+		prov, _, ok := strings.Cut(sel, "/")
+		if !ok || prov == "" || seen[prov] {
+			continue
+		}
+		seen[prov] = true
+		if _, err := m.store.ResolveKey(prov); err != nil {
+			out = append(out, prov)
+		}
+	}
+	return out
+}
+
+// gotoKeyOrStart moves to the API-key step for the next provider that needs a key,
+// or to the engagement step when every needed key is present.
+func (m *model) gotoKeyOrStart() {
+	if m.keyQueue == nil || m.step != wKey {
+		m.keyQueue = m.providersNeedingKeys()
+	}
+	if len(m.keyQueue) > 0 {
+		m.keyProvider = m.keyQueue[0]
+		m.keyIn.SetValue("")
+		m.keyIn.Focus()
+		m.step = wKey
+		return
+	}
+	m.step = wStart
+}
+
+// engNameFromPath derives an engagement name from an import path.
+func engNameFromPath(p string) string {
+	base := filepath.Base(strings.TrimRight(p, `/\`))
+	base = strings.TrimSuffix(base, ".tar.gz")
+	base = strings.TrimSuffix(base, ".tgz")
+	if base == "" || base == "." {
+		base = "imported-engagement"
+	}
+	// Sanitize so the name can't traverse host (logs/backups/history) or guest
+	// (root-run tar) paths it gets joined into.
+	return sandbox.SafeEngagementName(base)
+}
+
+func (m *model) reloadForMode() {
+	// Reload store+roster if the chosen mode differs from the launch mode.
+	fsys := assetsFor(m.mode)
+	if st, err := config.Load(m.mode, fsys); err == nil {
+		m.store = st
+		if r, err := agents.LoadRoster(m.mode, fsys, m.store); err == nil {
+			m.roster = r
+		}
+	}
+}
+
+// startEngagement validates the choice and kicks off sandbox preparation
+// (open/create + egress) off the UI goroutine. beginSession finishes once the
+// sandbox is ready. Per-agent egress is mandatory: a failure returns to the
+// wizard rather than running agents unconfined.
+func (m *model) startEngagement() (tea.Model, tea.Cmd) {
+	// The engagement must not run unless the model tiers are configured and usable:
+	// all three set, resolving to a known model with a working API key.
+	if !m.store.ModelsConfigured() || m.store.ValidateModels() != nil {
+		// A direct start (-env ...) skipped the wizard; rather than dead-end on the
+		// error, drop into the wizard at the model picker (or the key step, if the
+		// models are set but a key is missing) so the user can finish setup.
+		if m.direct {
+			m.direct = false
+			m.buildCatalog()
+			if !m.store.ModelsConfigured() {
+				m.seedRoleSel()
+				m.roleFocus = 0
+				m.step = wModels
+			} else {
+				m.gotoKeyOrStart()
+			}
+		}
+		if err := m.store.ValidateModels(); err != nil {
+			m.wizErr = "models not ready: " + err.Error() + " — configure them in setup or with `oline -edit`."
+		}
+		return m, nil
+	}
+	if len(m.cands) == 0 {
+		m.wizErr = "no environments found. WSL/QEMU required. Press r to rescan."
+		return m, nil
+	}
+	cand := m.cands[m.envSel]
+	if cand.Backend == sandbox.BackendQEMU && !sandbox.QEMUAvailable() {
+		m.wizErr = "QEMU not found — install QEMU (on PATH or in Program Files), or pick a WSL distro."
+		return m, nil
+	}
+	m.prepCand = cand
+	m.preparing = true
+	m.wizErr = ""
+	return m, prepareSandboxCmd(cand, m.scopeIn.Value(), m.store.Effective().Network.AllowIPv6)
+}
+
+// beginSession builds and launches the engagement once the sandbox handle is
+// ready (egress already applied in prepareSandboxCmd).
+func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
+	cand := m.prepCand
+	pol := scope.Parse(m.scopeIn.Value())
+
+	reg := buildRegistry()
+	llmFor := wire.NewLLMResolver(m.store)
+	orch, resolver := wire.Build(m.mode, m.store, m.roster)
+
+	m.events = make(chan event.Event, 4096) // generous buffer; the TUI batch-drains it
+	m.sess = engine.NewSession(reg, h, llmFor, resolver, m.events, m.store.Effective().MaxConcurrency)
+	m.sess.Manual = m.autoSel == 1
+	m.sess.Interactive = true // keep Main alive between turns so the user can keep chatting
+	// Let update_diagram enforce the LIVE Diagram-pane width (read fresh each call, so
+	// a resize is reflected immediately).
+	m.sess.DiagramWidth = m.diagramWidth
+	m.sess.BashDeny = engine.CompileDeny(bashDenyGlobs(m.store.Effective().Bash.Patterns))
+	// Route context auto-compaction through the cheaper `small` model (a big cost
+	// saving on long runs); falls back to each agent's own model if it can't resolve.
+	if small := m.store.Effective().ModelRoles.Small; small != "" {
+		if cl, mid, err := llmFor(small); err == nil {
+			m.sess.SummarizerLLM, m.sess.SummarizerModel = cl, mid
+		}
+	}
+	m.costCap = m.store.Effective().Budget.MaxCostUSD
+	m.summaryCap = m.store.Effective().Budget.MaxSummaryCostUSD
+	m.router = m.sess.Router()
+	m.resultCh = make(chan engine.Result, 1)
+	m.envID = cand.ID
+
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
+
+	m.addAgent(core.Main)
+	// Default layout: the orchestrator on the left, and a stacked Summary (top) and
+	// Diagram (bottom) in the center. The right-side Options/help pane is separate
+	// and togglable (Ctrl-b ?).
+	mainLeaf := newLeaf(core.Main)
+	center := &pane{dir: splitV, ratio: 0.5, a: newSummaryLeaf(), b: newDiagramLeaf()}
+	center.a.parent, center.b.parent = center, center
+	root := &pane{dir: splitH, ratio: 0.5, a: mainLeaf, b: center}
+	mainLeaf.parent, center.parent = root, root
+	m.paneRoot = root
+	m.focusPane = mainLeaf
+	m.windows = []*windowState{{root: m.paneRoot, focus: m.focusPane, name: "1"}}
+	m.winIdx = 0
+	m.shellCh = make(chan shellMsg, 256)
+	m.shells = map[core.AgentID]*shellState{}
+	m.running = true
+	m.input.Focus()
+	m.resize()
+	// A new engagement gets a program-assigned workspace name, so both the
+	// orchestrator and the host backup target the same directory.
+	if !m.resume && m.engagement == "" {
+		m.engagement = "engagement-" + time.Now().Format("20060102-150405")
+	}
+	// Per-engagement activity log on the host (what every agent does/thinks/runs).
+	m.log = openEngLog(m.engagement)
+	m.log.setRedact(m.store.KnownSecrets()) // scrub any API keys an agent echoes
+	m.log.banner(fmt.Sprintf("%s · %s · env=%s · scope=%q · goal=%q", m.engagement,
+		modeLabel(m.sess.Manual), cand.ID, strings.TrimSpace(m.scopeIn.Value()), strings.TrimSpace(m.goalIn.Value())))
+	// Resume with history: restore the prior conversation (seed Main live, rebuild
+	// every agent's transcript) before the "resuming" notice, so the old
+	// conversation appears first. If loading fails, fall back to a clean start.
+	if m.resume && m.loadHist {
+		if eh, err := loadHistory(m.engagement); err == nil {
+			m.restoreHistory(eh.Agents)
+			m.restoreLayout(eh.Windows, eh.WinIdx) // bring back the prior pane layout
+			m.writeln(core.Main, styleMuted.Render("── restored previous conversation history ──"))
+		} else {
+			m.writeln(core.Main, styleWarn.Render("could not load saved conversation history: "+err.Error()))
+		}
+	}
+
+	// Ensure a default shell tab: after any restore, if the layout has no shell pane,
+	// open a second tab with one (done here, after the windows are finalized, so a
+	// restore can't orphan it). Stay on the main tab.
+	if !m.anyShellPane() {
+		shellTab := m.createShellLeaf()
+		m.windows = append(m.windows, &windowState{root: shellTab, focus: shellTab, name: strconv.Itoa(len(m.windows) + 1)})
+	}
+
+	start := "engagement starting"
+	if m.resume {
+		start = "resuming engagement " + m.engagement
+	}
+	m.writeln(core.Main, styleMuted.Render(start+" in "+cand.ID+" — "+modeLabel(m.sess.Manual)))
+	if p := m.log.Path(); p != "" {
+		m.writeln(core.Main, styleMuted.Render("activity log → "+p))
+	}
+
+	// Resume: make sure the engagement's files are in the canonical workspace,
+	// whether they came from a host path, a path already in the environment, or
+	// an existing engagement picked from the list.
+	if m.resume {
+		m.placeResumeFiles(cand.ID)
+	}
+
+	// VPN to reach the target, if requested.
+	m.setupVPN(cand.ID)
+
+	// Egress was established (fail-closed) above; report the resulting policy.
+	if pol.Empty() && len(pol.Domains()) == 0 {
+		m.writeln(core.Main, styleWarn.Render("no targets parsed from scope — in-scope agents can reach NO network (strict). researcher/installer/judge/skeptic still get internet."))
+	} else {
+		m.writeln(core.Main, styleMuted.Render(fmt.Sprintf("egress enforced: in-scope IP/CIDR=%v · internet-minus-target for researcher/installer/judge/skeptic", pol.CIDRs())))
+	}
+	// Domain targets are resolved to IPs at apply time and firewall-enforced like any
+	// other target; agents resolve names via the sandbox's DNS resolver (now allowed).
+	if len(pol.Domains()) > 0 {
+		m.writeln(core.Main, styleMuted.Render(fmt.Sprintf("domain targets %v resolved to IPs and firewall-enforced (a snapshot at apply time — re-apply scope with Ctrl-b e if a target's address changes)", pol.Domains())))
+	}
+
+	// Host-side backups (done by the program, not the agents). 0 disables.
+	if min := m.store.Effective().Backup.IntervalMinutes; min > 0 {
+		m.writeln(core.Main, styleMuted.Render(fmt.Sprintf("host backups: every %d min + at end → %s (one file, overwritten)",
+			min, filepath.Join(m.store.BackupDir(), m.engagement+".tar.gz"))))
+		go m.backupLoop(ctx, m.engagement, min)
+	} else {
+		m.writeln(core.Main, styleMuted.Render("host backups: disabled (backup.intervalMinutes = 0)"))
+	}
+
+	// Persist the conversation to the host on a timer so it can be reloaded after a
+	// restart (program-written, like the activity log; agents never touch it).
+	m.writeln(core.Main, styleMuted.Render("conversation history → "+historyPath(m.engagement)+" (reload it on resume)"))
+	m.refreshLayoutSnapshot() // seed the layout snapshot so even an early save persists it
+	go m.historyLoop(ctx)
+
+	prompt := m.composePrompt()
+	go func() { m.resultCh <- m.sess.Run(ctx, orch, prompt) }()
+
+	return m, tea.Batch(listen(m.events), waitResult(m.resultCh), listenShell(m.shellCh), tickCmd(), textinput.Blink)
+}
+
+// backupLoop periodically backs up the engagement workspace to the host until
+// the engagement context ends.
+func (m *model) backupLoop(ctx context.Context, engagement string, minutes int) {
+	t := time.NewTicker(time.Duration(minutes) * time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			m.runBackup(engagement)
+		}
+	}
+}
+
+// runBackup writes THE one compressed backup for the engagement to the host
+// (overwriting any previous one) via the sandbox handle — works for any backend
+// (WSL now, QEMU when its lifecycle lands) — and reports via a notice.
+func (m *model) runBackup(engagement string) {
+	if m.sess == nil {
+		return
+	}
+	dest := filepath.Join(m.store.BackupDir(), engagement+".tar.gz")
+	if err := m.sess.Sandbox.Backup(context.Background(), engagement, dest); err != nil {
+		m.emitNotice("warn", "backup skipped: "+err.Error())
+		return
+	}
+	m.emitNotice("info", "backed up engagement → "+dest)
+}
+
+// emitNotice sends a notice to the TUI from any goroutine (non-blocking).
+func (m *model) emitNotice(level, text string) {
+	if m.events == nil {
+		return
+	}
+	select {
+	case m.events <- event.Notice{Level: level, Text: text}:
+	default:
+	}
+}
+
+// applyScopeLive updates the engagement scope. While agents are running it
+// re-applies the per-agent firewall ON THE FLY and tells the orchestrator the
+// allowed scope changed; otherwise the new scope just takes effect at start.
+func (m *model) applyScopeLive(raw string) {
+	m.scopeIn.SetValue(raw)
+	if m.sess == nil || m.sess.Sandbox == nil || m.router == nil {
+		return // not running — the new scope is used when the engagement starts
+	}
+	pol := scope.Parse(raw)
+	ec := m.sess.Sandbox.EgressController()
+	allowIPv6 := m.store.Effective().Network.AllowIPv6
+	go func() {
+		if err := ec.ApplyBaseline(sandbox.Scope{Targets: append(pol.CIDRs(), pol.Domains()...), AllowIPv6: allowIPv6}); err != nil {
+			m.emitNotice("error", "live scope update: firewall re-apply failed: "+err.Error())
+			return
+		}
+		m.emitNotice("info", fmt.Sprintf("scope updated live — firewall now enforces in-scope=%v", pol.CIDRs()))
+		m.router.Send(engine.Envelope{From: "User", To: core.Main, Kind: engine.MsgSteer,
+			Body: fmt.Sprintf("SCOPE UPDATE from the operator: the authorized in-scope targets are now %q (firewall-enforced IP/CIDR: %v). The per-agent egress firewall has been re-applied to match. From now on treat ONLY these as in scope — stop touching anything removed from scope, and you may engage anything newly added.",
+				strings.TrimSpace(raw), pol.CIDRs())})
+	}()
+}
+
+// placeResumeFiles ensures the resumed engagement's files sit in the canonical
+// workspace (/opt/oline/engagements/<name>) so the orchestrator and backups use
+// one consistent location.
+func (m *model) placeResumeFiles(distro string) {
+	ctx := context.Background()
+	canonical := sandbox.WSLWorkspace + "/" + m.engagement
+	if p := strings.TrimSpace(m.importIn.Value()); p != "" {
+		if _, err := os.Stat(p); err == nil {
+			// a host path -> import (folder or .tar.gz)
+			if err := sandbox.ImportWSLEngagement(ctx, distro, p, m.engagement); err != nil {
+				m.writeln(core.Main, styleErr.Render("import failed: "+err.Error()))
+			} else {
+				m.writeln(core.Main, styleMuted.Render("imported (host) "+p+" → "+canonical))
+			}
+			return
+		}
+		// not a host path -> treat it as a path already inside the environment
+		if err := sandbox.CopyWSLDirToWorkspace(ctx, distro, p, m.engagement); err != nil {
+			m.writeln(core.Main, styleErr.Render("could not use environment path "+p+": "+err.Error()))
+		} else {
+			m.writeln(core.Main, styleMuted.Render("restored from environment path "+p+" → "+canonical))
+		}
+		return
+	}
+	// picked from the list: find its real location and copy into canonical if needed
+	src, err := sandbox.ResolveWSLEngagementPath(ctx, distro, m.engagement)
+	if err != nil {
+		m.writeln(core.Main, styleWarn.Render("note: no existing files found for "+m.engagement+"; the orchestrator will start it fresh"))
+		return
+	}
+	if src != canonical {
+		if err := sandbox.CopyWSLDirToWorkspace(ctx, distro, src, m.engagement); err != nil {
+			m.writeln(core.Main, styleErr.Render("restore failed: "+err.Error()))
+		} else {
+			m.writeln(core.Main, styleMuted.Render("restored "+m.engagement+" from "+src+" → "+canonical))
+		}
+	}
+}
+
+// setupVPN brings up (or confirms) the OpenVPN tunnel per the wizard choice.
+func (m *model) setupVPN(distro string) {
+	ctx := context.Background()
+	switch m.vpnMode {
+	case "", "none":
+		return
+	case "running":
+		if up, info := sandbox.VPNStatus(ctx, distro); up {
+			m.writeln(core.Main, styleMuted.Render("VPN already up in environment: "+info))
+		} else {
+			m.writeln(core.Main, styleWarn.Render("no VPN tunnel detected in the environment, but you selected 'already running' — continuing"))
+		}
+	case "envfile":
+		out, err := sandbox.StartWSLVPN(ctx, distro, strings.TrimSpace(m.vpnIn.Value()))
+		m.vpnStatusLine(out, err)
+	case "hostfile":
+		host := strings.TrimSpace(m.vpnIn.Value())
+		guest := "/opt/oline/vpn/" + filepath.Base(host)
+		if err := sandbox.CopyFileToWSL(ctx, distro, host, guest); err != nil {
+			m.writeln(core.Main, styleErr.Render("VPN config upload failed: "+err.Error()))
+			return
+		}
+		m.writeln(core.Main, styleMuted.Render("uploaded VPN config → "+guest))
+		out, err := sandbox.StartWSLVPN(ctx, distro, guest)
+		m.vpnStatusLine(out, err)
+	}
+}
+
+func (m *model) vpnStatusLine(out string, err error) {
+	if err != nil {
+		m.writeln(core.Main, styleErr.Render("VPN: "+err.Error()))
+		if out != "" {
+			m.writeln(core.Main, styleMuted.Render(out))
+		}
+		return
+	}
+	m.writeln(core.Main, styleGreenRender("VPN: "+out))
+}
+
+func (m *model) composePrompt() string {
+	var b strings.Builder
+	b.WriteString("AUTHORIZED ENGAGEMENT. The user has confirmed written authorization to test the target.\n")
+	fmt.Fprintf(&b, "Mode: %s.\n", modeLabel(m.sess.Manual))
+	if m.vpnMode != "" && m.vpnMode != "none" {
+		b.WriteString("The in-scope target is reached through a VPN tunnel (a tun/tap interface is up in the sandbox); route to it normally.\n")
+	}
+	if m.resume {
+		dir := sandbox.WSLWorkspace + "/" + m.engagement
+		fmt.Fprintf(&b, "RESUME the existing engagement %q. Its workspace is at %s.\n", m.engagement, dir)
+		b.WriteString("First rebuild the state of play: read 00-scope.md for the GOAL and prior context, and read the registers (assumptions.md, trust-zones.md, go-no-go.md, changes.md) and skim engagement-log.md. Do NOT redo completed work.\n")
+		fmt.Fprintf(&b, "CURRENT in scope (ONLY these — authoritative; they may have changed since the saved run, so they SUPERSEDE any scope recorded earlier): %s\n", strings.TrimSpace(m.scopeIn.Value()))
+		b.WriteString("Update 00-scope.md to reflect this current scope, then continue toward the goal.\n")
+		b.WriteString(m.networkPolicyLine())
+		b.WriteString(m.diagramWidthLine())
+		return b.String()
+	}
+	fmt.Fprintf(&b, "In scope (ONLY these — never touch anything else): %s\n", strings.TrimSpace(m.scopeIn.Value()))
+	fmt.Fprintf(&b, "Goal: %s\n", strings.TrimSpace(m.goalIn.Value()))
+	b.WriteString(m.networkPolicyLine())
+	fmt.Fprintf(&b, "Your engagement workspace is %s/%s/ (also reachable as ~/engagements/%s/). Create it and keep 00-scope.md, the registers, and all artifacts there.\n",
+		sandbox.WSLWorkspace, m.engagement, m.engagement)
+	b.WriteString(m.diagramWidthLine())
+	b.WriteString("All execution happens inside the sandbox. Begin by recording scope, then proceed per your workflow.")
+	return b.String()
+}
+
+// diagramWidthLine tells the orchestrator the exact current width of the Diagram
+// pane so its first map fits. The limit is also enforced by update_diagram (which
+// rejects over-wide lines and reports the live width), so this is the starting
+// value; it can change if the user resizes the pane.
+func (m *model) diagramWidthLine() string {
+	w := m.diagramWidth()
+	if w <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("Diagram pane: it is currently %d columns wide. Every line of the map you draw with update_diagram must be at most %d columns or the tool will reject it (the pane clips, it does not wrap); update_diagram always reports the current width, which changes if the user resizes the pane.\n", w, w)
+}
+
+// networkPolicyLine tells the orchestrator the sandbox's IPv6 egress posture so it
+// does not plan around IPv6 reachability that the firewall blocks by default.
+func (m *model) networkPolicyLine() string {
+	if m.store.Effective().Network.AllowIPv6 {
+		return "Network: IPv6 egress is ENABLED for this engagement (the per-agent firewall enforces scope over IPv6 as well as IPv4).\n"
+	}
+	return "Network: outbound non-loopback IPv6 is DISABLED by default (the sandbox firewall drops it for agents; targets are reached over IPv4). If a target is reachable only over IPv6, tell the user to enable it in config (network.allowIPv6) — do not try to work around the block.\n"
+}
+
+// ---- running -------------------------------------------------------------
+
+func (m *model) updateRunning(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case engineBatchMsg:
+		for _, ev := range msg.evs {
+			m.mutate(ev) // update state without rendering
+		}
+		m.flushDirty() // render each touched pane exactly once for the whole batch
+		return m, listen(m.events)
+	case resultMsg:
+		m.writeln(core.Main, "")
+		m.writeln(core.Main, styleAccent.Render("── engagement finished ──"))
+		if msg.res.Err != nil {
+			m.writeln(core.Main, styleErr.Render("error: "+msg.res.Err.Error()))
+		} else {
+			m.writeln(core.Main, msg.res.Text)
+		}
+		m.status = "finished — Ctrl-b q to quit"
+		m.refreshLayoutSnapshot()
+		m.saveHistory() // final conversation snapshot so the engagement can be reloaded
+		if m.store.Effective().Backup.IntervalMinutes > 0 && m.engagement != "" {
+			go m.runBackup(m.engagement) // final backup at end of engagement
+		}
+		return m, nil
+	case tickMsg:
+		m.refreshLayoutSnapshot() // UI-goroutine snapshot so the periodic save can persist the layout
+		return m, tickCmd()       // re-render each second so the time-left countdowns update
+	case shellMsg:
+		m.applyShellMsg(msg)
+		return m, listenShell(m.shellCh)
+	case tea.MouseMsg:
+		m.handleMouse(msg)
+		return m, nil
+	case tea.KeyMsg:
+		return m.handleRunningKey(msg)
+	}
+	return m, nil
+}
+
+// handleMouse routes the wheel to scrolling (the roster sidebar when the cursor is
+// over it, otherwise the focused pane) and the left button to pane focus, roster
+// selection, and dragging panes to resize or move them.
+func (m *model) handleMouse(msg tea.MouseMsg) {
+	overRoster := m.showRoster && m.rightW > 0 && msg.X >= m.rosterX
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		switch {
+		case m.copyMode:
+			m.copyVP.LineUp(3)
+		case overRoster:
+			m.rosterScroll -= 3
+			if m.rosterScroll < 0 {
+				m.rosterScroll = 0
+			}
+		case m.focusPane != nil:
+			m.focusPane.vp.LineUp(3)
+		}
+		return
+	case tea.MouseButtonWheelDown:
+		switch {
+		case m.copyMode:
+			m.copyVP.LineDown(3)
+		case overRoster:
+			m.rosterScroll += 3 // renderRoster clamps to the content height
+		case m.focusPane != nil:
+			m.focusPane.vp.LineDown(3)
+		}
+		return
+	}
+	if m.copyMode || msg.Button != tea.MouseButtonLeft {
+		return
+	}
+
+	switch msg.Action {
+	case tea.MouseActionPress:
+		m.mousePress(msg.X, msg.Y, overRoster)
+	case tea.MouseActionMotion:
+		m.mouseDrag(msg.X, msg.Y)
+	case tea.MouseActionRelease:
+		m.mouseRelease(msg.X, msg.Y)
+	}
+}
+
+// mousePress starts a roster selection, a boundary resize, or a potential pane
+// move/click depending on where the button went down.
+func (m *model) mousePress(x, y int, overRoster bool) {
+	m.dragBoundary, m.dragPane, m.dragMoved = nil, nil, false // clear any stale drag
+	// The header occupies row 0 (bodyTop is 1): a click on a window tab there switches
+	// to that window, so tabs are usable with the mouse and not only Ctrl-b n.
+	if y == m.bodyTop-1 {
+		for _, s := range m.tabSpans() {
+			if x >= s.start && x < s.end {
+				m.selectWindow(s.idx)
+				return
+			}
+		}
+		return
+	}
+	if overRoster {
+		if id, ok := m.rosterUserPaneRows[y]; ok { // a listed shell: jump to its pane
+			m.focusShellByID(id)
+			return
+		}
+		if id, ok := m.rosterAgentRows[y]; ok {
+			m.setFocus(id)
+		}
+		return
+	}
+	// While zoomed, a single pane fills the area and the split rects are stale, so
+	// skip resize/move and treat a press as a plain click.
+	if !m.zoom {
+		// A press on a split divider begins a resize; a press inside a pane begins a
+		// potential move (resolved on release: a drag moves the pane, a plain click
+		// focuses it and toggles the tool call under the cursor).
+		if n := boundaryAt(m.paneRoot, x, y); n != nil {
+			m.dragBoundary = n
+			return
+		}
+	}
+	if p := paneAt(m.paneRoot, x, y); p != nil {
+		m.focusPane = p
+		m.dragPane = p
+		m.dragStartX, m.dragStartY = x, y
+		m.dragMoved = false
+	}
+}
+
+// mouseDrag updates a live resize, or flags that a pane move is in progress.
+func (m *model) mouseDrag(x, y int) {
+	if m.dragBoundary != nil {
+		n := m.dragBoundary
+		if n.dir == splitH && n.w > 1 {
+			n.ratio = clampRatio(float64(x-n.x) / float64(n.w))
+		} else if n.dir == splitV && n.h > 1 {
+			n.ratio = clampRatio(float64(y-n.y) / float64(n.h))
+		}
+		m.layoutRectsOnly() // cheap during the drag; full markdown reflow happens on release
+		return
+	}
+	if m.dragPane != nil && (x != m.dragStartX || y != m.dragStartY) {
+		m.dragMoved = true
+	}
+}
+
+// mouseRelease finishes a resize or move, or performs the click (focus + expand the
+// tool call under the cursor) when the press did not turn into a drag.
+func (m *model) mouseRelease(x, y int) {
+	if m.dragBoundary != nil {
+		m.dragBoundary = nil
+		m.relayout() // reflow content to the final pane sizes now the drag is done
+		return
+	}
+	if m.dragPane == nil {
+		return
+	}
+	src := m.dragPane
+	m.dragPane = nil
+	if m.dragMoved {
+		if dest := paneAt(m.paneRoot, x, y); dest != nil && dest != src {
+			m.swapPaneViews(src, dest)
+			m.focusPane = dest
+			m.relayout()
+			return
+		}
+	}
+	// A plain click: toggle the tool call under where the button went down.
+	m.toggleToolAt(src, m.dragStartX, m.dragStartY)
+}
+
+// swapPaneViews exchanges what two leaves display (agent/shell/summary/diagram), so
+// dragging one pane onto another visually swaps them. The shell/info backing state
+// is keyed by id, so moving the view is enough; a refresh rebuilds each pane.
+func (m *model) swapPaneViews(a, b *pane) {
+	a.agent, b.agent = b.agent, a.agent
+	a.shell, b.shell = b.shell, a.shell
+	a.summary, b.summary = b.summary, a.summary
+	a.diagram, b.diagram = b.diagram, a.diagram
+	m.refreshLeaf(a)
+	m.refreshLeaf(b)
+	// The swapped-in content is new to each pane, so the old viewport scroll offset
+	// is meaningless; reset to each pane's natural edge (top for the info panes,
+	// bottom for a transcript that follows live output).
+	for _, p := range []*pane{a, b} {
+		if p.summary || p.diagram {
+			p.vp.GotoTop()
+		} else {
+			p.vp.GotoBottom()
+		}
+	}
+}
+
+// clampRatio keeps a split ratio within sane bounds so neither child collapses.
+func clampRatio(r float64) float64 {
+	if r < 0.1 {
+		return 0.1
+	}
+	if r > 0.9 {
+		return 0.9
+	}
+	return r
+}
+
+// toggleToolAt expands/collapses the tool-output segment under a click in pane p,
+// mapping the screen row to a transcript content line via the viewport's scroll.
+func (m *model) toggleToolAt(p *pane, x, y int) {
+	t := m.transcripts[p.agent]
+	if t == nil {
+		return
+	}
+	// A segment's startLine/nLines are shared transcript state, set by whichever
+	// pane rendered it last. When the same agent is shown in more than one pane
+	// (e.g. after a split), those positions may belong to a DIFFERENT pane's width
+	// and scroll, so a click here would hit the wrong block and reflow the other
+	// pane. Re-render THIS pane first so the positions match the pane that was
+	// actually clicked.
+	m.refreshLeaf(p)
+	contentY0 := p.y + 2 // pane top border + header line
+	vpH := p.h - 3
+	if y < contentY0 || y >= contentY0+vpH {
+		return
+	}
+	line := p.vp.YOffset + (y - contentY0)
+	for _, s := range t.segs {
+		if s.kind == segTool && s.nLines > 0 && line >= s.startLine && line < s.startLine+s.nLines {
+			s.expanded = !s.expanded
+			// Re-render every pane showing this agent so they stay consistent (the
+			// expanded flag is shared across panes of the same agent).
+			m.refreshFor(p.agent)
+			return
+		}
+	}
+}
+
+func (m *model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.copyMode {
+		switch msg.String() {
+		case "esc", "q", "ctrl+b":
+			m.copyMode = false
+			m.status = "exited copy mode"
+		case "up", "k":
+			m.copyVP.LineUp(1)
+		case "down", "j":
+			m.copyVP.LineDown(1)
+		case "pgup":
+			m.copyVP.HalfViewUp()
+		case "pgdown", " ":
+			m.copyVP.HalfViewDown()
+		case "home", "g":
+			m.copyVP.GotoTop()
+		case "end", "G":
+			m.copyVP.GotoBottom()
+		}
+		return m, nil
+	}
+	if m.prefix {
+		m.prefix = false
+		focus := m.focusedAgent()
+		switch msg.String() {
+		// pane management (tmux-style)
+		case "%", "|":
+			m.doSplit(splitH)
+		case "\"", "-":
+			m.doSplit(splitV)
+		case "z":
+			m.zoom = !m.zoom
+			m.relayout()
+		case "x":
+			m.closePaneCmd()
+		case "o":
+			m.cyclePane()
+		case "$":
+			m.openShellPane()
+		case "[":
+			m.enterCopyMode()
+		case "g":
+			if m.focusPane != nil {
+				m.focusPane.vp.GotoTop()
+				m.status = "jumped to top"
+			}
+		case "G":
+			if m.focusPane != nil {
+				m.focusPane.vp.GotoBottom()
+				m.status = "jumped to bottom"
+			}
+		// window (tab) management (tmux-style)
+		case "c":
+			m.newWindow()
+		case "n":
+			m.nextWindow()
+		case "&":
+			m.killWindow()
+		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+			m.selectWindow(int(msg.String()[0] - '1')) // '1' -> window index 0
+		case "0":
+			m.selectWindow(9) // window 10
+		case "left", "h":
+			m.navPane('h')
+		case "right", "l":
+			m.navPane('l')
+		case "up", "k":
+			m.navPane('k')
+		case "down", "j":
+			m.navPane('j')
+		// agent + view controls
+		case "p":
+			if m.focusShell() != nil {
+				m.status = "this pane is a shell, not an agent"
+			} else {
+				m.router.Pause(focus)
+				m.status = "paused " + string(focus)
+			}
+		case "P":
+			m.router.PauseAll()
+			m.status = "paused ALL agents"
+		case "r":
+			if m.focusShell() != nil {
+				m.status = "this pane is a shell, not an agent"
+			} else {
+				m.router.Resume(focus)
+				m.status = "resumed " + string(focus)
+			}
+		case "R":
+			m.router.ResumeAll()
+			m.status = "resumed ALL agents"
+		case "K":
+			if m.focusShell() != nil {
+				m.status = "this pane is a shell, not an agent"
+			} else {
+				m.router.Kill(focus)
+				m.status = "killed " + string(focus)
+			}
+		case "S":
+			// Stop the running command(s): a shell pane's command, or the focused
+			// agent's foreground/background commands (without pausing/killing it).
+			if sh := m.focusShell(); sh != nil {
+				if sh.stop() {
+					m.status = "stopped the shell command"
+				} else {
+					m.status = "no shell command is running"
+				}
+			} else {
+				n := m.router.StopCommands(focus)
+				m.status = fmt.Sprintf("stopped %d running command(s) for %s", n, focus)
+			}
+		case "s":
+			m.sendSummary()
+			m.status = "requested summary from orchestrator"
+		case "d":
+			m.sendDiagram()
+			m.status = "requested diagram from orchestrator"
+		case "t":
+			m.showThoughts = !m.showThoughts
+			m.relayout()
+			if m.showThoughts {
+				m.status = "showing agent thoughts"
+			} else {
+				m.status = "hiding agent thoughts"
+			}
+		case "?":
+			// Toggle the WHOLE right-side Options pane (roster + help), so the main
+			// panes reflow to use the reclaimed width. resize() recomputes widths and
+			// re-lays-out the panes.
+			m.showRoster = !m.showRoster
+			m.resize()
+			if m.showRoster {
+				m.status = "showing the Options pane"
+			} else {
+				m.status = "hiding the Options pane (Ctrl-b ? shows it)"
+			}
+		case "b":
+			// Set / change / remove the focused agent's time budget.
+			if m.focusShell() != nil {
+				m.status = "this pane is a shell, not an agent"
+			} else if focus == core.Main {
+				m.status = "the orchestrator (Main) has no time budget"
+			} else {
+				m.budgetInput = true
+				m.budgetTarget = focus
+				m.input.SetValue("")
+				m.status = "time budget for " + string(focus) + ": minutes (or 'none' to remove) · Esc cancels"
+			}
+		case "e":
+			m.openEditor()
+		case "q":
+			m.shutdown()
+			return m, tea.Quit
+		}
+		return m, nil
+	}
+
+	// Budget-entry mode: the command line captures a minutes value (or "none").
+	if m.budgetInput {
+		switch msg.String() {
+		case "esc":
+			m.budgetInput = false
+			m.input.SetValue("")
+			m.status = "budget change cancelled"
+			return m, nil
+		case "enter":
+			m.applyBudgetInput()
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		return m, cmd
+	}
+
+	switch msg.String() {
+	case "ctrl+b":
+		m.prefix = true
+		return m, nil
+	case "up":
+		m.focusRosterDelta(-1)
+		return m, nil
+	case "down":
+		m.focusRosterDelta(1)
+		return m, nil
+	case "pgup":
+		if m.focusPane != nil {
+			m.focusPane.vp.HalfViewUp()
+		}
+		return m, nil
+	case "pgdown":
+		if m.focusPane != nil {
+			m.focusPane.vp.HalfViewDown()
+		}
+		return m, nil
+	case "enter":
+		// A focused shell pane runs the typed line as a command in the sandbox,
+		// rather than sending it to an agent.
+		if sh := m.focusShell(); sh != nil {
+			cmd := strings.TrimSpace(m.input.Value())
+			m.input.SetValue("")
+			if cmd != "" {
+				m.runShell(sh, cmd)
+			}
+			return m, nil
+		}
+		// The Summary / Findings panes are read-only views, not agents: typing into
+		// them would message a non-existent agent. Route a message to the orchestrator
+		// instead and tell the user.
+		if m.focusInfoPane() {
+			if strings.TrimSpace(m.input.Value()) != "" {
+				m.status = "that pane is a read-only view — focus an agent (↑/↓) to send a message"
+			}
+			return m, nil
+		}
+		text := strings.TrimSpace(m.input.Value())
+		if text != "" {
+			to := m.focusedAgent()
+			// If an agent is waiting on a question (e.g. a comprehension-gate
+			// `ask`), the next message ANSWERS it — route it as a user-answer so
+			// the asking agent's `ask` unblocks, not as a steer it would ignore.
+			kind := engine.MsgSteer
+			if ans := m.answerTarget(to); ans != "" {
+				to, kind = ans, engine.MsgUserAnswer
+				delete(m.awaitingAnswer, to)
+				// Clear the "question from X" cue now that it is answered; mention any
+				// others still waiting so a stale prompt never lingers on the status bar.
+				if n := len(m.awaitingAnswer); n > 0 {
+					m.status = fmt.Sprintf("answer sent to %s — %d still waiting for an answer", to, n)
+				} else {
+					m.status = "answer sent to " + string(to)
+				}
+			}
+			m.router.Send(engine.Envelope{From: "User", To: to, Kind: kind, Body: text})
+			m.log.userMsg(to, text)
+			m.tr(to).addStyled("you → "+string(to)+": "+text, styleAccent)
+			m.refreshFor(to)
+			m.input.SetValue("")
+		}
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
+}
+
+func (m *model) doSplit(d paneDir) {
+	if m.paneRoot == nil || m.focusPane == nil {
+		return
+	}
+	m.zoom = false
+	m.paneRoot, m.focusPane = splitPane(m.paneRoot, m.focusPane, d, m.focusedAgent())
+	m.relayout()
+}
+
+func (m *model) closePaneCmd() {
+	if m.paneRoot == nil || m.focusPane == nil {
+		return
+	}
+	m.reapShell(m.focusPane)
+	m.paneRoot, m.focusPane = closePane(m.paneRoot, m.focusPane)
+	m.zoom = false
+	m.relayout()
+}
+
+// reapShell cancels and forgets the shell backing pane p (if it is a shell), so
+// closing a shell pane or window doesn't leave a command running detached.
+func (m *model) reapShell(p *pane) {
+	if p == nil || !p.shell {
+		return
+	}
+	if sh := m.shells[p.agent]; sh != nil {
+		sh.stop()
+		delete(m.shells, p.agent)
+	}
+	// Also forget the shell's transcript and bookkeeping — a closed shell never
+	// reopens under the same synthetic id, so keeping these would leak memory and
+	// leave a stale "agent" in m.order for the engagement's lifetime.
+	delete(m.transcripts, p.agent)
+	delete(m.states, p.agent)
+	delete(m.dirty, p.agent)
+	for i, id := range m.order {
+		if id == p.agent {
+			m.order = append(m.order[:i], m.order[i+1:]...)
+			break
+		}
+	}
+}
+
+// reapShells reaps every shell leaf in the subtree rooted at p.
+func (m *model) reapShells(p *pane) {
+	for _, l := range leaves(p) {
+		m.reapShell(l)
+	}
+}
+
+// ---- windows (tabs) ------------------------------------------------------
+
+// ensureWindows lazily creates the window list from the current pane state (so
+// direct-start / tests that set paneRoot without beginSession still work).
+func (m *model) ensureWindows() {
+	if len(m.windows) == 0 {
+		m.windows = []*windowState{{root: m.paneRoot, focus: m.focusPane, zoom: m.zoom, name: "1"}}
+		m.winIdx = 0
+	}
+}
+
+// saveWindow copies the live active-window state back into the window list.
+func (m *model) saveWindow() {
+	m.ensureWindows()
+	w := m.windows[m.winIdx]
+	w.root, w.focus, w.zoom = m.paneRoot, m.focusPane, m.zoom
+}
+
+// activateWindow makes window i the active one, loading its state and relaying.
+func (m *model) activateWindow(i int) {
+	if i < 0 || i >= len(m.windows) {
+		return
+	}
+	m.winIdx = i
+	w := m.windows[i]
+	m.paneRoot, m.focusPane, m.zoom = w.root, w.focus, w.zoom
+	m.relayout()
+}
+
+// newWindow opens a fresh window (tab) showing the orchestrator and switches to it.
+func (m *model) newWindow() {
+	m.saveWindow()
+	root := newLeaf(core.Main)
+	m.windows = append(m.windows, &windowState{root: root, focus: root, name: strconv.Itoa(len(m.windows) + 1)})
+	m.activateWindow(len(m.windows) - 1)
+	m.status = "new window " + m.windows[m.winIdx].name
+}
+
+// nextWindow cycles to the next window.
+func (m *model) nextWindow() {
+	m.ensureWindows()
+	if len(m.windows) < 2 {
+		m.status = "only one window — Ctrl-b c opens another"
+		return
+	}
+	m.saveWindow()
+	m.activateWindow((m.winIdx + 1) % len(m.windows))
+	m.status = "window " + m.windows[m.winIdx].name
+}
+
+// selectWindow switches to window index i (0-based) if it exists.
+func (m *model) selectWindow(i int) {
+	m.ensureWindows()
+	if i == m.winIdx || i < 0 || i >= len(m.windows) {
+		return
+	}
+	m.saveWindow()
+	m.activateWindow(i)
+	m.status = "window " + m.windows[m.winIdx].name
+}
+
+// killWindow closes the active window (never the last one) and renumbers the rest.
+func (m *model) killWindow() {
+	m.ensureWindows()
+	if len(m.windows) < 2 {
+		m.status = "can't close the last window (Ctrl-b x closes a pane)"
+		return
+	}
+	i := m.winIdx
+	m.reapShells(m.paneRoot) // cancel any shells living in the window being closed
+	m.windows = append(m.windows[:i], m.windows[i+1:]...)
+	for j, w := range m.windows {
+		w.name = strconv.Itoa(j + 1)
+	}
+	if i >= len(m.windows) {
+		i = len(m.windows) - 1
+	}
+	m.activateWindow(i)
+	m.status = "closed window; now on " + m.windows[m.winIdx].name
+}
+
+// renderTabs returns a compact tab strip for the header, shown only when more than
+// one window exists. The tabs are PLAIN text (no per-tab styling): the header is one
+// uniformly-styled title bar, and a foreground-only style here would emit a reset
+// that drops the title bar's background to black for the rest of the line. The
+// active window is marked by brackets alone.
+func (m *model) renderTabs() string {
+	if len(m.windows) < 2 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(tabStripLead)
+	for i := range m.windows {
+		b.WriteString(m.tabPart(i))
+	}
+	return b.String()
+}
+
+// tabStripLead is the separator the tab strip starts with, after the env id.
+const tabStripLead = "· "
+
+// tabPart is the header label for window i: the active one is bracketed, the rest
+// are space-padded (so both are the same width for a single-character name).
+func (m *model) tabPart(i int) string {
+	if i == m.winIdx {
+		return "[" + m.windows[i].name + "]"
+	}
+	return " " + m.windows[i].name + " "
+}
+
+// tabSpan is one window tab's clickable column range [start,end) in the header row.
+type tabSpan struct {
+	idx        int
+	start, end int
+}
+
+// tabSpans returns the clickable column range of each window tab in the header,
+// matching renderTabs' layout exactly, so a left-click on a tab can switch to it.
+// It is nil when the tab strip is hidden (fewer than two windows).
+func (m *model) tabSpans() []tabSpan {
+	if len(m.windows) < 2 {
+		return nil
+	}
+	// The header is " oline · <mode> · <envID> " followed by the tab strip.
+	col := lipgloss.Width(fmt.Sprintf(" oline · %s · %s ", m.mode, m.envID)) + lipgloss.Width(tabStripLead)
+	spans := make([]tabSpan, 0, len(m.windows))
+	for i := range m.windows {
+		w := lipgloss.Width(m.tabPart(i))
+		spans = append(spans, tabSpan{idx: i, start: col, end: col + w})
+		col += w
+	}
+	return spans
+}
+
+// answerTarget returns the agent a typed message should ANSWER (because it is
+// blocked on an `ask`), or "" to treat the message as a normal steer. It prefers
+// the focused agent; failing that, if exactly one agent is waiting, that one.
+func (m *model) answerTarget(focused core.AgentID) core.AgentID {
+	if m.awaitingAnswer[focused] {
+		return focused
+	}
+	if len(m.awaitingAnswer) == 1 {
+		for a := range m.awaitingAnswer {
+			return a
+		}
+	}
+	return ""
+}
+
+// applyBudgetInput parses the command line as a time budget for m.budgetTarget:
+// a positive number of minutes, or "none"/"off"/"0" to remove the limit.
+func (m *model) applyBudgetInput() {
+	raw := strings.TrimSpace(m.input.Value())
+	target := m.budgetTarget
+	m.budgetInput = false
+	m.input.SetValue("")
+	switch strings.ToLower(raw) {
+	case "none", "off", "0", "remove", "unlimited":
+		m.router.SetBudget(target, 0)
+		m.status = "removed time budget for " + string(target)
+		return
+	}
+	mins, err := strconv.Atoi(raw)
+	if err != nil || mins <= 0 {
+		m.status = "invalid budget — enter minutes, or 'none' to remove"
+		return
+	}
+	m.router.SetBudget(target, time.Duration(mins)*time.Minute)
+	m.status = fmt.Sprintf("time budget for %s set to %dm", target, mins)
+}
+
+func (m *model) cyclePane() {
+	ls := leaves(m.paneRoot)
+	for i, l := range ls {
+		if l == m.focusPane {
+			m.focusPane = ls[(i+1)%len(ls)]
+			return
+		}
+	}
+}
+
+func (m *model) navPane(dir byte) {
+	if n := navigate(m.paneRoot, m.focusPane, dir); n != nil {
+		m.focusPane = n
+	}
+}
+
+func (m *model) sendSummary() {
+	m.router.Send(engine.Envelope{
+		From: "User", To: core.Main, Kind: engine.MsgSteer,
+		Body: "REFRESH THE SUMMARY PANEL NOW: call `update_summary` with a concise, plain-language state-of-play of the engagement so far (what's done, what's confirmed, what's in progress, what's next), then continue your work.",
+	})
+}
+
+func (m *model) sendDiagram() {
+	m.router.Send(engine.Envelope{
+		From: "User", To: core.Main, Kind: engine.MsgSteer,
+		Body: "REFRESH THE DIAGRAM PANEL NOW: call `update_diagram` with an up-to-date, legible ASCII map of the engagement (pentester: the network — hosts, footholds vs. root, connections, key services; exploiter: the software's main components and how they interact), then continue your work.",
+	})
+}
+
+// setFocus points the focused pane at a view, identified by id: a real agent id
+// (including Main), or the synthetic summaryPaneID / diagramPaneID for the two
+// info views. This is how the roster click and the up/down navigation switch a pane
+// between agents and info views (and how a closed Summary/Diagram view is
+// reopened — just navigate a pane onto it). A live shell pane is never clobbered:
+// a different non-shell pane is retargeted instead.
+func (m *model) setFocus(id core.AgentID) {
+	p := m.focusPane
+	if p != nil && p.shell {
+		p = m.firstNonShellLeaf()
+		if p == nil {
+			return
+		}
+		m.focusPane = p
+	}
+	if p == nil {
+		return
+	}
+	p.summary = id == summaryPaneID
+	p.diagram = id == diagramPaneID
+	p.agent = id // for an info view this is the synthetic id (used for refresh/hit-testing)
+	m.refreshLeaf(p)
+}
+
+// firstNonShellLeaf returns the first leaf in the current window that is not a live
+// shell pane (an agent or info pane is fine to retarget), or nil.
+func (m *model) firstNonShellLeaf() *pane {
+	for _, l := range leaves(m.paneRoot) {
+		if !l.shell {
+			return l
+		}
+	}
+	return nil
+}
+
+// navOrder is the ordered list of selectable views the roster renders and that
+// up/down cycles through: the info panes first (Main, the Summary view, the
+// Diagram view), then the active subagents (running/paused), then the idle ones.
+// The two info views use their synthetic ids so setFocus can switch a pane onto
+// them.
+func (m *model) navOrder() []core.AgentID {
+	order := []core.AgentID{core.Main, summaryPaneID, diagramPaneID}
+	var active, idle []core.AgentID
+	for _, id := range m.order {
+		if id == core.Main {
+			continue // listed under info panes above, not as a subagent
+		}
+		if s := m.states[id]; s == core.Running || s == core.Paused {
+			active = append(active, id)
+		} else {
+			idle = append(idle, id)
+		}
+	}
+	order = append(order, active...)
+	return append(order, idle...)
+}
+
+func indexOfAgent(list []core.AgentID, id core.AgentID) int {
+	for i, x := range list {
+		if x == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// focusRosterDelta moves the focused pane to the next/previous view in navOrder
+// (info panes and subagents alike).
+func (m *model) focusRosterDelta(delta int) {
+	order := m.navOrder()
+	if len(order) == 0 {
+		return
+	}
+	i := indexOfAgent(order, m.focusedAgent())
+	if i < 0 {
+		i = 0
+	} else {
+		i = (i + delta + len(order)) % len(order)
+	}
+	m.setFocus(order[i])
+	m.rosterFollow = true // scroll the Options pane so the new selection is visible
+	m.status = "focus → " + navLabel(order[i])
+}
+
+// navLabel is the human label for a view id (info views get friendly names).
+func navLabel(id core.AgentID) string {
+	switch id {
+	case summaryPaneID:
+		return "Summary"
+	case diagramPaneID:
+		return "Diagram"
+	default:
+		return string(id)
+	}
+}
+
+// focusNextAgent cycles the focused pane to the next agent (tmux-style Ctrl-b n).
+func (m *model) focusNextAgent() { m.focusRosterDelta(1) }
+
+// enterCopyMode shows the focused pane's transcript as plain fullscreen text, so
+// the terminal's own selection copies just that pane's lines (no other panes, no
+// styling/borders).
+func (m *model) enterCopyMode() {
+	id := m.focusedAgent()
+	m.copyAgent = id
+	vp := viewport.New(maxInt(m.w, 1), maxInt(m.h-2, 1))
+	vp.SetContent(m.tr(id).plainText(m.showThoughts))
+	vp.GotoBottom()
+	m.copyVP = vp
+	m.copyMode = true
+	m.status = "copy mode: " + string(id)
+}
+
+func (m *model) viewCopyMode() string {
+	hdr := titleBar.Render(fmt.Sprintf(" copy: %s — drag to select · ↑↓/wheel scroll · Esc exits ", m.copyAgent))
+	return lipgloss.JoinVertical(lipgloss.Left, hdr, m.copyVP.View())
+}
+
+func (m *model) shutdown() {
+	m.refreshLayoutSnapshot()
+	m.saveHistory() // persist the conversation so it can be reloaded on resume
+	if m.cancel != nil {
+		m.cancel()
+	}
+	for _, sh := range m.shells { // cancel any user shell commands still running
+		sh.stop()
+	}
+	// Stop a VM-backed sandbox (QEMU) so no guest process is orphaned; WSL has
+	// nothing to stop and doesn't implement Shutdowner.
+	if m.sess != nil && m.sess.Sandbox != nil {
+		if sd, ok := m.sess.Sandbox.(sandbox.Shutdowner); ok {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			_ = sd.Shutdown(ctx)
+			cancel()
+		}
+	}
+	if m.log != nil {
+		m.log.banner("engagement session ended")
+		m.log.close()
+		m.log = nil
+	}
+}
+
+// ---- event application ---------------------------------------------------
+
+// apply mutates state for one event and renders the affected pane. Used for a
+// single event (and by tests); the live loop uses mutate + flushDirty to batch.
+func (m *model) apply(ev event.Event) {
+	m.mutate(ev)
+	m.flushDirty()
+}
+
+// markDirty records that an agent's pane needs re-rendering.
+func (m *model) markDirty(id core.AgentID) {
+	if m.dirty == nil {
+		m.dirty = map[core.AgentID]bool{}
+	}
+	m.dirty[id] = true
+}
+
+// flushDirty re-renders every pane marked dirty since the last flush (once each).
+func (m *model) flushDirty() {
+	for id := range m.dirty {
+		m.refreshFor(id)
+		delete(m.dirty, id)
+	}
+}
+
+// mutate applies one engine event to the model WITHOUT rendering (it marks the
+// touched agent dirty). flushDirty then renders each dirty pane once.
+func (m *model) mutate(ev event.Event) {
+	m.log.log(ev) // tee every agent event to the host activity log
+	switch e := ev.(type) {
+	case event.TokenDelta:
+		t := m.tr(e.Agent)
+		if e.Text != "" {
+			t.appendText(e.Text)
+		}
+		if e.Reasoning != "" {
+			t.appendThink(e.Reasoning)
+		}
+		m.markDirty(e.Agent)
+	case event.ToolStarted:
+		// A clear space separates the gear glyph from the tool name; the output
+		// (if any) is collapsed under this one-line header until clicked.
+		header := "⚙  " + e.Tool
+		if strings.TrimSpace(e.ArgsPreview) != "" {
+			header += "  " + e.ArgsPreview
+		}
+		// full = the whole command (untruncated), shown when the call is expanded.
+		full := "⚙  " + e.Tool
+		if a := strings.TrimSpace(e.Args); a != "" {
+			full += "  " + a
+		}
+		m.tr(e.Agent).startTool(header, full)
+		m.markDirty(e.Agent)
+	case event.ToolOutput:
+		m.tr(e.Agent).appendToolOut(e.Chunk)
+		m.markDirty(e.Agent)
+	case event.AgentState:
+		m.tr(e.Agent)
+		m.states[e.Agent] = e.State
+		if e.State == core.Killed {
+			delete(m.awaitingAnswer, e.Agent) // a terminated agent is no longer waiting on the user
+			// Don't leave a stale "question from X" cue if the asking agent is gone.
+			if len(m.awaitingAnswer) == 0 && strings.HasPrefix(m.status, "question from ") {
+				m.status = ""
+			}
+		}
+		if e.State == core.Idle || e.State == core.Killed {
+			m.transcripts[e.Agent].finalizeOpen()
+			m.markDirty(e.Agent)
+		}
+	case event.Spawned:
+		m.addAgent(e.Child)
+		m.tr(core.Main).addRich(styleAccent.Render("→ spawned ") + string(e.Child) + styleMuted.Render(" ("+e.Role+")"))
+		m.markDirty(core.Main)
+		// Put the orchestrator's task prompt at the TOP of the new subagent's pane so
+		// the user can scroll up to see exactly what it was told to do.
+		if strings.TrimSpace(e.Prompt) != "" {
+			t := m.tr(e.Child)
+			t.addStyled("task from the orchestrator:", styleAccent)
+			t.addRich(e.Prompt)
+			m.markDirty(e.Child)
+		}
+	case event.UserQuestion:
+		// Track this agent as awaiting an answer. Additive (not a reset) so that
+		// several subagents can have open questions at once — each entry is cleared
+		// when that agent is answered (see the enter handler) or is terminated.
+		m.awaitingAnswer[e.From] = true
+		q := "❓ " + e.Text
+		if len(e.Options) > 0 {
+			q += "\n   options: " + strings.Join(e.Options, " · ")
+		}
+		m.tr(e.From).addStyled(q, styleWarn)
+		m.markDirty(e.From)
+		m.status = "question from " + string(e.From) + " — type an answer and press Enter"
+	case event.Notice:
+		st := styleMuted
+		if e.Level == "error" {
+			st = styleErr
+		} else if e.Level == "warn" {
+			st = styleWarn
+		}
+		to := e.Agent
+		if to == "" {
+			to = core.Main
+		}
+		m.tr(to).addStyled("["+e.Level+"] "+e.Text, st)
+		m.markDirty(to)
+	case event.Usage:
+		in, out, cacheRead := m.costFor(e.Model)
+		// Prompt tokens served from the provider's cache are billed at the cheaper
+		// cache-read rate, not the full input rate; only the uncached remainder is
+		// billed at `in`. Billing everything at `in` overcounts heavily when large
+		// system prompts are reused across turns.
+		cached := e.CachedPromptTokens
+		if cached > e.PromptTokens {
+			cached = e.PromptTokens
+		}
+		uncached := e.PromptTokens - cached
+		cost := float64(uncached)/1e6*in +
+			float64(cached)/1e6*cacheRead +
+			float64(e.CompletionTokens)/1e6*out
+		m.totalCost += cost
+		if e.Summarizer {
+			m.summaryCost += cost
+		}
+		m.enforceCostCap()
+		m.enforceSummaryCap()
+	case event.Finding:
+		// There is no findings pane anymore; the finding is logged and surfaced in the
+		// recording agent's transcript (and so into saved history for the reporter).
+		line := "✔ finding [" + strings.ToUpper(e.Severity) + "] " + e.Title
+		if e.Target != "" {
+			line += " — " + e.Target
+		}
+		m.tr(e.Agent).addStyled(line, severityStyle(e.Severity))
+		m.markDirty(e.Agent)
+	case event.Summary:
+		m.summary = e.Text
+		m.markDirty(summaryPaneID) // refresh the live Summary pane
+	case event.Diagram:
+		m.diagram = e.Text
+		m.markDirty(diagramPaneID) // refresh the live Diagram pane
+	}
+}
+
+// enforceCostCap pauses the whole fleet the first time the running spend reaches the
+// configured cap, and tells the operator. It fires once (a circuit breaker): after
+// that the user can raise budget.maxCostUSD, or resume with Ctrl-b R to continue
+// past the cap for this run.
+func (m *model) enforceCostCap() {
+	if m.costCap <= 0 || m.costCapHit || m.totalCost < m.costCap {
+		return
+	}
+	m.costCapHit = true
+	if m.router != nil {
+		m.router.PauseAll()
+	}
+	m.emitNotice("error", fmt.Sprintf("SPEND CAP reached: $%.2f of $%.2f — all agents paused. Raise budget.maxCostUSD in config, or resume with Ctrl-b R to continue past the cap.", m.totalCost, m.costCap))
+	m.status = fmt.Sprintf("spend cap $%.2f reached — agents paused (Ctrl-b R resumes)", m.costCap)
+}
+
+// enforceSummaryCap is the same circuit breaker for the summarizer (compaction)
+// model: the first time its cumulative spend reaches the ceiling, pause the fleet
+// and tell the operator (a misconfigured expensive `small` model is the usual
+// cause). Fires once.
+func (m *model) enforceSummaryCap() {
+	if m.summaryCap <= 0 || m.summaryCapHit || m.summaryCost < m.summaryCap {
+		return
+	}
+	m.summaryCapHit = true
+	if m.router != nil {
+		m.router.PauseAll()
+	}
+	m.emitNotice("error", fmt.Sprintf("SUMMARIZER COST CAP reached: $%.2f of $%.2f spent on context compaction — all agents paused. Point the `small` tier at a cheaper model or raise budget.maxSummaryCostUSD, then resume with Ctrl-b R.", m.summaryCost, m.summaryCap))
+	m.status = fmt.Sprintf("summarizer cost cap $%.2f reached — agents paused (Ctrl-b R resumes)", m.summaryCap)
+}
+
+// costFor returns the per-1M-token input / output / cache-read USD rates for a
+// model id. A cache-read rate of 0 (unset) falls back to the full input rate.
+func (m *model) costFor(modelID string) (in, out, cacheRead float64) {
+	for _, p := range m.store.Effective().Providers {
+		for _, md := range p.Models {
+			if md.ID == modelID {
+				cr := md.Cost.CacheRead
+				if cr == 0 {
+					cr = md.Cost.Input
+				}
+				return md.Cost.Input, md.Cost.Output, cr
+			}
+		}
+	}
+	return 0, 0, 0
+}
+
+func (m *model) addAgent(id core.AgentID) {
+	if _, ok := m.transcripts[id]; ok {
+		return
+	}
+	m.transcripts[id] = &transcript{}
+	m.order = append(m.order, id)
+	if _, ok := m.states[id]; !ok {
+		m.states[id] = core.Running
+	}
+}
+
+// tr returns an agent's transcript, creating it (and the agent) if needed.
+func (m *model) tr(id core.AgentID) *transcript {
+	t := m.transcripts[id]
+	if t == nil {
+		m.addAgent(id)
+		t = m.transcripts[id]
+	}
+	return t
+}
+
+// writeln appends a pre-styled harness line to an agent's transcript.
+func (m *model) writeln(id core.AgentID, pre string) {
+	m.tr(id).addRich(pre)
+	m.refreshFor(id)
+}
+
+// ---- view ----------------------------------------------------------------
+
+func (m *model) View() string {
+	if m.w == 0 {
+		return "starting oline…"
+	}
+	var s string
+	switch {
+	case m.editing:
+		s = m.viewEditor()
+	case m.running:
+		s = m.viewRunning()
+	default:
+		s = m.viewWizard()
+	}
+	// Paint the whole screen pure black so the logo and every pane sit on one
+	// seamless background (MaxHeight clips rather than growing past the screen).
+	return screenStyle.Width(m.w).Height(m.h).MaxHeight(m.h).Render(s)
+}
+
+// logoBlock renders the embedded ANSI logo centered for the start screen. It is
+// skipped when the terminal is too small to spare the vertical/horizontal room.
+func (m *model) logoBlock() string {
+	if m.hideLogo {
+		return "" // the Sixel splash already showed the banner
+	}
+	art := strings.TrimRight(assets.Logo, "\n")
+	if art == "" {
+		return ""
+	}
+	lines := strings.Split(art, "\n")
+	// Visible width ignores the ANSI color codes in each cell. The caller
+	// (viewWizard) decides whether there is vertical room; here we only require
+	// the width to fit and a basic height floor.
+	cols := lipgloss.Width(lines[0])
+	if cols == 0 || m.w < cols+4 || m.h < len(lines)+2 {
+		return ""
+	}
+	prefix := strings.Repeat(" ", (m.w-cols)/2)
+	var sb strings.Builder
+	sb.WriteString("\n")
+	for _, ln := range lines {
+		sb.WriteString(prefix + ln + "\n")
+	}
+	return sb.String()
+}
+
+func (m *model) viewWizard() string {
+	var b strings.Builder
+	b.WriteString(titleBar.Render("oline — setup") + "\n\n")
+	step := func(active bool, label, body string) {
+		head := "  "
+		if active {
+			head = styleAccent.Render("▶ ")
+		}
+		b.WriteString(head + lipgloss.NewStyle().Bold(active).Render(label) + "\n")
+		if active && body != "" {
+			b.WriteString(body + "\n")
+		}
+		b.WriteString("\n")
+	}
+	radio := func(sel int, opts ...string) string {
+		var sb strings.Builder
+		for i, o := range opts {
+			cur := "  ○ "
+			if i == sel {
+				cur = styleAccent.Render("  ● ")
+			}
+			sb.WriteString(cur + o + "\n")
+		}
+		return sb.String()
+	}
+
+	step(m.step == wMode, "1. Mode", radio(m.modeSel, "Pentester", "Exploiter"))
+	if m.step == wModels {
+		step(true, "Models — pick one per tier (first-run setup)", m.modelsBodyView())
+	}
+	if m.step == wKey {
+		step(true, "API key — "+m.keyProvider+" (not set)", "    "+m.keyIn.View()+"\n    "+styleMuted.Render("no key in $ENV or secrets.yml — stored to ~/oline/config/secrets.yml (git-ignored)"))
+	}
+	step(m.step == wStart, "2. Engagement", radio(m.startSel, "New engagement", "Resume a previous engagement"))
+	step(m.step == wEnv, "3. Environment", m.envBodyView())
+
+	if m.resume {
+		step(m.step == wResume, "4. Previous engagement", m.resumeBodyView(radio))
+		if m.step == wImport {
+			step(true, "   Path (host folder/.tar.gz, or a path in the environment)", "    "+m.importIn.View())
+		}
+		if m.step == wHistory {
+			step(true, "   Conversation history", radio(m.histSel,
+				"Load the previous conversation history", "Start from a clean slate (no history)"))
+		}
+		step(m.step == wScope, "5. Scope (confirm — targets may have changed)", "    "+m.scopeIn.View())
+	} else {
+		step(m.step == wScope, "4. Scope", "    "+m.scopeIn.View())
+		step(m.step == wGoal, "5. Goal", "    "+m.goalIn.View())
+	}
+
+	step(m.step == wVPN, "6. VPN (optional)", radio(m.vpnSel,
+		"No VPN",
+		"Use a VPN already running in the environment",
+		"OpenVPN config already in the environment",
+		"Upload an OpenVPN config from the host"))
+	if m.step == wVPNInput {
+		step(true, "   OpenVPN config path", "    "+m.vpnIn.View())
+	}
+
+	step(m.step == wAuto, "7. Automation", radio(m.autoSel, "Automatic (run end-to-end)", "Manual (approve each step)"))
+
+	if m.preparing {
+		msg := "  preparing environment…"
+		if m.prepCand.Backend == sandbox.BackendQEMU {
+			msg = "  booting QEMU VM (first run downloads the image — this can take a few minutes)…"
+		}
+		b.WriteString(styleAccent.Render(msg) + "\n")
+	}
+	if m.wizErr != "" {
+		b.WriteString(styleErr.Render("  "+m.wizErr) + "\n")
+	}
+	if m.status != "" {
+		b.WriteString(styleAccent.Render("  "+m.status) + "\n")
+	}
+	b.WriteString(styleMuted.Render("\n  ↑/↓ choose · type to edit · Enter next · Ctrl-c twice to quit"))
+	// The logo is rendered outside the padded body so its own centering (and raw
+	// truecolor cells) aren't shifted or reflowed by lipgloss padding.
+	body := lipgloss.NewStyle().Padding(1, 2).Render(b.String())
+	logo := m.logoBlock()
+	// Only prepend the logo when it AND the wizard body both fit the screen; a
+	// taller window never overflows (which was making the window misbehave).
+	if logo != "" {
+		if strings.Count(logo, "\n")+strings.Count(body, "\n")+2 > m.h {
+			logo = ""
+		}
+	}
+	return logo + body
+}
+
+// modelsBodyView renders the first-run model picker: one row per tier, the focused
+// row cycling through the catalog with left/right.
+func (m *model) modelsBodyView() string {
+	if len(m.catalog) == 0 {
+		return styleWarn.Render("    no models found in models.yml — add a provider/model there first")
+	}
+	labels := [3]string{"big   ", "medium", "small "}
+	hints := [3]string{"exploiters, thinkers, critiques, orchestrator", "balanced, in-between work", "summarizers + context compaction"}
+	var sb strings.Builder
+	for i := 0; i < 3; i++ {
+		cur := "    "
+		if i == m.roleFocus {
+			cur = styleAccent.Render("  ▶ ")
+		}
+		sel := m.catalog[m.roleSel[i]].label
+		sb.WriteString(cur + lipgloss.NewStyle().Bold(i == m.roleFocus).Render(labels[i]) + "  " + sel + "\n")
+		sb.WriteString("        " + styleMuted.Render(hints[i]) + "\n")
+	}
+	sb.WriteString(styleMuted.Render("    ↑/↓ choose tier · ←/→ change model · Enter confirms all three"))
+	return sb.String()
+}
+
+func (m *model) envBodyView() string {
+	if m.step != wEnv {
+		if m.selDistro != "" {
+			return "    " + styleMuted.Render(m.selDistro)
+		}
+		return ""
+	}
+	if !m.scanned {
+		return "    scanning environments…"
+	}
+	if len(m.cands) == 0 {
+		return styleWarn.Render("    no WSL/QEMU environments found — press r to rescan")
+	}
+	var sb strings.Builder
+	for i, c := range m.cands {
+		cur := "  ○ "
+		if i == m.envSel {
+			cur = styleAccent.Render("  ● ")
+		}
+		tag := ""
+		if c.Managed {
+			tag = styleMuted.Render("  [oline-managed]")
+		}
+		sb.WriteString(fmt.Sprintf("%s%s  %s%s\n", cur, c.ID, styleMuted.Render(string(c.Backend)), tag))
+	}
+	sb.WriteString(styleMuted.Render("    (press r to rescan · creating a fresh sandbox lands in a later build)"))
+	return sb.String()
+}
+
+func (m *model) resumeBodyView(radio func(int, ...string) string) string {
+	if m.step != wResume {
+		if m.engagement != "" {
+			return "    " + styleMuted.Render(m.engagement)
+		}
+		return ""
+	}
+	opts := append([]string{}, m.engagements...)
+	opts = append(opts, "Provide a path (host folder/.tar.gz, or a path in the environment)…")
+	var sb strings.Builder
+	sb.WriteString(radio(m.engSel, opts...))
+	if len(m.engagements) == 0 {
+		sb.WriteString(styleMuted.Render("    (no saved engagements found in " + m.selDistro + " — choose Import)"))
+	}
+	return sb.String()
+}
+
+func (m *model) viewRunning() string {
+	if m.copyMode {
+		return m.viewCopyMode()
+	}
+	// Cap the header to a single row of the terminal width: a wide header (long env
+	// id + tab strip) would otherwise wrap to two rows, making the whole frame taller
+	// than the screen and clipping the bottom pane.
+	header := titleBar.MaxWidth(m.w).MaxHeight(1).Render(fmt.Sprintf(" oline · %s · %s %s", m.mode, m.envID, m.renderTabs()))
+
+	var main string
+	if m.zoom && m.focusPane != nil {
+		main = m.renderLeaf(m.focusPane)
+	} else if m.paneRoot != nil {
+		main = m.renderPane(m.paneRoot)
+	}
+	// The Options pane is hidden with Ctrl-b ?, giving the main panes the full width.
+	body := main
+	if m.showRoster {
+		roster := m.renderRoster(m.rightW, m.bodyH)
+		body = lipgloss.JoinHorizontal(lipgloss.Top, main, " ", roster)
+	}
+
+	running := 0
+	for _, s := range m.states {
+		if s == core.Running {
+			running++
+		}
+	}
+	mode := "auto"
+	if m.sess != nil && m.sess.Manual {
+		mode = "manual"
+	}
+	th := "thoughts:on"
+	if !m.showThoughts {
+		th = "thoughts:off"
+	}
+	pfx := ""
+	if m.prefix {
+		pfx = styleAccent.Render(" PREFIX ")
+	}
+	// MaxHeight(1) so a long status can never wrap to a second line and push the
+	// view past the screen height.
+	status := statusBar.Width(m.w).MaxHeight(1).Render(fmt.Sprintf(" %s · focus:%s · %d/%d running · %s%s · %s",
+		mode, m.focusedAgent(), running, m.store.Effective().MaxConcurrency, th, pfx, m.status))
+	// When an agent is waiting for an answer, the prompt turns into a cue so the
+	// user knows their next message answers it (not a steer). The roster names the
+	// agent; the input prompt is kept short so the line never overflows.
+	inPrompt := styleAccent.Render(" > ")
+	switch {
+	case m.budgetInput:
+		inPrompt = styleWarn.Render(" ⏱ ")
+	case m.focusShell() != nil:
+		inPrompt = styleAccent.Render(" $ ")
+	case m.answerTarget(m.focusedAgent()) != "":
+		inPrompt = styleWarn.Render(" ❓ ")
+	}
+	input := inPrompt + m.input.View()
+
+	return lipgloss.JoinVertical(lipgloss.Left, header, body, status, input)
+}
+
+// renderPane recursively renders the split tree.
+func (m *model) renderPane(p *pane) string {
+	if p.leaf {
+		return m.renderLeaf(p)
+	}
+	if p.dir == splitH {
+		return lipgloss.JoinHorizontal(lipgloss.Top, m.renderPane(p.a), m.renderPane(p.b))
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, m.renderPane(p.a), m.renderPane(p.b))
+}
+
+func (m *model) renderLeaf(p *pane) string {
+	innerW := p.w - 2
+	if innerW < 1 {
+		innerW = 1
+	}
+	innerH := p.h - 2
+	if innerH < 1 {
+		innerH = 1
+	}
+	border := paneBorder
+	label := string(p.agent)
+	switch {
+	case p.shell:
+		label = string(p.agent) + "  $ shell"
+	case p.summary:
+		label = "Summary"
+	case p.diagram:
+		label = "Diagram"
+	}
+	title := styleMuted.Render(label)
+	if p == m.focusPane {
+		border = paneBorderFocused
+		title = styleAccent.Render(label)
+	}
+	switch {
+	case p.shell:
+		if sh := m.shells[p.agent]; sh != nil && sh.running() {
+			title += "  " + styleWarn.Render("running… (Ctrl-b S stops)")
+		}
+	case p.summary || p.diagram:
+		// no state badge for the info panes
+	default:
+		if s, ok := m.states[p.agent]; ok {
+			title += "  " + stateStyle(s.String()).Render(s.String())
+		}
+	}
+	head := lipgloss.NewStyle().Width(innerW).MaxHeight(1).Render(title)
+	return border.Width(innerW).Height(innerH).Render(head + "\n" + p.vp.View())
+}
+
+func (m *model) renderRoster(w, h int) string {
+	m.rosterAgentRows = map[int]core.AgentID{}
+	m.rosterUserPaneRows = map[int]core.AgentID{}
+	focused := m.focusedAgent()
+
+	// Build the full content as a list of lines, with parallel maps from content line
+	// index -> the view it selects (for scroll-aware click hit-testing): rowID for
+	// agent/info views (click retargets the focused pane) and shellIdx for opened
+	// shells (click jumps to that shell's pane).
+	var rows []string
+	rowID := map[int]core.AgentID{}
+	shellIdx := map[int]core.AgentID{}
+	focusedLine := -1
+	add := func(s string) { rows = append(rows, s) }
+	addSel := func(s string, id core.AgentID) {
+		if id == focused {
+			focusedLine = len(rows)
+		}
+		rowID[len(rows)] = id
+		rows = append(rows, s)
+	}
+	addShell := func(s string, id core.AgentID) {
+		if id == focused {
+			focusedLine = len(rows)
+		}
+		shellIdx[len(rows)] = id
+		rows = append(rows, s)
+	}
+
+	add(styleAccent.Render("Options") + "   " + styleMuted.Render(fmt.Sprintf("spent $%.4f", m.totalCost)))
+	add(styleMuted.Render("agent · state · ⏱ · ctx%"))
+	if n := len(m.awaitingAnswer); n > 0 {
+		add(styleWarn.Render(fmt.Sprintf("❓ %d waiting for your answer", n)))
+	}
+
+	// Subagents split active (running/paused) first, then idle; Main is listed under
+	// "info panes" below, not among the subagents.
+	var active, idle []core.AgentID
+	for _, id := range m.order {
+		if id == core.Main {
+			continue
+		}
+		if s := m.states[id]; s == core.Running || s == core.Paused {
+			active = append(active, id)
+		} else {
+			idle = append(idle, id)
+		}
+	}
+
+	renderRow := func(id core.AgentID) {
+		st := m.states[id].String()
+		cursor := "  "
+		if id == focused {
+			cursor = styleAccent.Render("▸ ")
+		}
+		badge := ""
+		if m.awaitingAnswer[id] {
+			badge += " " + styleWarn.Render("❓")
+		}
+		if id != core.Main && m.router != nil && m.states[id] == core.Running {
+			if rem, ok := m.router.Remaining(id); ok {
+				badge += " " + styleMuted.Render(fmtRemaining(rem))
+			}
+		}
+		if m.router != nil {
+			if pct, ok := m.router.ContextUsage(id); ok {
+				badge += " " + styleMuted.Render(fmt.Sprintf("%d%%", pct))
+			}
+		}
+		addSel(fmt.Sprintf("%s%-10s %s%s", cursor, truncate(string(id), 10), stateStyle(st).Render(st), badge), id)
+	}
+
+	renderInfoRow := func(id core.AgentID, label string) {
+		cursor := "  "
+		if id == focused {
+			cursor = styleAccent.Render("▸ ")
+		}
+		addSel(cursor+label, id)
+	}
+
+	section := func(label string, ids []core.AgentID) {
+		add(styleMuted.Render(fmt.Sprintf("%s (%d)", label, len(ids))))
+		if len(ids) == 0 {
+			add(styleMuted.Render("  —"))
+			return
+		}
+		for _, id := range ids {
+			renderRow(id)
+		}
+	}
+
+	// User panes: the shells the user has opened (via Ctrl-b $). Shown ONLY when at
+	// least one shell is open. Each row is click-only (jumps to that shell's pane,
+	// switching tabs if needed); it is not part of the up/down view cycle.
+	if shells := m.shellIDsSorted(); len(shells) > 0 {
+		add(styleMuted.Render(fmt.Sprintf("user panes (%d)", len(shells))))
+		for _, sid := range shells {
+			cursor := "  "
+			if sid == focused {
+				cursor = styleAccent.Render("▸ ")
+			}
+			label := cursor + string(sid)
+			if sh := m.shells[sid]; sh != nil && sh.running() {
+				label += "  " + styleWarn.Render("running…")
+			}
+			addShell(label, sid)
+		}
+	}
+
+	// Info panes: the orchestrator plus the two live views. Selecting any of these
+	// (click, or up/down) shows it in the focused pane — which is also how you reopen
+	// a Summary or Diagram pane you closed. (Open a shell with Ctrl-b $.)
+	add(styleMuted.Render("info panes"))
+	renderRow(core.Main)
+	renderInfoRow(summaryPaneID, "Summary")
+	renderInfoRow(diagramPaneID, "Diagram")
+
+	section("active subagents", active)
+	section("idle subagents", idle)
+
+	add("")
+	add(styleAccent.Render("Ctrl-b Commands"))
+	for _, kl := range strings.Split(keyHelp(), "\n") {
+		add(styleMuted.Render(kl))
+	}
+
+	// The bordered box is exactly w × h; its inner content area is (w-2) × (h-2).
+	innerW, innerH := w-2, h-2
+	if innerW < 1 {
+		innerW = 1
+	}
+	if innerH < 1 {
+		innerH = 1
+	}
+
+	total := len(rows)
+	// When the content overflows, reserve the last inner row for a scroll hint so the
+	// user knows the pane scrolls (mouse wheel). Otherwise everything fits.
+	visH := innerH
+	overflow := total > innerH
+	if overflow {
+		visH = innerH - 1
+		if visH < 1 {
+			visH = 1
+		}
+	}
+	maxScroll := total - visH
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	// Keyboard navigation asks (via rosterFollow) to scroll the selected row into view.
+	if m.rosterFollow && focusedLine >= 0 {
+		if focusedLine < m.rosterScroll {
+			m.rosterScroll = focusedLine
+		} else if focusedLine >= m.rosterScroll+visH {
+			m.rosterScroll = focusedLine - visH + 1
+		}
+		m.rosterFollow = false
+	}
+	if m.rosterScroll > maxScroll {
+		m.rosterScroll = maxScroll
+	}
+	if m.rosterScroll < 0 {
+		m.rosterScroll = 0
+	}
+
+	// Slice the visible window and map each visible selectable row to its screen Y.
+	var b strings.Builder
+	for i := 0; i < visH; i++ {
+		ci := m.rosterScroll + i
+		if ci >= total {
+			break
+		}
+		screenY := m.bodyTop + 1 + i
+		if id, ok := rowID[ci]; ok {
+			m.rosterAgentRows[screenY] = id
+		}
+		if id, ok := shellIdx[ci]; ok {
+			m.rosterUserPaneRows[screenY] = id
+		}
+		b.WriteString(rows[ci] + "\n")
+	}
+	if overflow {
+		up, down := "  ", "  "
+		if m.rosterScroll > 0 {
+			up = "▲ "
+		}
+		if m.rosterScroll < maxScroll {
+			down = "▼ "
+		}
+		b.WriteString(styleMuted.Render(fmt.Sprintf("%s%smore — scroll wheel", up, down)))
+	}
+	return paneBorder.Width(innerW).Height(innerH).MaxHeight(h).Render(strings.TrimRight(b.String(), "\n"))
+}
+
+// summaryContent is the body of the Summary pane: the orchestrator's live
+// state-of-play (update_summary), wrapped to width w. Empty until the orchestrator
+// sets one.
+func (m *model) summaryContent(w int) string {
+	if w < 1 {
+		w = 1
+	}
+	if strings.TrimSpace(m.summary) == "" {
+		// Wrap the placeholder to the pane width so it doesn't overflow and get clipped.
+		return styleMuted.Width(w).Render("(no summary yet — the orchestrator updates this as the engagement progresses; Ctrl-b s asks it to refresh)")
+	}
+	// The orchestrator writes the summary in Markdown (update_summary); render it as
+	// Markdown like the agent transcripts, not raw text. Hard-wrap the result to w so a
+	// long token or wide table can't overflow the pane into the next one.
+	return wrapPlain(renderMarkdown(m.getMD(w), strings.TrimSpace(m.summary)), w)
+}
+
+// diagramContent is the body of the Diagram pane: the orchestrator's live ASCII map
+// (update_diagram), rendered VERBATIM in monospace — not as Markdown — so the art's
+// column alignment is preserved. Each line is truncated (never wrapped) to width w so
+// an over-wide map keeps its row structure; zoom the pane (Ctrl-b z) to see more.
+// diagramWidth returns the Diagram pane's current content width in columns (0 if it
+// has not been laid out yet). Safe to call from any goroutine; the engine's
+// update_diagram reads it to reject an over-wide map.
+func (m *model) diagramWidth() int { return int(atomic.LoadInt64(&m.diagramW)) }
+
+func (m *model) diagramContent(w int) string {
+	if w < 1 {
+		w = 1
+	}
+	if strings.TrimSpace(m.diagram) == "" {
+		// Wrap the placeholder to the pane width so it doesn't overflow and get clipped.
+		return styleMuted.Width(w).Render("(no diagram yet — the orchestrator draws a network/software map here as the engagement progresses; Ctrl-b d asks it to refresh)")
+	}
+	var b strings.Builder
+	for i, line := range strings.Split(strings.Trim(m.diagram, "\n"), "\n") {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(ansi.Truncate(line, w, "")) // clip, don't wrap, to keep rows aligned
+	}
+	return b.String()
+}
+
+// renderMarkdown renders src through r, trimming the trailing newline glamour adds;
+// it falls back to the raw text if the renderer is unavailable or rendering fails.
+func renderMarkdown(r *glamour.TermRenderer, src string) string {
+	if r == nil {
+		return src
+	}
+	out, err := r.Render(src)
+	if err != nil {
+		return src
+	}
+	return strings.TrimRight(out, "\n")
+}
+
+// keyHelp returns the prefix-key cheat sheet body (without a header; the roster
+// prints an accent-styled "Ctrl-b Commands" heading above it).
+func keyHelp() string {
+	return ` % / |   split across
+ " / -   split down
+ ←↑↓→ / hjkl  move
+ z   zoom pane
+ x   close pane
+ o   cycle panes
+ g/G top/bottom
+ $   shell pane
+ [   copy mode
+ c   new window
+ n   next window
+ 1-9 window N
+ &   close window
+ p   pause agent
+ P   pause all
+ r   resume agent
+ R   resume all
+ K   kill agent
+ S   stop commands
+ s   summary
+ d   diagram
+ t   toggle thoughts
+ b   time budget
+ e   editor
+ ?   show/hide pane
+ q   quit`
+}
+
+// ---- helpers -------------------------------------------------------------
+
+// fmtRemaining formats a remaining time budget as m:ss (e.g. 29:05). Minutes are
+// uncapped so a budget over an hour still reads correctly. It FLOORS to whole
+// seconds (not round-to-nearest): a render can land at any sub-second offset, and
+// flooring makes the shown value depend only on the whole seconds left, so the
+// countdown decrements by one each second instead of flickering between two values
+// as renders land either side of a half-second boundary.
+func fmtRemaining(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	secs := int(d.Seconds()) // truncate toward zero == floor for d >= 0
+	return fmt.Sprintf("%d:%02d", secs/60, secs%60)
+}
+
+func truncate(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	if n <= 0 {
+		return ""
+	}
+	return string(r[:n-1]) + "…"
+}
+
+func modeLabel(manual bool) string {
+	if manual {
+		return "manual"
+	}
+	return "automatic"
+}
+
+func managedFirst(cs []sandbox.Candidate) []sandbox.Candidate {
+	var managed, other []sandbox.Candidate
+	for _, c := range cs {
+		if c.Managed {
+			managed = append(managed, c)
+		} else {
+			other = append(other, c)
+		}
+	}
+	return append(managed, other...)
+}
+
+func assetsFor(mode config.Mode) fs.FS {
+	if mode == config.ModeExploiter {
+		return assets.ExploiterFS
+	}
+	return assets.PentesterFS
+}
