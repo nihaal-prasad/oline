@@ -4,15 +4,13 @@
   <img src="docs/logo.png" alt="O-Line" width="560">
 </p>
 
-**Offensive Line**: a Go program that runs a fleet of AI agents inside an
-isolated sandbox to go after an authorized target.
+**Offensive Line**: A Go program that runs an "offensive line" of AI agents
+inside an isolated sandbox coordinate an attack on an authorized target.
 
 Two modes:
 
-- **Pentester**: an orchestrator coordinates 17 subagents to run a penetration
-  test against a network.
-- **Exploiter**: an orchestrator coordinates 9 subagents to discover and
-  develop fully-weaponizable exploits.
+- **Pentester**: Run a penetration test against a network using AI agents.
+- **Exploiter**: Develop fully-weaponized exploits using AI agents.
 
 > **Authorized use only.** Run oline only against systems you own or have written
 > permission to test. The author is not responsible for illegal use.
