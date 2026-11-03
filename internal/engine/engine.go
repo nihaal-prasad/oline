@@ -149,6 +149,10 @@ type Session struct {
 	// sufficient. Nil => compaction uses the agent's own model.
 	SummarizerLLM   LLM
 	SummarizerModel string
+	// SummarizerContextTokens is the summarizer model's context window (0 = unknown).
+	// Compaction caps the transcript it hands that model to what this window holds,
+	// so a small summarizer model isn't sent more than it can accept.
+	SummarizerContextTokens int
 
 	// DiagramWidth returns the LIVE content width (in display columns) of the TUI's
 	// Diagram pane, so update_diagram can reject a map whose lines would be clipped

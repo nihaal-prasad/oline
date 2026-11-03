@@ -6,8 +6,7 @@
 - A sandbox backend on the machine you run it on:
   - WSL on Windows (a distro oline creates, or one you point it at), or
   - QEMU (`qemu-system-x86_64` and `qemu-img`) on Windows or Linux.
-- An OpenAI-compatible model provider and an API key for it. oline ships with no
-  default provider; you configure one in the first-run setup wizard.
+- An OpenAI-compatible model provider and an API key for it.
 
 ## Build
 
@@ -19,7 +18,7 @@ make dist                 # cross-compiled binaries into dist/ (or: pwsh ./build
 
 ## Provider and API key
 
-oline ships with no provider. On the first run, the setup wizard asks for your
+`oline` ships with no provider. On the first run, the setup wizard asks for your
 OpenAI-compatible provider: a name, a base URL, an API key, and a model for each
 tier. It saves the provider to `~/oline/config/<mode>/models.yml` and the key to
 `~/oline/config/secrets.yml`.

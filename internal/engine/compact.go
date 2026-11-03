@@ -94,9 +94,49 @@ func (a *Agent) compactIfNeeded(ctx context.Context) {
 	// indefinitely (the normal turn stream has the same backstop).
 	sctx, cancel := context.WithTimeout(ctx, llmTurnTimeout)
 	defer cancel()
-	summary, err := a.summarize(sctx, older)
-	if err != nil || strings.TrimSpace(summary) == "" {
-		a.s.emit(event.Notice{Agent: a.id, Level: "warn", Text: string(a.id) + ": context compaction failed; continuing without it"})
+
+	// Cap the summary length to a fraction of the ceiling so a small ceiling can't
+	// produce a summary larger than the ceiling itself (which would re-trigger
+	// compaction every turn — the thrash guard).
+	maxTok := summaryMaxTokens
+	if ceil/4 < maxTok {
+		maxTok = ceil / 4
+	}
+	if maxTok < 256 {
+		maxTok = 256
+	}
+
+	// Try the cheap summarizer model first, then fall back to the agent's own model
+	// (which already handles this agent's context) if the summarizer one errors or
+	// returns nothing — for example when the summarizer model's context window is
+	// smaller than the transcript. Each attempt caps the transcript to what that
+	// model's window can hold, so the model is never handed more than it accepts.
+	type attempt struct {
+		client  LLM
+		model   string
+		inChars int
+	}
+	var attempts []attempt
+	if a.s.SummarizerLLM != nil && a.s.SummarizerModel != "" {
+		attempts = append(attempts, attempt{a.s.SummarizerLLM, a.s.SummarizerModel, inputBudgetChars(a.s.SummarizerContextTokens, maxTok)})
+	}
+	attempts = append(attempts, attempt{a.llm, a.modelID, inputBudgetChars(ceil, maxTok)})
+
+	var summary string
+	var lastErr error
+	for _, at := range attempts {
+		summary, lastErr = a.summarize(sctx, at.client, at.model, older, at.inChars, maxTok)
+		if lastErr == nil && strings.TrimSpace(summary) != "" {
+			break
+		}
+	}
+	if strings.TrimSpace(summary) == "" {
+		reason := "the model returned an empty summary"
+		if lastErr != nil {
+			reason = lastErr.Error()
+		}
+		a.s.emit(event.Notice{Agent: a.id, Level: "warn",
+			Text: fmt.Sprintf("%s: context compaction failed (%s); continuing without it", a.id, reason)})
 		return
 	}
 	newHist := make([]llm.Message, 0, len(tail)+1)
@@ -112,10 +152,30 @@ func (a *Agent) compactIfNeeded(ctx context.Context) {
 		Text: fmt.Sprintf("%s: auto-compacted context (~%d → ~%d tokens, ceiling %d)", a.id, before, after, ceil)})
 }
 
-// summarize produces a dense brief of older messages via the agent's model. The
-// transcript is flattened to plain text, so tool-call/result pairing never
+// inputBudgetChars is how many characters of transcript may be handed to a model
+// with ctxTokens of context window, once room is left for the summary output
+// (outTokens) and a little overhead. 0 (unknown window) means the fixed cap. The
+// result is clamped to [4000, maxSummarizeChars] so there is always something to
+// summarize but never more than the hard cap.
+func inputBudgetChars(ctxTokens, outTokens int) int {
+	if ctxTokens <= 0 {
+		return maxSummarizeChars
+	}
+	budget := (ctxTokens - outTokens - 1024) * charsPerToken
+	if budget < 4000 {
+		budget = 4000
+	}
+	if budget > maxSummarizeChars {
+		budget = maxSummarizeChars
+	}
+	return budget
+}
+
+// summarize produces a dense brief of older messages via the given model, capping
+// the flattened transcript to inChars characters and the output to maxTok tokens.
+// The transcript is flattened to plain text, so tool-call/result pairing never
 // matters for the summarization request.
-func (a *Agent) summarize(ctx context.Context, older []llm.Message) (string, error) {
+func (a *Agent) summarize(ctx context.Context, client LLM, model string, older []llm.Message, inChars, maxTok int) (string, error) {
 	var sb strings.Builder
 	for _, m := range older {
 		switch m.Role {
@@ -133,24 +193,8 @@ func (a *Agent) summarize(ctx context.Context, older []llm.Message) (string, err
 		}
 	}
 	text := sb.String()
-	if len(text) > maxSummarizeChars { // keep the most recent part if huge
-		text = text[len(text)-maxSummarizeChars:]
-	}
-	// Route compaction through the cheaper summarizer model when the session has one,
-	// else the agent's own model.
-	client, model := a.llm, a.modelID
-	if a.s.SummarizerLLM != nil && a.s.SummarizerModel != "" {
-		client, model = a.s.SummarizerLLM, a.s.SummarizerModel
-	}
-	// Cap the summary to a fraction of the agent's ceiling so a small ceiling can't
-	// produce a summary larger than the ceiling itself (which would re-trigger
-	// compaction every turn — the thrash guard).
-	maxTok := summaryMaxTokens
-	if ceil := a.cfg.MaxContextTokens; ceil > 0 && ceil/4 < maxTok {
-		maxTok = ceil / 4
-	}
-	if maxTok < 256 {
-		maxTok = 256
+	if inChars > 0 && len(text) > inChars { // keep the most recent part if too long
+		text = text[len(text)-inChars:]
 	}
 	req := llm.ChatReq{
 		Model: model,

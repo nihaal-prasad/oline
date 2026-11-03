@@ -1468,6 +1468,7 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	if small := m.store.Effective().ModelRoles.Small; small != "" {
 		if cl, mid, err := llmFor(small); err == nil {
 			m.sess.SummarizerLLM, m.sess.SummarizerModel = cl, mid
+			m.sess.SummarizerContextTokens = m.modelContextWindow(small)
 		}
 	}
 	m.costCap = m.store.Effective().Budget.MaxCostUSD
@@ -2835,6 +2836,21 @@ func (m *model) costFor(modelID string) (in, out, cacheRead float64) {
 		}
 	}
 	return 0, 0, 0
+}
+
+// modelContextWindow returns the declared context window for a "provider/model-id"
+// selector, or 0 if unknown.
+func (m *model) modelContextWindow(sel string) int {
+	prov, id, ok := strings.Cut(sel, "/")
+	if !ok {
+		return 0
+	}
+	for _, md := range m.store.Providers()[prov].Models {
+		if md.ID == id {
+			return md.ContextWindow
+		}
+	}
+	return 0
 }
 
 func (m *model) addAgent(id core.AgentID) {
