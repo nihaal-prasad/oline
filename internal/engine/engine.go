@@ -1214,6 +1214,7 @@ func (a *Agent) stream(ctx context.Context) (string, []llm.ToolCallDelta, error)
 	var text strings.Builder
 	var reason strings.Builder
 	var frags []llm.ToolCallDelta
+	var usage *llm.Usage
 	for d := range ch {
 		switch {
 		case d.TextDelta != "":
@@ -1225,10 +1226,16 @@ func (a *Agent) stream(ctx context.Context) (string, []llm.ToolCallDelta, error)
 		case d.ToolCall != nil:
 			frags = append(frags, *d.ToolCall)
 		case d.Usage != nil:
-			a.s.emit(event.Usage{Agent: a.id, Model: a.modelID,
-				PromptTokens: d.Usage.PromptTokens, CompletionTokens: d.Usage.CompletionTokens,
-				CachedPromptTokens: d.Usage.CachedPromptTokens})
+			// A provider may report usage on every chunk (often the running total),
+			// not just once. Keep the latest and bill ONCE after the stream, so a
+			// single request isn't counted many times over.
+			usage = d.Usage
 		}
+	}
+	if usage != nil {
+		a.s.emit(event.Usage{Agent: a.id, Model: a.modelID,
+			PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens,
+			CachedPromptTokens: usage.CachedPromptTokens})
 	}
 	if reason.Len() > 0 { // remember the latest turn's thoughts for the inspect tool
 		a.mu.Lock()

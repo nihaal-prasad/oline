@@ -169,17 +169,24 @@ func (a *Agent) runLLMText(ctx context.Context, client LLM, req llm.ChatReq) (st
 	errc := make(chan error, 1)
 	go func() { errc <- client.Stream(ctx, req, ch) }()
 	var b strings.Builder
+	var usage *llm.Usage
 	for d := range ch {
 		if d.TextDelta != "" {
 			b.WriteString(d.TextDelta)
 		}
 		if d.Usage != nil {
-			// Report compaction spend so the TUI counts it in the engagement total and
-			// against the summarizer cost ceiling (it is otherwise invisible).
-			a.s.emit(event.Usage{Agent: a.id, Model: req.Model,
-				PromptTokens: d.Usage.PromptTokens, CompletionTokens: d.Usage.CompletionTokens,
-				CachedPromptTokens: d.Usage.CachedPromptTokens, Summarizer: true})
+			// A provider may report usage on every chunk (often the running total);
+			// keep the latest and bill ONCE below, or a single compaction gets counted
+			// many times over.
+			usage = d.Usage
 		}
+	}
+	if usage != nil {
+		// Report compaction spend so the TUI counts it in the engagement total and
+		// against the summarizer cost ceiling (it is otherwise invisible).
+		a.s.emit(event.Usage{Agent: a.id, Model: req.Model,
+			PromptTokens: usage.PromptTokens, CompletionTokens: usage.CompletionTokens,
+			CachedPromptTokens: usage.CachedPromptTokens, Summarizer: true})
 	}
 	return b.String(), <-errc
 }

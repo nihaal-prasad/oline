@@ -5,7 +5,7 @@
 </p>
 
 **Offensive Line**: a Go program that runs a fleet of AI agents inside an
-isolated sandbox to test an authorized target.
+isolated sandbox to go after an authorized target.
 
 Two modes:
 
