@@ -59,11 +59,12 @@ The default layout tiles panes like tmux:
 - The left pane follows the orchestrator.
 - The center stacks two read-only panes:
   - **Summary** (top): the orchestrator's current state of play, in Markdown.
-    `Ctrl-b s` asks it to refresh now.
+    `Ctrl-b s` asks it to refresh both this and the Diagram pane now.
   - **Diagram** (bottom): an ASCII map the orchestrator draws (a network map in
     pentester mode, a software-component map in exploiter mode). `Ctrl-b d` asks it
-    to refresh now. It is shown verbatim in monospace; lines wider than the pane
-    are clipped, so zoom the pane (`Ctrl-b z`) to see a large map.
+    to refresh just this pane now (`Ctrl-b s` refreshes both). It is shown verbatim
+    in monospace; lines wider than the pane are clipped, so zoom the pane
+    (`Ctrl-b z`) to see a large map.
   Both panes are read-only; focus an agent to type a message.
 - The right **Options** pane (toggle with `Ctrl-b ?`) lists, in order: a **user
   panes** section with the shells you have opened; an **info panes** section with
@@ -114,7 +115,7 @@ Press `Ctrl-b`, then one of these keys:
 | `r` / `R` | resume the focused agent / all agents |
 | `K` | kill the focused agent |
 | `S` | stop the commands the focused agent (or shell) is running |
-| `s` | refresh the Summary pane now |
+| `s` | refresh the Summary and Diagram panes now |
 | `d` | refresh the Diagram pane now |
 | `t` | toggle agent thoughts |
 | `b` | change the focused agent's time budget |

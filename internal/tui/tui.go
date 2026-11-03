@@ -2117,7 +2117,7 @@ func (m *model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "s":
 			m.sendSummary()
-			m.status = "requested summary from orchestrator"
+			m.status = "requested summary + diagram refresh from orchestrator"
 		case "d":
 			m.sendDiagram()
 			m.status = "requested diagram from orchestrator"
@@ -2489,7 +2489,7 @@ func (m *model) navPane(dir byte) {
 func (m *model) sendSummary() {
 	m.router.Send(engine.Envelope{
 		From: "User", To: core.Main, Kind: engine.MsgSteer,
-		Body: "REFRESH THE SUMMARY PANEL NOW: call `update_summary` with a concise, plain-language state-of-play of the engagement so far (what's done, what's confirmed, what's in progress, what's next), then continue your work.",
+		Body: "REFRESH BOTH LIVE PANELS NOW: first call `update_summary` with a concise, plain-language state-of-play of the engagement so far (what's done, what's confirmed, what's in progress, what's next), then call `update_diagram` with an up-to-date, legible ASCII map of the engagement (pentester: the network — hosts, footholds vs. root, connections, key services; exploiter: the software's main components and how they interact), then continue your work.",
 	})
 }
 
@@ -3458,7 +3458,7 @@ func keyHelp() string {
  R   resume all
  K   kill agent
  S   stop commands
- s   summary
+ s   summary+diagram
  d   diagram
  t   toggle thoughts
  b   time budget

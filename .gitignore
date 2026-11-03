@@ -1,11 +1,3 @@
-# Built binaries
-/oline
-/oline.exe
-/dist/
-*.exe
-*.test
-*.out
-
 # Secrets — never commit. oline stores API keys at ~/oline/config/secrets.yml
 # (outside the repo), but guard against any stray copy landing here.
 secrets.yml
