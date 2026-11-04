@@ -402,7 +402,7 @@ func TestMessagingAndAsk(t *testing.T) {
 
 	s := engine.NewSession(tools.NewRegistry(), mockSB{}, llmFor, cfgFor, events, 5)
 	// Automatic mode: ask must NOT block; it records the question and proceeds.
-	s.Manual = false
+	s.Mode = core.Automatic
 	mainCfg := engine.AgentConfig{Role: "Main", Model: "mock/main", IsOrchestrator: true,
 		Tools: []string{"send_message", "ask"}}
 

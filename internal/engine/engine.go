@@ -124,7 +124,7 @@ type Session struct {
 	LLMFor    LLMResolver
 	ConfigFor ConfigResolver
 	Events    chan event.Event
-	Manual    bool // manual mode: `ask` blocks for a real user answer; automatic mode: `ask` returns "proceed"
+	Mode      core.RunMode // automatic | manual | watcher; drives `ask` blocking and the watcher execution block. May change mid-engagement.
 	// Interactive keeps the orchestrator alive between turns: when it finishes a
 	// turn with no tool calls it goes idle and WAITS for the next message (a user
 	// instruction or a peer) instead of ending the run. The TUI sets this so the
@@ -232,6 +232,31 @@ func CompileDeny(globs []string) []*regexp.Regexp {
 		}
 	}
 	return out
+}
+
+// watcherBlocks reports whether a tool call must be refused in watcher mode: the
+// execution and target-driving primitives (bash, bash_bg, and the revshell actions
+// that run a listener or drive the shell). The read-only revshell actions (read,
+// list) are observational and stay allowed, as do all file, research, and
+// coordination tools.
+func watcherBlocks(name, argsJSON string) bool {
+	switch name {
+	case "bash", "bash_bg":
+		return true
+	case "revshell":
+		var a struct {
+			Action string `json:"action"`
+		}
+		_ = json.Unmarshal([]byte(argsJSON), &a)
+		switch strings.ToLower(strings.TrimSpace(a.Action)) {
+		case "read", "list":
+			return false
+		default:
+			return true
+		}
+	default:
+		return false
+	}
 }
 
 // bashDenied reports whether a bash/bash_bg tool-call's command matches a deny
@@ -1310,6 +1335,16 @@ func (a *Agent) dispatch(ctx context.Context, tc llm.ToolCall) (content string, 
 		}
 	}
 
+	// Watcher mode is a hard guarantee of "no automation": the operator runs every
+	// command themselves, and no agent may execute. Block execution/target-driving
+	// tools regardless of the per-agent allow-list; file I/O, research and advisory
+	// coordination stay available so agents can still read/write the workspace and
+	// advise. Read live, so a mid-engagement switch takes effect on the next call.
+	if a.s.Mode == core.Watcher && watcherBlocks(tc.Name, tc.Arguments) {
+		a.s.emit(event.Notice{Agent: a.id, Level: "warn", Text: string(a.id) + ": blocked " + tc.Name + " (watcher mode — the operator runs commands)"})
+		return "watcher mode is active: the operator runs all commands themselves, so you cannot execute. This " + tc.Name + " call was blocked. You may still read and write files in the workspace and advise the operator — do that instead.", true
+	}
+
 	switch tc.Name {
 	case "task":
 		return a.doTask(ctx, tc)
@@ -1909,10 +1944,10 @@ func (a *Agent) doAsk(ctx context.Context, tc llm.ToolCall) (string, bool) {
 		return "ask: 'question' is required", true
 	}
 	a.s.emit(event.UserQuestion{From: a.id, Text: args.Question, Options: args.Options})
-	if !a.s.Manual {
+	if a.s.Mode == core.Automatic {
 		return "Automatic mode: no interactive user is available right now. Proceed using your best judgment, strictly within the authorized scope; do not block waiting on this.", false
 	}
-	// Manual mode: block for a user answer relayed into the mailbox.
+	// Manual/watcher mode: block for a user answer relayed into the mailbox.
 	for {
 		select {
 		case env := <-a.box:
@@ -2130,7 +2165,7 @@ var primitiveSchemas = map[string]llm.FunctionDef{
 	},
 	"ask": {
 		Name:        "ask",
-		Description: "Put a question to the user. In manual mode this blocks for their answer; in automatic mode it records the question and tells you to proceed.",
+		Description: "Put a question to the user. In manual and watcher mode this blocks for their answer; in automatic mode it records the question and tells you to proceed.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"question":{"type":"string"},"options":{"type":"array","items":{"type":"string"}}},"required":["question"]}`),
 	},
 	"record_finding": {

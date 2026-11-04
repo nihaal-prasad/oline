@@ -25,6 +25,45 @@ func CanonRole(s string) string {
 	return string(r)
 }
 
+// RunMode is the engagement's operating mode — who drives the work:
+//   - Automatic: the AI runs the engagement end-to-end on its own.
+//   - Manual: the AI proposes each step and the user approves it before it runs.
+//   - Watcher: the operator runs everything themselves; the AI does not execute at
+//     all, it only watches and advises (it may still read and write workspace files).
+//
+// The mode can change mid-engagement. Watcher is enforced in the engine (execution
+// tools are hard-blocked), not just by prompt.
+type RunMode int
+
+const (
+	Automatic RunMode = iota
+	Manual
+	Watcher
+)
+
+func (m RunMode) String() string {
+	switch m {
+	case Manual:
+		return "manual"
+	case Watcher:
+		return "watcher"
+	default:
+		return "automatic"
+	}
+}
+
+// ParseRunMode maps a label (any case) to a RunMode, defaulting to Automatic.
+func ParseRunMode(s string) RunMode {
+	switch s {
+	case "manual", "Manual", "MANUAL":
+		return Manual
+	case "watcher", "Watcher", "WATCHER":
+		return Watcher
+	default:
+		return Automatic
+	}
+}
+
 // State is an agent's lifecycle state.
 type State int32
 

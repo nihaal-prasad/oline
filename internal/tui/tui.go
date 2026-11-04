@@ -993,9 +993,13 @@ func (m *model) wizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case wAuto:
 		switch k {
 		case "up", "k":
-			m.autoSel = 0
+			if m.autoSel > 0 {
+				m.autoSel--
+			}
 		case "down", "j":
-			m.autoSel = 1
+			if m.autoSel < 2 {
+				m.autoSel++
+			}
 		case "enter":
 			return m.startEngagement()
 		}
@@ -1488,7 +1492,7 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 
 	m.events = make(chan event.Event, 4096) // generous buffer; the TUI batch-drains it
 	m.sess = engine.NewSession(reg, h, llmFor, resolver, m.events, m.store.Effective().MaxConcurrency)
-	m.sess.Manual = m.autoSel == 1
+	m.sess.Mode = runModeFromSel(m.autoSel)
 	m.sess.Interactive = true // keep Main alive between turns so the user can keep chatting
 	// Let update_diagram enforce the LIVE Diagram-pane width (read fresh each call, so
 	// a resize is reflected immediately).
@@ -1557,7 +1561,7 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	m.log = openEngLog(m.engagement)
 	m.log.setRedact(m.store.KnownSecrets()) // scrub any API keys an agent echoes
 	m.log.banner(fmt.Sprintf("%s · %s · env=%s · scope=%q · goal=%q", m.engagement,
-		modeLabel(m.sess.Manual), cand.ID, strings.TrimSpace(m.scopeIn.Value()), strings.TrimSpace(m.goalIn.Value())))
+		m.sess.Mode.String(), cand.ID, strings.TrimSpace(m.scopeIn.Value()), strings.TrimSpace(m.goalIn.Value())))
 	// Resume with history: restore the prior conversation (seed Main live, rebuild
 	// every agent's transcript) before the "resuming" notice, so the old
 	// conversation appears first. If loading fails, fall back to a clean start.
@@ -1583,7 +1587,7 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	if m.resume {
 		start = "resuming engagement " + m.engagement
 	}
-	m.writeln(core.Main, styleMuted.Render(start+" in "+cand.ID+" — "+modeLabel(m.sess.Manual)))
+	m.writeln(core.Main, styleMuted.Render(start+" in "+cand.ID+" — "+m.sess.Mode.String()))
 	if p := m.log.Path(); p != "" {
 		m.writeln(core.Main, styleMuted.Render("activity log → "+p))
 	}
@@ -1776,7 +1780,10 @@ func (m *model) vpnStatusLine(out string, err error) {
 func (m *model) composePrompt() string {
 	var b strings.Builder
 	b.WriteString("AUTHORIZED ENGAGEMENT. The user has confirmed written authorization to test the target.\n")
-	fmt.Fprintf(&b, "Mode: %s.\n", modeLabel(m.sess.Manual))
+	fmt.Fprintf(&b, "Mode: %s.\n", m.sess.Mode.String())
+	if m.sess.Mode == core.Watcher {
+		b.WriteString("WATCHER mode: the operator runs every command themselves in the terminal panes; you do NOT execute anything (the harness blocks bash, bash_bg and revshell). Your job is to WATCH and ADVISE: read and write files in the workspace, track the state of play, and give concise, concrete guidance. The operator shares terminal output with you when they want your read on it; ask (with `ask`) if you need more.\n")
+	}
 	if m.vpnMode != "" && m.vpnMode != "none" {
 		b.WriteString("The in-scope target is reached through a VPN tunnel (a tun/tap interface is up in the sandbox); route to it normally.\n")
 	}
@@ -2231,6 +2238,10 @@ func (m *model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "e":
 			m.openEditor()
+		case "m":
+			m.cycleMode()
+		case "a":
+			m.sharePaneToAI()
 		case "q":
 			m.shutdown()
 			return m, tea.Quit
@@ -3156,7 +3167,10 @@ func (m *model) viewWizard() string {
 		step(true, "   OpenVPN config path", "    "+m.vpnIn.View())
 	}
 
-	step(m.step == wAuto, "7. Automation", radio(m.autoSel, "Automatic (run end-to-end)", "Manual (approve each step)"))
+	step(m.step == wAuto, "7. Automation", radio(m.autoSel,
+		"Automatic (AI runs end-to-end)",
+		"Manual (AI proposes, you approve each step)",
+		"Watcher (you run everything; AI only watches and advises)"))
 
 	if m.preparing {
 		msg := "  preparing environment…"
@@ -3282,9 +3296,9 @@ func (m *model) viewRunning() string {
 			running++
 		}
 	}
-	mode := "auto"
-	if m.sess != nil && m.sess.Manual {
-		mode = "manual"
+	mode := "automatic"
+	if m.sess != nil {
+		mode = m.sess.Mode.String()
 	}
 	th := "thoughts:on"
 	if !m.showThoughts {
@@ -3714,6 +3728,8 @@ func keyHelp() string {
  s   summary+diagram
  d   diagram
  t   toggle thoughts
+ m   cycle mode (auto/manual/watcher)
+ a   share pane with the AI
  b   time budget
  e   editor
  ?   show/hide pane
@@ -3747,11 +3763,16 @@ func truncate(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
-func modeLabel(manual bool) string {
-	if manual {
-		return "manual"
+// runModeFromSel maps the wizard's automation selection (0/1/2) to a RunMode.
+func runModeFromSel(sel int) core.RunMode {
+	switch sel {
+	case 1:
+		return core.Manual
+	case 2:
+		return core.Watcher
+	default:
+		return core.Automatic
 	}
-	return "automatic"
 }
 
 func managedFirst(cs []sandbox.Candidate) []sandbox.Candidate {

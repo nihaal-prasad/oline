@@ -38,8 +38,8 @@ skipped. Press Enter to advance.
    instructions for the resumed run (leave it blank to skip).
 9. **VPN** (optional): point oline at an OpenVPN config so the sandbox connects
    through a VPN before agents start. WSL only.
-10. **Auto / manual**: automatic runs without stopping for input; manual relays
-    agent questions to you. You can switch while running.
+10. **Automation**: pick automatic, manual, or watcher (see [Modes](#modes)
+    below). You can switch while running with `Ctrl-b m`.
 
 ## Running view
 
@@ -77,8 +77,8 @@ The default layout tiles panes like tmux:
   pane. This is also how you reopen a Summary or Diagram pane you closed.
 - A subagent's pane begins with the task prompt the orchestrator gave it; scroll to
   the top to read it.
-- The status bar shows mode, scope, environment, automatic/manual, and the
-  concurrency count.
+- The status bar shows the roster, scope, environment, the operating mode
+  (automatic / manual / watcher), and the concurrency count.
 - The command line sends a message to the focused agent. When a shell pane is
   focused it runs commands instead.
 
@@ -93,6 +93,25 @@ toggles). Click a tool call to expand it and see the full command and its output
 - Drag one pane onto another to swap what they show.
 - The wheel scrolls the pane under the cursor; over the Options pane it scrolls the
   roster.
+
+## Modes
+
+The engagement runs in one of three operating modes, shown in the status bar. Pick
+one in the setup wizard, and switch at any time while running with `Ctrl-b m` (it
+cycles automatic to manual to watcher); the change takes effect immediately and the
+AI is told so it adapts.
+
+- **Automatic**: the AI runs the engagement end to end on its own, pausing only for
+  its built-in gates (destructive actions, scope ambiguity, when it is unsure).
+- **Manual**: the AI proposes each step and waits for your explicit approval before
+  anything runs, one approved step at a time.
+- **Watcher**: you run everything yourself in the terminal panes; the AI executes
+  nothing. `bash`, `bash_bg`, and `revshell` are hard-blocked for every agent, so
+  "no automation" is a guarantee, not just a prompt. The AI watches, keeps notes, and
+  advises, and it may still read and write files in the engagement workspace. It does
+  not ingest your terminals on its own: when you want its read on what is on a screen,
+  focus that pane and press `Ctrl-b a` to share the pane's current content with the
+  orchestrator. `Ctrl-b a` works in any mode.
 
 ## Keybindings
 
@@ -122,6 +141,8 @@ Press `Ctrl-b`, then one of these keys:
 | `s` | refresh the Summary and Diagram panes now |
 | `d` | refresh the Diagram pane now |
 | `t` | toggle agent thoughts |
+| `m` | cycle the operating mode (automatic / manual / watcher) |
+| `a` | share the focused pane's current content with the AI |
 | `b` | change the focused agent's time budget |
 | `e` | open the model/provider editor |
 | `?` | show or hide the Options pane |
