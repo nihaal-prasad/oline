@@ -16,22 +16,6 @@ func centerLayout(ratio float64) (*pane, *pane) {
 	return root, main
 }
 
-// TestAnyShellPane checks the shell-pane detector used to decide whether to add the
-// default shell tab.
-func TestAnyShellPane(t *testing.T) {
-	m := testModel(t)
-	m.paneRoot = newLeaf(core.Main)
-	m.windows = []*windowState{{root: m.paneRoot, focus: m.paneRoot, name: "1"}}
-	if m.anyShellPane() {
-		t.Error("no shell pane exists yet")
-	}
-	sh := newShellLeaf("Shell#1")
-	m.windows = append(m.windows, &windowState{root: sh, focus: sh, name: "2"})
-	if !m.anyShellPane() {
-		t.Error("a shell window should be detected")
-	}
-}
-
 // TestLayoutSnapshotSkipsLoneShell checks a lone shell tab is not persisted (so it
 // doesn't come back as a stray Main tab and pile up across resumes).
 func TestLayoutSnapshotSkipsLoneShell(t *testing.T) {

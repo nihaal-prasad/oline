@@ -165,6 +165,7 @@ Open it with `oline -edit`, or `Ctrl-b e` while running. It edits:
 - per agent: the tier, thinking level, and max context tokens,
 - per provider: the base URL and API key,
 - the live engagement scope,
+- the TUI settings (Customizable Panes),
 - each agent's system prompt, and the orchestrator's system prompt, personality,
   and (pentester) methodology.
 
@@ -190,17 +191,15 @@ overwriting the previous one. Set the interval with `backup.intervalMinutes` in
 
 ## Conversation history
 
-oline saves each engagement's conversation to `<root>/history/<engagement>.json`
-on a timer and when the engagement ends. You can stop oline and later resume the
-same engagement. When you resume an engagement that has saved history, the wizard
-asks whether to load that history or start from a clean slate. Loading it restores
-the orchestrator's context, every agent's transcript, and your window and pane
-layout. Shell panes are not restored.
+oline saves each engagement's conversation to `<root>/history/<engagement>.json` on
+a timer and at the end, so you can stop and later resume it. On resume, the wizard
+asks whether to load that history. Loading restores the orchestrator's context and
+every agent's transcript. In customizable mode it also restores the window/pane
+layout; the fixed Info / Subagents / Shell tabs and shell panes are rebuilt instead.
 
 ## Activity log
 
-For every engagement, oline writes a human-readable log at
-`<root>/logs/<engagement>.log`: each agent's thinking, text, tool calls, tool
-output, state changes, spawns, questions, and notices, as timestamped entries you
-can `tail -f`. It is append-only and written mode 0600 with known API keys
-redacted.
+Each engagement writes a human-readable log at `<root>/logs/<engagement>.log`: every
+agent's thinking, text, tool calls and output, state changes, spawns, questions, and
+notices, as timestamped entries you can `tail -f`. Append-only, mode 0600, with known
+API keys redacted.

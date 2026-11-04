@@ -2040,8 +2040,11 @@ func (m *model) mouseRelease(x, y int) {
 func (m *model) swapPaneViews(a, b *pane) {
 	a.agent, b.agent = b.agent, a.agent
 	a.shell, b.shell = b.shell, a.shell
+	a.rev, b.rev = b.rev, a.rev
+	a.term, b.term = b.term, a.term
 	a.summary, b.summary = b.summary, a.summary
 	a.diagram, b.diagram = b.diagram, a.diagram
+	a.empty, b.empty = b.empty, a.empty
 	m.refreshLeaf(a)
 	m.refreshLeaf(b)
 	// The swapped-in content is new to each pane, so the old viewport scroll offset

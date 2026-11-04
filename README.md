@@ -4,9 +4,8 @@
   <img src="docs/logo.png" alt="O-Line" width="560">
 </p>
 
-**Offensive Line**: A Go program that runs an "offensive line" of AI agents
-inside an isolated sandbox that coordinates an attack against an authorized
-target.
+**Offensive Line** runs a coordinated team of AI agents inside an isolated sandbox
+to attack an authorized target.
 
 Two modes:
 

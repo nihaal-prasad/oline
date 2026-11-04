@@ -41,9 +41,9 @@ Changing scope while running re-applies these rules. See [tui.md](tui.md).
 oline imports or reuses a managed distro. Agents run as the unprivileged `oline-*`
 users in a shared workspace, governed by root-owned iptables rules.
 
-The distro keeps running after oline exits, so when the engagement ends oline
-removes its firewall rules (the `OLINE_OUT` chain, IPv4 and IPv6) once the agents
-have stopped. The `oline-*` users and the workspace are left in place for reuse.
+The distro persists after oline exits, so at engagement end oline removes its
+firewall rules (the `OLINE_OUT` chain, IPv4 and IPv6) once agents have stopped; the
+`oline-*` users and workspace stay for reuse.
 
 The installer runs as root, which on WSL can change the in-guest rules. Use QEMU
 when you need the boundary to hold against a root agent.
@@ -94,10 +94,10 @@ yourself or point a resume at an existing one.
 
 ## VPN
 
-In pentester engagements you can reach a target over a VPN. In the wizard's VPN
-step, point oline at an OpenVPN `.ovpn` config (a path inside the guest, or a path
-on the host that oline copies in) and it starts OpenVPN in the guest before agents
-run. You can also say a VPN is already up, or skip it. WSL only.
+In pentester engagements (WSL only) you can reach a target over a VPN: in the
+wizard's VPN step, point oline at an OpenVPN `.ovpn` config (a guest path, or a host
+path it copies in) and it starts OpenVPN in the guest before agents run. You can also
+declare a VPN already up, or skip it.
 
-Keep your `.ovpn` file outside the sandbox workspace, since a cleanup agent may
-remove files left there during the run.
+Keep your `.ovpn` outside the sandbox workspace, since a cleanup agent may remove
+files left there.

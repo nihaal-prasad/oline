@@ -82,25 +82,6 @@ func (m *model) focusShell() *shellState {
 	return m.shells[m.focusPane.agent]
 }
 
-// anyShellPane reports whether any window currently contains a shell pane (so the
-// default shell tab isn't added when one already exists, e.g. via a restored layout).
-func (m *model) anyShellPane() bool {
-	for _, w := range m.windows {
-		for _, l := range leaves(w.root) {
-			if l.shell {
-				return true
-			}
-		}
-	}
-	// Also check the active window's live tree, in case it hasn't been mirrored yet.
-	for _, l := range leaves(m.paneRoot) {
-		if l.shell {
-			return true
-		}
-	}
-	return false
-}
-
 // shellIDsSorted returns the live shell ids in the order they were opened (Shell#1,
 // Shell#2, …), skipping any that have been closed.
 func (m *model) shellIDsSorted() []core.AgentID {

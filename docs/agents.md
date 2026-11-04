@@ -74,7 +74,8 @@ Subagents can also use `send_message` and `ask`.
 
 ## Tools
 
-Each subagent only sees the tools on its allow-list.
+Each subagent only sees the tools on its allow-list. You can add your own agents and
+tools via config; see [extending.md](extending.md).
 
 Sandbox and file tools (run inside the sandbox):
 
@@ -108,38 +109,31 @@ once, and the second gets an error naming the one that holds it.
 
 ## Running commands
 
-A foreground `bash` command moves to the background after 2 minutes and keeps
-running; the agent is notified when it finishes, or can `wait` for it. Start
-long-running work with `bash_bg` from the start. A background job and the processes
-it spawns keep running until the job finishes, it is stopped, or the engagement
-ends. Start servers and listeners with `bash_bg`. `Ctrl-b S` stops a job and the
-whole process tree it spawned.
+A foreground `bash` command auto-backgrounds after 2 minutes and keeps running; the
+agent is notified when it finishes, or can `wait`. Use `bash_bg` for long-running
+work (scans, servers, listeners) from the start: it and its child processes run until
+the job finishes, is stopped, or the engagement ends. `Ctrl-b S` stops a job and its
+whole process tree.
 
 ## Reverse-shell channels
 
-The `revshell` tool (granted to any agent with `bash`) sets up a named netcat
-listener inside the sandbox that catches a shell connecting back from the target,
-and keeps it writable so the agent can drive it. Its actions are `open` (start a
-listener on a port), `send` (write one command line to the connected shell and read
-back what follows), `read` (return recent output), `list` (show every channel, its
-state, and who holds write access), `close` (stop the listener), and the
-write-arbitration actions below. Each channel is backed by an input FIFO and an
-output log in the engagement workspace (`<workspace>/channels/<name>/`), and its
-listener runs as a persistent job that survives the opening agent's turns until it is
-closed or the engagement ends.
+The `revshell` tool (granted with `bash`) runs a named netcat listener in the sandbox
+that catches a reverse shell and stays writable so the agent can drive it. Actions:
+`open` (start a listener on a port), `send` (write a command line and read what
+follows), `read` (recent output), `list` (channels, state, and who holds write
+access), `close`, and the write-arbitration actions below. Each channel is backed by
+an input FIFO and output log under `<workspace>/channels/<name>/`, and its listener
+persists across the opening agent's turns until closed or the engagement ends.
 
-A channel can be shared by several subagents, but only ONE may `send` to it at a
-time: each channel has a single write token. The opener holds it first, an unheld
-channel is auto-claimed by the first sender, and a subagent can `acquire` a free
-channel or `release` its own token. The **orchestrator (Main) is the arbiter**: only
-Main can `grant` the token to a named subagent, so it decides who drives a shared
-channel and when. Concurrent sends can never interleave bytes on the wire regardless,
-because each channel serializes its writes.
+A channel can be shared, but only ONE agent may `send` at a time via a single write
+token: the opener holds it first, an unheld channel is auto-claimed by the first
+sender, and an agent can `acquire` a free channel or `release` its own. The
+**orchestrator (Main) is the arbiter**: only Main can `grant` the token to a named
+subagent. Writes are serialized per channel, so bytes never interleave.
 
-Every open channel shows up in the operator's **command panes** list, where you can
-open a pane to watch it and type to its shell yourself (see [the interface](tui.md));
-the operator's own typing is a human override and does not take the agents' write
-token. All of it stays inside the sandbox.
+Every open channel appears in the operator's **command panes** list, where you can
+watch it and type to its shell yourself (see [the interface](tui.md)); your typing is
+a human override and doesn't take the agents' token. It all stays inside the sandbox.
 
 ## Model tiers
 
