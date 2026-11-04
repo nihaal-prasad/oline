@@ -33,7 +33,9 @@ skipped. Press Enter to advance.
 7. **Scope**: the in-scope targets. Free text; IPs, CIDRs, and domains are parsed
    out (for example `10.0.0.0/24 and app.example.com`). IPs and CIDRs drive the
    firewall; domains are used for tool-layer checks and reporting.
-8. **Goal**: a short description of what the engagement should achieve.
+8. **Goal**: a short description of what the engagement should achieve. When
+   resuming, the saved goal is kept and this step instead takes optional extra
+   instructions for the resumed run (leave it blank to skip).
 9. **VPN** (optional): point oline at an OpenVPN config so the sandbox connects
    through a VPN before agents start. WSL only.
 10. **Auto / manual**: automatic runs without stopping for input; manual relays

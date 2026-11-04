@@ -890,11 +890,14 @@ func (m *model) wizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if k == "enter" {
 			m.scopeIn.Blur()
 			if m.resume {
-				m.step = wVPN // goal is kept from the saved engagement
+				// The saved goal is kept; this step takes optional extra instructions.
+				m.goalIn.SetValue("")
+				m.goalIn.Placeholder = "extra instructions for this resume (optional — Enter to skip)"
 			} else {
-				m.step = wGoal
-				m.goalIn.Focus()
+				m.goalIn.Placeholder = "the engagement goal"
 			}
+			m.step = wGoal
+			m.goalIn.Focus()
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -1754,6 +1757,9 @@ func (m *model) composePrompt() string {
 		fmt.Fprintf(&b, "CURRENT in scope (ONLY these — authoritative; they may have changed since the saved run, so they SUPERSEDE any scope recorded earlier): %s\n", strings.TrimSpace(m.scopeIn.Value()))
 		b.WriteString("Update 00-scope.md to reflect this current scope, then continue toward the goal.\n")
 		b.WriteString(m.networkPolicyLine())
+		if extra := strings.TrimSpace(m.goalIn.Value()); extra != "" {
+			fmt.Fprintf(&b, "ADDITIONAL INSTRUCTIONS from the user for this resume (follow these as well as continuing toward the goal): %s\n", extra)
+		}
 		b.WriteString(m.diagramWidthLine())
 		return b.String()
 	}
@@ -2995,6 +3001,7 @@ func (m *model) viewWizard() string {
 				"Load the previous conversation history", "Start from a clean slate (no history)"))
 		}
 		step(m.step == wScope, "5. Scope (confirm — targets may have changed)", "    "+m.scopeIn.View())
+		step(m.step == wGoal, "6. Additional instructions (optional)", "    "+m.goalIn.View())
 	} else {
 		step(m.step == wScope, "4. Scope", "    "+m.scopeIn.View())
 		step(m.step == wGoal, "5. Goal", "    "+m.goalIn.View())

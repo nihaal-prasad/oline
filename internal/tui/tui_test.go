@@ -12,9 +12,35 @@ import (
 	"github.com/nihaal-prasad/oline/internal/agents"
 	"github.com/nihaal-prasad/oline/internal/config"
 	"github.com/nihaal-prasad/oline/internal/core"
+	"github.com/nihaal-prasad/oline/internal/engine"
 	"github.com/nihaal-prasad/oline/internal/event"
 	"github.com/nihaal-prasad/oline/internal/sandbox"
 )
+
+// TestResumePromptIncludesExtraInstructions checks the optional extra instructions
+// typed when resuming are carried into the orchestrator's kickoff prompt, and are
+// omitted when the field is left blank.
+func TestResumePromptIncludesExtraInstructions(t *testing.T) {
+	m := testModel(t)
+	m.sess = &engine.Session{}
+	m.resume = true
+	m.engagement = "acme-engagement"
+	m.scopeIn.SetValue("10.0.0.5")
+
+	m.goalIn.SetValue("re-test the SQLi on /login first")
+	p := m.composePrompt()
+	if !strings.Contains(p, "RESUME") {
+		t.Fatalf("expected a resume prompt:\n%s", p)
+	}
+	if !strings.Contains(p, "ADDITIONAL INSTRUCTIONS") || !strings.Contains(p, "re-test the SQLi on /login first") {
+		t.Errorf("resume prompt should carry the extra instructions:\n%s", p)
+	}
+
+	m.goalIn.SetValue("")
+	if strings.Contains(m.composePrompt(), "ADDITIONAL INSTRUCTIONS") {
+		t.Error("no additional-instructions line should appear when the field is blank")
+	}
+}
 
 func testModel(t *testing.T) *model {
 	t.Helper()
@@ -159,12 +185,21 @@ func TestWizardResumeImportAndVPN(t *testing.T) {
 	if tm.(*model).step != wScope || tm.(*model).engagement != "acme-engagement" {
 		t.Fatalf("after import: step=%v engagement=%q", tm.(*model).step, tm.(*model).engagement)
 	}
-	// re-enter scope (targets may have changed after a lab revert), then -> VPN
+	// re-enter scope (targets may have changed after a lab revert), then -> extra
+	// instructions (resume-only), then -> VPN
 	tm, _ = tm.Update(key("10.0.0.0/24"))
+	tm, _ = tm.Update(enter())
+	if tm.(*model).step != wGoal {
+		t.Fatalf("after resume scope: step=%v, want wGoal (additional instructions)", tm.(*model).step)
+	}
+	tm, _ = tm.Update(key("re-test the SQLi")) // optional extra instructions
 	tm, _ = tm.Update(enter())
 	mm := tm.(*model)
 	if mm.step != wVPN || mm.scopeIn.Value() != "10.0.0.0/24" {
-		t.Fatalf("after resume scope: step=%v scope=%q", mm.step, mm.scopeIn.Value())
+		t.Fatalf("after resume instructions: step=%v scope=%q", mm.step, mm.scopeIn.Value())
+	}
+	if mm.goalIn.Value() != "re-test the SQLi" {
+		t.Errorf("resume extra instructions = %q", mm.goalIn.Value())
 	}
 	// VPN: choose "upload from host" (index 3) -> input
 	tm, _ = tm.Update(down())
