@@ -13,10 +13,5 @@ secrets.yml
 .idea/
 .vscode/
 
-# Binaries (built into the project root; never commit)
-/oline
-/oline.exe
+# Old binaries
 /oline.exe~
-/oline-linux-amd64
-/oline-windows-amd64.exe
-/dist/

@@ -375,6 +375,10 @@ func (m *model) configureDirect(o Options) {
 	m.direct = true
 }
 
+// inputPromptReserve is how many columns resize() holds back from the command-line
+// textinput's width for the prompt glyph and the cursor cell (see resize()).
+const inputPromptReserve = 6
+
 func newModel(mode config.Mode, store *config.Store, roster *agents.Roster) *model {
 	si := textinput.New()
 	si.Placeholder = "in-scope only — e.g. 10.0.0.5, 10.0.0.0/24, app.example.com"
@@ -497,7 +501,13 @@ func (m *model) resize() {
 		m.mainW = 20
 	}
 	m.rosterX = m.mainW + 1
-	if w := m.w - 4; w > 0 {
+	// The input line is `<prompt><textinput view>`. Reserve room for the prompt and
+	// the cursor cell so the composed line never exceeds m.w: an over-wide line wraps
+	// onto a second row that falls off the bottom, hiding the end of a long entry.
+	// The prompt varies by mode and the widest is a 2-cell emoji with two spaces
+	// (" ❓ " when answering, " ⏱ " for a budget) = 4 columns; +1 for the trailing
+	// cursor cell and +1 of slack = 6.
+	if w := m.w - inputPromptReserve; w > 0 {
 		m.input.Width = w
 	} else {
 		m.input.Width = 1
@@ -2559,12 +2569,22 @@ func (m *model) sendDiagram() {
 // a different non-shell pane is retargeted instead.
 func (m *model) setFocus(id core.AgentID) {
 	p := m.focusPane
-	if p != nil && p.shell {
-		p = m.firstNonShellLeaf()
-		if p == nil {
-			return
+	if p != nil && (p.shell || p.rev) {
+		// A command pane (shell / reverse-shell) can't just be retargeted — its live
+		// state is tied to the leaf. Prefer retargeting a different, ordinary leaf so
+		// the command pane is preserved. But when the command pane is the only pane in
+		// the window (e.g. the auto-opened Shell tab), there is nothing else to point
+		// at, so convert this pane in place: reap its live state and let it show the
+		// selected view. Without this, selecting a view does nothing and the tab is
+		// stuck on the shell.
+		if alt := m.firstViewableLeaf(); alt != nil {
+			p = alt
+			m.focusPane = p
+		} else {
+			m.reapShell(p)
+			m.reapRev(p)
+			p.shell, p.rev = false, false
 		}
-		m.focusPane = p
 	}
 	if p == nil {
 		return
@@ -2575,11 +2595,12 @@ func (m *model) setFocus(id core.AgentID) {
 	m.refreshLeaf(p)
 }
 
-// firstNonShellLeaf returns the first leaf in the current window that is not a live
-// shell pane (an agent or info pane is fine to retarget), or nil.
-func (m *model) firstNonShellLeaf() *pane {
+// firstViewableLeaf returns the first leaf in the current window that is an ordinary
+// agent/info pane (not a live shell or reverse-shell pane, which can't be retargeted
+// without destroying their state), or nil when every pane is a command pane.
+func (m *model) firstViewableLeaf() *pane {
 	for _, l := range leaves(m.paneRoot) {
-		if !l.shell {
+		if !l.shell && !l.rev {
 			return l
 		}
 	}
