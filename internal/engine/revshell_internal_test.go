@@ -201,3 +201,99 @@ func TestRevshellValidation(t *testing.T) {
 		}
 	}
 }
+
+// newRevPeer registers an extra agent sharing session s (for arbitration tests).
+func newRevPeer(s *Session, id core.AgentID) *Agent {
+	a := newAgent(id, AgentConfig{Role: "peer", Tools: []string{"bash", "revshell"}}, nil, "m", s, "", "")
+	s.router.register(a)
+	return a
+}
+
+func TestRevshellWriteArbitration(t *testing.T) {
+	sb := &revSB{readOut: "ok\n"}
+	a1, s, _, cancel := newRevAgent(t, sb) // recon#1
+	defer cancel()
+	a2 := newRevPeer(s, "recon#2")
+	main := newRevPeer(s, core.Main)
+
+	// recon#1 opens the channel and so holds the write token.
+	if _, isErr := a1.doRevshell(llm.ToolCall{Arguments: `{"action":"open","name":"c","port":4444}`}); isErr {
+		t.Fatal("open failed")
+	}
+	if got := s.getChannel("c").writer; got != "recon#1" {
+		t.Fatalf("opener should hold the write token, got %q", got)
+	}
+
+	// recon#2 cannot send while recon#1 holds it.
+	out, isErr := a2.doRevshell(llm.ToolCall{Arguments: `{"action":"send","name":"c","data":"id"}`})
+	if !isErr || !strings.Contains(out, "held by") {
+		t.Errorf("recon#2 send should be refused while recon#1 holds the token, got (isErr=%v): %s", isErr, out)
+	}
+
+	// A non-orchestrator cannot grant.
+	if out, isErr := a2.doRevshell(llm.ToolCall{Arguments: `{"action":"grant","name":"c","agent":"recon#2"}`}); !isErr || !strings.Contains(out, "orchestrator") {
+		t.Errorf("non-Main grant should be refused, got (isErr=%v): %s", isErr, out)
+	}
+
+	// The orchestrator grants the token to recon#2.
+	if out, isErr := main.doRevshell(llm.ToolCall{Arguments: `{"action":"grant","name":"c","agent":"recon#2"}`}); isErr {
+		t.Fatalf("Main grant failed: %s", out)
+	}
+	if got := s.getChannel("c").writer; got != "recon#2" {
+		t.Fatalf("after grant, recon#2 should hold the token, got %q", got)
+	}
+
+	// Now recon#2 can send; recon#1 can no longer send.
+	if _, isErr := a2.doRevshell(llm.ToolCall{Arguments: `{"action":"send","name":"c","data":"id"}`}); isErr {
+		t.Error("recon#2 send should succeed after being granted the token")
+	}
+	if _, isErr := a1.doRevshell(llm.ToolCall{Arguments: `{"action":"send","name":"c","data":"id"}`}); !isErr {
+		t.Error("recon#1 send should now be refused")
+	}
+
+	// recon#2 releases; the channel is free and recon#1 can re-acquire.
+	if _, isErr := a2.doRevshell(llm.ToolCall{Arguments: `{"action":"release","name":"c"}`}); isErr {
+		t.Error("release by the holder should succeed")
+	}
+	if got := s.getChannel("c").writer; got != "" {
+		t.Errorf("after release the channel should be free, got %q", got)
+	}
+	if _, isErr := a1.doRevshell(llm.ToolCall{Arguments: `{"action":"acquire","name":"c"}`}); isErr {
+		t.Error("recon#1 should be able to acquire a free channel")
+	}
+
+	// A non-holder, non-Main cannot close; the holder can.
+	if _, isErr := a2.doRevshell(llm.ToolCall{Arguments: `{"action":"close","name":"c"}`}); !isErr {
+		t.Error("non-holder close should be refused")
+	}
+	if _, isErr := a1.doRevshell(llm.ToolCall{Arguments: `{"action":"close","name":"c"}`}); isErr {
+		t.Error("the holder should be able to close the channel")
+	}
+}
+
+func TestSessionCloseChannel(t *testing.T) {
+	sb := &revSB{}
+	a, s, events, cancel := newRevAgent(t, sb)
+	defer cancel()
+	if _, isErr := a.doRevshell(llm.ToolCall{Arguments: `{"action":"open","name":"c","port":4444}`}); isErr {
+		t.Fatal("open failed")
+	}
+	if !s.CloseChannel("c") {
+		t.Fatal("CloseChannel should report it closed an open channel")
+	}
+	if s.getChannel("c") != nil {
+		t.Error("channel should be gone after CloseChannel")
+	}
+	if s.CloseChannel("c") {
+		t.Error("CloseChannel on a missing channel should report false")
+	}
+	var sawClose bool
+	for _, e := range drainChannelEvents(events) {
+		if e.Name == "c" && !e.Open {
+			sawClose = true
+		}
+	}
+	if !sawClose {
+		t.Error("CloseChannel should emit a close event")
+	}
+}

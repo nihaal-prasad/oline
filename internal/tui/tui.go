@@ -286,9 +286,17 @@ type model struct {
 	// operator panes attached to them. channels tracks every open channel in
 	// insertion order; revs holds the live tail/send state of panes the user opened
 	// for them (keyed by the synthetic pane id rev#<name>). Both share shellCh.
-	channels    map[string]*channelInfo
-	channelOrd  []string
-	revs        map[core.AgentID]*revState
+	channels   map[string]*channelInfo
+	channelOrd []string
+	revs       map[core.AgentID]*revState
+
+	// Fully terminal-emulated panes (Ctrl-b T, and the reverse-shell catcher). Each
+	// is a PTY session in the sandbox driven by a VT emulator; termCh carries repaint
+	// nudges from the output reader goroutines to the Bubble Tea loop.
+	terms       map[core.AgentID]*termState
+	termSeq     int
+	termCh      chan core.AgentID
+	listenInput bool          // the command line is entering a reverse-shell listener port
 	histMu      sync.Mutex    // serializes saveHistory across the UI and ticker goroutines
 	savedLayout []savedWindow // last UI-goroutine snapshot of the window/pane layout (under histMu)
 	savedWinIdx int           // active window index for that snapshot
@@ -327,6 +335,7 @@ type model struct {
 	rosterAgentRows    map[int]core.AgentID // absolute screen Y -> agent, for roster click hit-testing
 	rosterUserPaneRows map[int]core.AgentID // absolute screen Y -> opened shell id (command panes section)
 	rosterChannelRows  map[int]string       // absolute screen Y -> channel name (command panes section)
+	rosterTermRows     map[int]core.AgentID // absolute screen Y -> terminal id (command panes section)
 	rosterScroll       int                  // scroll offset (content lines) of the Options pane
 	rosterFollow       bool                 // on the next render, scroll the Options pane to show the selection
 
@@ -1517,6 +1526,8 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	m.winIdx = 0
 	m.shellCh = make(chan shellMsg, 256)
 	m.shells = map[core.AgentID]*shellState{}
+	m.termCh = make(chan core.AgentID, 1)
+	m.terms = map[core.AgentID]*termState{}
 	m.running = true
 	m.input.Focus()
 	m.resize()
@@ -1617,7 +1628,7 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	prompt := m.composePrompt()
 	go func() { m.resultCh <- m.sess.Run(ctx, orch, prompt) }()
 
-	return m, tea.Batch(listen(m.events), waitResult(m.resultCh), listenShell(m.shellCh), tickCmd(), textinput.Blink)
+	return m, tea.Batch(listen(m.events), waitResult(m.resultCh), listenShell(m.shellCh), listenTerm(m.termCh), tickCmd(), textinput.Blink)
 }
 
 // backupLoop periodically backs up the engagement workspace to the host until
@@ -1844,6 +1855,9 @@ func (m *model) updateRunning(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case shellMsg:
 		m.applyShellMsg(msg)
 		return m, listenShell(m.shellCh)
+	case termRepaintMsg:
+		m.applyTermRepaint(core.AgentID(msg))
+		return m, listenTerm(m.termCh)
 	case tea.MouseMsg:
 		m.handleMouse(msg)
 		return m, nil
@@ -1919,6 +1933,10 @@ func (m *model) mousePress(x, y int, overRoster bool) {
 		}
 		if name, ok := m.rosterChannelRows[y]; ok { // a channel: open/jump to its pane
 			m.openRevPane(name)
+			return
+		}
+		if id, ok := m.rosterTermRows[y]; ok { // a terminal: jump to its pane
+			m.focusTermByID(id)
 			return
 		}
 		if id, ok := m.rosterAgentRows[y]; ok {
@@ -2075,6 +2093,14 @@ func (m *model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.prefix {
 		m.prefix = false
 		focus := m.focusedAgent()
+		// tmux-style double prefix: Ctrl-b Ctrl-b sends a literal Ctrl-b to a focused
+		// terminal pane (so the child can receive it), instead of an oline command.
+		if msg.String() == "ctrl+b" {
+			if ts := m.focusTerm(); ts != nil {
+				ts.write([]byte{0x02})
+				return m, nil
+			}
+		}
 		switch msg.String() {
 		// pane management (tmux-style)
 		case "%", "|":
@@ -2090,6 +2116,10 @@ func (m *model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cyclePane()
 		case "$":
 			m.openShellPane()
+		case "T":
+			m.openTermPane()
+		case "L":
+			m.startListenInput()
 		case "[":
 			m.enterCopyMode()
 		case "g":
@@ -2143,12 +2173,10 @@ func (m *model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.router.ResumeAll()
 			m.status = "resumed ALL agents"
 		case "K":
-			if m.focusCommandPane() {
-				m.status = "this pane is a command pane, not an agent"
-			} else {
-				m.router.Kill(focus)
-				m.status = "killed " + string(focus)
-			}
+			// Kill the focused command pane's backing process (a terminal's PTY
+			// session, a reverse-shell channel's listener, or a shell pane's command)
+			// and close the pane; otherwise kill the focused agent.
+			m.killFocused(focus)
 		case "S":
 			// Stop the running command(s): a shell pane's command, or the focused
 			// agent's foreground/background commands (without pausing/killing it).
@@ -2225,6 +2253,37 @@ func (m *model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		return m, cmd
+	}
+
+	// Listen-port entry mode: the command line captures a port for a fully-emulated
+	// reverse-shell catcher terminal.
+	if m.listenInput {
+		switch msg.String() {
+		case "esc":
+			m.listenInput = false
+			m.input.SetValue("")
+			m.status = "reverse-shell catcher cancelled"
+			return m, nil
+		case "enter":
+			m.applyListenInput()
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		return m, cmd
+	}
+
+	// A focused terminal pane is fully emulated: every key except the Ctrl-b prefix
+	// goes straight to the child as raw bytes.
+	if ts := m.focusTerm(); ts != nil {
+		if msg.String() == "ctrl+b" {
+			m.prefix = true
+			return m, nil
+		}
+		if b := keyToBytes(msg); len(b) > 0 {
+			ts.write(b)
+		}
+		return m, nil
 	}
 
 	switch msg.String() {
@@ -2323,9 +2382,38 @@ func (m *model) closePaneCmd() {
 	}
 	m.reapShell(m.focusPane)
 	m.reapRev(m.focusPane)
+	m.reapTerm(m.focusPane)
 	m.paneRoot, m.focusPane = closePane(m.paneRoot, m.focusPane)
 	m.zoom = false
 	m.relayout()
+}
+
+// killFocused (Ctrl-b K) kills whatever the focused pane is backed by: a terminal
+// pane's PTY session (so the shell / socat listener / caught reverse shell dies), a
+// reverse-shell channel's listener (closing the channel), or a shell pane's running
+// command — closing the command pane in each case. On an ordinary agent pane it
+// kills the agent, as before.
+func (m *model) killFocused(focus core.AgentID) {
+	switch {
+	case m.focusTerm() != nil:
+		id := m.focusPane.agent
+		m.closePaneCmd() // reapTerm closes the PTY session (shell/listener/reverse shell)
+		m.status = "killed terminal " + string(id)
+	case m.focusRev() != nil:
+		name := m.focusRev().name
+		if m.sess != nil {
+			m.sess.CloseChannel(name) // kill the channel's listener
+		}
+		m.closePaneCmd() // stop the pane's output tail and close it
+		m.status = "killed reverse-shell channel " + name
+	case m.focusShell() != nil:
+		id := m.focusPane.agent
+		m.closePaneCmd() // reapShell stops the running command and closes the pane
+		m.status = "killed shell " + string(id)
+	default:
+		m.router.Kill(focus)
+		m.status = "killed " + string(focus)
+	}
 }
 
 // reapShell cancels and forgets the shell backing pane p (if it is a shell), so
@@ -2357,6 +2445,7 @@ func (m *model) reapShells(p *pane) {
 	for _, l := range leaves(p) {
 		m.reapShell(l)
 		m.reapRev(l)
+		m.reapTerm(l)
 	}
 }
 
@@ -2569,7 +2658,7 @@ func (m *model) sendDiagram() {
 // a different non-shell pane is retargeted instead.
 func (m *model) setFocus(id core.AgentID) {
 	p := m.focusPane
-	if p != nil && (p.shell || p.rev) {
+	if p != nil && (p.shell || p.rev || p.term) {
 		// A command pane (shell / reverse-shell) can't just be retargeted — its live
 		// state is tied to the leaf. Prefer retargeting a different, ordinary leaf so
 		// the command pane is preserved. But when the command pane is the only pane in
@@ -2583,7 +2672,8 @@ func (m *model) setFocus(id core.AgentID) {
 		} else {
 			m.reapShell(p)
 			m.reapRev(p)
-			p.shell, p.rev = false, false
+			m.reapTerm(p)
+			p.shell, p.rev, p.term = false, false, false
 		}
 	}
 	if p == nil {
@@ -2600,7 +2690,7 @@ func (m *model) setFocus(id core.AgentID) {
 // without destroying their state), or nil when every pane is a command pane.
 func (m *model) firstViewableLeaf() *pane {
 	for _, l := range leaves(m.paneRoot) {
-		if !l.shell && !l.rev {
+		if !l.shell && !l.rev && !l.term {
 			return l
 		}
 	}
@@ -3219,6 +3309,10 @@ func (m *model) viewRunning() string {
 		inPrompt = styleAccent.Render(" $ ")
 	case m.focusRev() != nil:
 		inPrompt = styleAccent.Render(" ⇄ ")
+	case m.focusTerm() != nil:
+		inPrompt = styleAccent.Render(" ⌨ ")
+	case m.listenInput:
+		inPrompt = styleWarn.Render(" ⌨ ")
 	case m.answerTarget(m.focusedAgent()) != "":
 		inPrompt = styleWarn.Render(" ❓ ")
 	}
@@ -3254,6 +3348,11 @@ func (m *model) renderLeaf(p *pane) string {
 		label = string(p.agent) + "  $ shell"
 	case p.rev:
 		label = string(p.agent) + "  ⇄ reverse shell"
+	case p.term:
+		label = string(p.agent) + "  ⌨ terminal"
+		if ts := m.terms[p.agent]; ts != nil && ts.title != "" {
+			label += "  " + styleMuted.Render(ts.title)
+		}
 	case p.summary:
 		label = "Summary"
 	case p.diagram:
@@ -3277,13 +3376,18 @@ func (m *model) renderLeaf(p *pane) string {
 		}
 	}
 	head := lipgloss.NewStyle().Width(innerW).MaxHeight(1).Render(title)
-	return border.Width(innerW).Height(innerH).Render(head + "\n" + p.vp.View())
+	body := p.vp.View()
+	if p.term {
+		body = m.renderTerm(p, innerW, innerH-1, p == m.focusPane)
+	}
+	return border.Width(innerW).Height(innerH).Render(head + "\n" + body)
 }
 
 func (m *model) renderRoster(w, h int) string {
 	m.rosterAgentRows = map[int]core.AgentID{}
 	m.rosterUserPaneRows = map[int]core.AgentID{}
 	m.rosterChannelRows = map[int]string{}
+	m.rosterTermRows = map[int]core.AgentID{}
 	focused := m.focusedAgent()
 
 	// Build the full content as a list of lines, with parallel maps from content line
@@ -3315,6 +3419,14 @@ func (m *model) renderRoster(w, h int) string {
 			focusedLine = len(rows)
 		}
 		channelIdx[len(rows)] = name
+		rows = append(rows, s)
+	}
+	termIdx := map[int]core.AgentID{}
+	addTerm := func(s string, id core.AgentID) {
+		if id == focused {
+			focusedLine = len(rows)
+		}
+		termIdx[len(rows)] = id
 		rows = append(rows, s)
 	}
 
@@ -3388,8 +3500,9 @@ func (m *model) renderRoster(w, h int) string {
 	// up/down view cycle.
 	shells := m.shellIDsSorted()
 	chans := m.channelsSorted()
-	if len(shells)+len(chans) > 0 {
-		add(styleMuted.Render(fmt.Sprintf("command panes (%d)", len(shells)+len(chans))))
+	termsList := m.termIDsSorted()
+	if n := len(shells) + len(chans) + len(termsList); n > 0 {
+		add(styleMuted.Render(fmt.Sprintf("command panes (%d)", n)))
 		for _, sid := range shells {
 			cursor := "  "
 			if sid == focused {
@@ -3411,6 +3524,17 @@ func (m *model) renderRoster(w, h int) string {
 				label += "  " + styleMuted.Render("(click to open)")
 			}
 			addChannel(label, c.name)
+		}
+		for _, tid := range termsList {
+			cursor := "  "
+			if tid == focused {
+				cursor = styleAccent.Render("▸ ")
+			}
+			label := cursor + "⌨ " + string(tid)
+			if ts := m.terms[tid]; ts != nil && ts.title != "" {
+				label += "  " + styleMuted.Render(ts.title)
+			}
+			addTerm(label, tid)
 		}
 	}
 
@@ -3487,6 +3611,9 @@ func (m *model) renderRoster(w, h int) string {
 		}
 		if name, ok := channelIdx[ci]; ok {
 			m.rosterChannelRows[screenY] = name
+		}
+		if id, ok := termIdx[ci]; ok {
+			m.rosterTermRows[screenY] = id
 		}
 		b.WriteString(rows[ci] + "\n")
 	}
@@ -3571,6 +3698,8 @@ func keyHelp() string {
  o   cycle panes
  g/G top/bottom
  $   shell pane
+ T   terminal pane
+ L   revshell catcher
  [   copy mode
  c   new window
  n   next window
@@ -3580,7 +3709,7 @@ func keyHelp() string {
  P   pause all
  r   resume agent
  R   resume all
- K   kill agent
+ K   kill agent / pane
  S   stop commands
  s   summary+diagram
  d   diagram

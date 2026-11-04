@@ -39,6 +39,7 @@ type pane struct {
 	leaf    bool
 	shell   bool // true: an interactive shell the user types into (not an agent view)
 	rev     bool // true: a reverse-shell channel pane (streams a channel, user types commands to its shell)
+	term    bool // true: a fully terminal-emulated PTY pane (vim/htop work; raw keys forwarded)
 	summary bool // true: the live engagement-summary pane (content from m.summary)
 	diagram bool // true: the live ASCII map pane (content from m.diagram)
 
@@ -67,6 +68,12 @@ func newShellLeaf(id core.AgentID) *pane {
 // without appearing in the agent roster.
 func newRevLeaf(id core.AgentID) *pane {
 	return &pane{agent: id, leaf: true, rev: true, ratio: 0.5, vp: viewport.New(10, 10)}
+}
+
+// newTermLeaf is a leaf showing a fully terminal-emulated PTY session (see term.go),
+// keyed by a synthetic id so it reuses the pane tree without appearing in the roster.
+func newTermLeaf(id core.AgentID) *pane {
+	return &pane{agent: id, leaf: true, term: true, ratio: 0.5, vp: viewport.New(10, 10)}
 }
 
 // newSummaryLeaf / newDiagramLeaf are the two live info panes. They reuse the

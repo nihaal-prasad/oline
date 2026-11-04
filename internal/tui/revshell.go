@@ -58,7 +58,7 @@ func (m *model) focusRev() *revState {
 // focusCommandPane reports whether the focused pane is a command pane (a user shell
 // or a reverse-shell channel) rather than an agent view.
 func (m *model) focusCommandPane() bool {
-	return m.focusPane != nil && (m.focusPane.shell || m.focusPane.rev)
+	return m.focusPane != nil && (m.focusPane.shell || m.focusPane.rev || m.focusPane.term)
 }
 
 // channelsSorted returns the known channels in the order they were opened.

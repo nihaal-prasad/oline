@@ -7,8 +7,10 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/nihaal-prasad/oline/internal/core"
 	"github.com/nihaal-prasad/oline/internal/event"
 	"github.com/nihaal-prasad/oline/internal/llm"
 	"github.com/nihaal-prasad/oline/internal/sandbox"
@@ -33,12 +35,24 @@ import (
 // engagement ends — the same reliable "hold the Exec open" mechanism bash_bg uses,
 // rather than detaching with setsid (which proved unreliable across backends).
 
+// Write arbitration: many subagents may share one channel, but only ONE may drive
+// the connected shell at a time (two agents interleaving command lines is nonsense).
+// Each channel has a single current WRITER. `send` is allowed only for the writer; an
+// unheld channel is auto-claimed by the first sender. The orchestrator (Main)
+// arbitrates: it alone can `grant` the write token to a chosen subagent (and can
+// `acquire`/`release` it), so it decides who drives a shared channel and when.
+// Independently, the actual FIFO write is serialized per channel by sendMu, so even a
+// racing write can never interleave bytes on the wire.
+
 // revChannel is one live reverse-shell channel.
 type revChannel struct {
 	name   string
 	port   int
 	dir    string // absolute guest path to the channel's working directory
 	cancel context.CancelFunc
+
+	writer core.AgentID // the agent currently allowed to send (empty = unheld); guarded by Session.chMu
+	sendMu sync.Mutex   // serializes the actual FIFO write so bytes never interleave
 }
 
 const (
@@ -65,6 +79,26 @@ func (s *Session) getChannel(name string) *revChannel {
 	return s.channels[name]
 }
 
+// CloseChannel stops a reverse-shell channel's listener and removes it. It is the
+// operator-side kill path (the TUI's Ctrl-b K on a channel pane), so it uses
+// emitAsync for the close event — the caller is the same goroutine that drains the
+// event stream, and a blocking send would deadlock. Returns whether a channel was
+// closed.
+func (s *Session) CloseChannel(name string) bool {
+	s.chMu.Lock()
+	ch := s.channels[name]
+	if ch != nil {
+		delete(s.channels, name)
+	}
+	s.chMu.Unlock()
+	if ch == nil {
+		return false
+	}
+	ch.cancel() // stops nc, the FIFO holder, and the loop together
+	s.emitAsync(event.Channel{Name: ch.name, Port: ch.port, Dir: ch.dir, Open: false})
+	return true
+}
+
 // doRevshell implements the `revshell` tool (open/send/read/list/close). It is a
 // sandbox-exec primitive gated by the per-agent allow-list (see dispatch); every
 // action runs strictly inside the sandbox.
@@ -80,6 +114,7 @@ func (a *Agent) doRevshell(tc llm.ToolCall) (string, bool) {
 		Port   int    `json:"port"`
 		Data   string `json:"data"`
 		Bytes  int    `json:"bytes"`
+		Agent  string `json:"agent"`
 	}
 	if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
 		return reply("revshell: invalid arguments: "+err.Error(), true)
@@ -101,10 +136,16 @@ func (a *Agent) doRevshell(tc llm.ToolCall) (string, bool) {
 		return reply(a.revList())
 	case "close":
 		return reply(a.revClose(name))
+	case "acquire":
+		return reply(a.revAcquire(name))
+	case "release":
+		return reply(a.revRelease(name))
+	case "grant":
+		return reply(a.revGrant(name, strings.TrimSpace(args.Agent)))
 	case "":
-		return reply("revshell: 'action' is required (open | send | read | list | close)", true)
+		return reply("revshell: 'action' is required (open | send | read | list | close | acquire | release | grant)", true)
 	default:
-		return reply(fmt.Sprintf("revshell: unknown action %q (use open | send | read | list | close)", action), true)
+		return reply(fmt.Sprintf("revshell: unknown action %q (use open | send | read | list | close | acquire | release | grant)", action), true)
 	}
 }
 
@@ -126,7 +167,9 @@ func (a *Agent) revOpen(name string, port int) (string, bool) {
 	}
 	dir := path.Join(a.s.chanRoot(), name)
 	ctx, cancel := context.WithCancel(a.jobBaseCtx())
-	ch := &revChannel{name: name, port: port, dir: dir, cancel: cancel}
+	// The opener holds the write token initially (it will usually drive the shell
+	// first); the orchestrator can reassign it with `grant`.
+	ch := &revChannel{name: name, port: port, dir: dir, cancel: cancel, writer: a.id}
 	a.s.channels[name] = ch
 	a.s.chMu.Unlock()
 
@@ -155,15 +198,35 @@ func (a *Agent) revOpen(name string, port int) (string, bool) {
 }
 
 // revSend writes one command line to the channel's shell and returns the output
-// that follows shortly after.
+// that follows shortly after. Only the channel's current writer may send; an unheld
+// channel is auto-claimed by the caller. The actual FIFO write is serialized per
+// channel so concurrent sends can never interleave bytes.
 func (a *Agent) revSend(name, data string) (string, bool) {
-	ch := a.s.getChannel(name)
+	a.s.chMu.Lock()
+	ch := a.s.channels[name]
 	if ch == nil {
+		a.s.chMu.Unlock()
 		return fmt.Sprintf("revshell send: no open channel %q (use `list` to see channels, `open` to create one)", name), true
 	}
+	switch {
+	case ch.writer == "":
+		ch.writer = a.id // auto-claim an unheld channel
+	case ch.writer == a.id:
+		// already the writer
+	default:
+		holder := ch.writer
+		a.s.chMu.Unlock()
+		return fmt.Sprintf("revshell send: channel %q is currently held by %q, so you may not write to it. Ask the orchestrator (Main) to reassign it to you (revshell grant), or wait for %q to release it. Use `read` to watch its output meanwhile.", name, holder, holder), true
+	}
+	a.s.chMu.Unlock()
+
 	if data == "" {
 		return "revshell send: 'data' (the command line to send) is required", true
 	}
+	// Serialize the actual write per channel so two sends never interleave on the
+	// wire (ownership already makes this rare; this is the clean hard guarantee).
+	ch.sendMu.Lock()
+	defer ch.sendMu.Unlock()
 	// Write the line into the FIFO (the holder keeps a reader open, so this never
 	// blocks), wait briefly, then return the tail of the output log.
 	script := fmt.Sprintf(`printf '%%s\n' %s > %s/in; sleep 0.6; tail -c %d %s/out.log 2>/dev/null`,
@@ -173,6 +236,82 @@ func (a *Agent) revSend(name, data string) (string, bool) {
 		return fmt.Sprintf("revshell send: %v", err), true
 	}
 	return fmt.Sprintf("sent to %q. Recent channel output:\n%s", name, strings.TrimRight(out, "\n")), false
+}
+
+// revAcquire claims the write token for the caller. It succeeds if the channel is
+// unheld or already held by the caller; the orchestrator (Main) may take it from
+// whoever holds it (it is the arbiter). Everyone else is refused and told who holds
+// it, to go through Main.
+func (a *Agent) revAcquire(name string) (string, bool) {
+	a.s.chMu.Lock()
+	defer a.s.chMu.Unlock()
+	ch := a.s.channels[name]
+	if ch == nil {
+		return fmt.Sprintf("revshell acquire: no open channel %q", name), true
+	}
+	if ch.writer == "" || ch.writer == a.id {
+		ch.writer = a.id
+		return fmt.Sprintf("you now hold write access to channel %q.", name), false
+	}
+	if a.id == core.Main {
+		prev := ch.writer
+		ch.writer = core.Main
+		return fmt.Sprintf("orchestrator took write access to channel %q (was held by %q).", name, prev), false
+	}
+	return fmt.Sprintf("revshell acquire: channel %q is held by %q. Only the orchestrator (Main) can reassign it (revshell grant); ask Main.", name, ch.writer), true
+}
+
+// revRelease frees the caller's write token (Main may free anyone's).
+func (a *Agent) revRelease(name string) (string, bool) {
+	a.s.chMu.Lock()
+	defer a.s.chMu.Unlock()
+	ch := a.s.channels[name]
+	if ch == nil {
+		return fmt.Sprintf("revshell release: no open channel %q", name), true
+	}
+	switch {
+	case ch.writer == a.id:
+		ch.writer = ""
+		return fmt.Sprintf("released write access to channel %q; it is now free.", name), false
+	case a.id == core.Main && ch.writer != "":
+		prev := ch.writer
+		ch.writer = ""
+		return fmt.Sprintf("orchestrator released channel %q (was held by %q); it is now free.", name, prev), false
+	default:
+		return fmt.Sprintf("revshell release: you do not hold write access to channel %q (holder: %q).", name, writerLabel(ch.writer)), true
+	}
+}
+
+// revGrant assigns the write token to a named agent. ORCHESTRATOR ONLY: Main is the
+// arbiter of who may drive a shared channel.
+func (a *Agent) revGrant(name, target string) (string, bool) {
+	if a.id != core.Main {
+		return "revshell grant: only the orchestrator (Main) can grant write access to a channel. Ask Main to arbitrate.", true
+	}
+	if target == "" {
+		return "revshell grant: 'agent' (the subagent to grant write access to) is required.", true
+	}
+	a.s.chMu.Lock()
+	ch := a.s.channels[name]
+	if ch == nil {
+		a.s.chMu.Unlock()
+		return fmt.Sprintf("revshell grant: no open channel %q", name), true
+	}
+	prev := ch.writer
+	ch.writer = core.AgentID(target)
+	a.s.chMu.Unlock()
+	// Tell the newly-granted agent it may now drive the channel.
+	a.s.emit(event.Notice{Agent: core.AgentID(target), Level: "info",
+		Text: fmt.Sprintf("orchestrator granted you write access to reverse-shell channel %q — you may now `revshell send` to it.", name)})
+	return fmt.Sprintf("granted write access to channel %q to %q (was held by %q).", name, target, writerLabel(prev)), false
+}
+
+// writerLabel renders a writer id for messages, mapping the empty id to "nobody".
+func writerLabel(id core.AgentID) string {
+	if id == "" {
+		return "nobody"
+	}
+	return string(id)
 }
 
 // revRead returns the channel's recent output.
@@ -207,12 +346,17 @@ func (a *Agent) revRead(name string, nbytes int) (string, bool) {
 // revList reports every live channel plus how much output each has captured.
 func (a *Agent) revList() (string, bool) {
 	a.s.chMu.Lock()
-	chans := make([]*revChannel, 0, len(a.s.channels))
+	type chInfo struct {
+		name   string
+		port   int
+		writer core.AgentID
+	}
+	infos := make([]chInfo, 0, len(a.s.channels))
 	for _, c := range a.s.channels {
-		chans = append(chans, c)
+		infos = append(infos, chInfo{c.name, c.port, c.writer})
 	}
 	a.s.chMu.Unlock()
-	if len(chans) == 0 {
+	if len(infos) == 0 {
 		return "no reverse-shell channels are open. Use `open` (name, port) to start one.", false
 	}
 	// One exec gathers the out.log sizes for all live channels.
@@ -226,28 +370,34 @@ func (a *Agent) revList() (string, bool) {
 		}
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d reverse-shell channel(s):\n", len(chans))
-	for _, c := range chans {
+	fmt.Fprintf(&b, "%d reverse-shell channel(s):\n", len(infos))
+	for _, c := range infos {
 		sz := sizes[c.name]
 		if sz == "" {
 			sz = "0"
 		}
-		fmt.Fprintf(&b, "  %s — port %d, listening, %s bytes captured\n", c.name, c.port, sz)
+		fmt.Fprintf(&b, "  %s — port %d, listening, %s bytes captured, writable by %s\n", c.name, c.port, sz, writerLabel(c.writer))
 	}
 	return strings.TrimRight(b.String(), "\n"), false
 }
 
-// revClose stops the listener and removes the channel.
+// revClose stops the listener and removes the channel. Closing is destructive for
+// everyone sharing the channel, so only the current writer or the orchestrator may do
+// it (an unheld channel may be closed by anyone).
 func (a *Agent) revClose(name string) (string, bool) {
 	a.s.chMu.Lock()
 	ch := a.s.channels[name]
-	if ch != nil {
-		delete(a.s.channels, name)
-	}
-	a.s.chMu.Unlock()
 	if ch == nil {
+		a.s.chMu.Unlock()
 		return fmt.Sprintf("revshell close: no open channel %q", name), true
 	}
+	if ch.writer != "" && ch.writer != a.id && a.id != core.Main {
+		holder := ch.writer
+		a.s.chMu.Unlock()
+		return fmt.Sprintf("revshell close: channel %q is held by %q; only its writer or the orchestrator (Main) may close it.", name, holder), true
+	}
+	delete(a.s.channels, name)
+	a.s.chMu.Unlock()
 	ch.cancel() // stops nc, the FIFO holder, and the loop together
 	// Best-effort cleanup of the FIFO so a later `open` of the same name is clean.
 	_, _ = a.revExec(fmt.Sprintf(`rm -f %s/in 2>/dev/null; true`, shSingleQuote(ch.dir)))

@@ -74,6 +74,31 @@ type Shutdowner interface {
 	Shutdown(ctx context.Context) error
 }
 
+// PTYSession is a live interactive terminal session running inside the guest: a
+// command attached to a pseudo-terminal, so full-screen programs (vim, htop, less)
+// work exactly as in a real terminal. The caller writes the operator's raw
+// keystroke bytes to it (io.Writer), resizes it as the pane resizes, and closes it
+// to end the session (which kills the remote process). The session's output is
+// streamed to the io.Writer passed to OpenTerminal.
+type PTYSession interface {
+	io.Writer // operator keystrokes (raw bytes) -> the child's stdin
+	// Resize informs the guest PTY of a new window size (rows x cols) so programs
+	// re-lay-out and SIGWINCH fires. Backends that cannot resize a live PTY return
+	// nil (the size is fixed at open).
+	Resize(rows, cols int) error
+	Close() error
+}
+
+// Interactive is an optional Handle capability: a backend that can attach a command
+// to a pseudo-terminal implements it, enabling the TUI's fully terminal-emulated
+// panes. OpenTerminal starts cmd under a PTY of the given size as the agent's
+// per-policy user and streams its combined output to out; the returned PTYSession
+// carries keystrokes back and resizes the PTY. Backends without a PTY path simply
+// don't implement it, and the TUI falls back to the line-oriented shell.
+type Interactive interface {
+	OpenTerminal(ctx context.Context, agent core.AgentID, cmd Cmd, rows, cols int, out io.Writer) (PTYSession, error)
+}
+
 // WorkspaceSetter is an optional Handle capability: it makes the engagement's
 // workspace directory the default working directory for agent commands (creating it
 // if needed), so a relative path resolves there and writes can be confined to it.

@@ -94,6 +94,82 @@ func (h *qemuHandle) Exec(ctx context.Context, agent core.AgentID, cmd Cmd, out 
 	return ExitStatus{Code: code}, nil
 }
 
+// OpenTerminal starts cmd under a pseudo-terminal over SSH (RequestPty), so
+// full-screen programs work exactly as in a real terminal. Output streams to out;
+// the returned session carries the operator's keystrokes to the child's stdin and
+// can resize the PTY live (SSH WindowChange).
+func (h *qemuHandle) OpenTerminal(ctx context.Context, agent core.AgentID, cmd Cmd, rows, cols int, out io.Writer) (PTYSession, error) {
+	if len(cmd.Argv) == 0 {
+		return nil, errors.New("sandbox/qemu: empty terminal command")
+	}
+	if rows <= 0 {
+		rows = 24
+	}
+	if cols <= 0 {
+		cols = 80
+	}
+	sess, err := h.client.NewSession()
+	if err != nil {
+		return nil, fmt.Errorf("sandbox/qemu: open terminal: %w", err)
+	}
+	// Raw-ish PTY: the VT emulator on the TUI side does echo and line editing, so the
+	// guest line discipline must not (ECHO off, ICANON off). ISIG stays on so Ctrl-C
+	// reaches programs as SIGINT.
+	modes := ssh.TerminalModes{
+		ssh.ECHO:          0,
+		ssh.ICANON:        0,
+		ssh.ISIG:          1,
+		ssh.TTY_OP_ISPEED: 115200,
+		ssh.TTY_OP_OSPEED: 115200,
+	}
+	if err := sess.RequestPty("xterm-256color", rows, cols, modes); err != nil {
+		sess.Close()
+		return nil, fmt.Errorf("sandbox/qemu: request pty: %w", err)
+	}
+	stdin, err := sess.StdinPipe()
+	if err != nil {
+		sess.Close()
+		return nil, fmt.Errorf("sandbox/qemu: terminal stdin: %w", err)
+	}
+	sess.Stdout = out
+	sess.Stderr = out
+	if err := sess.Start(h.wrap(cmd)); err != nil {
+		sess.Close()
+		return nil, fmt.Errorf("sandbox/qemu: start terminal: %w", err)
+	}
+	p := &sshPTY{sess: sess, stdin: stdin}
+	go func() { // reap the session and close it when the caller's ctx ends
+		done := make(chan struct{})
+		go func() { _ = sess.Wait(); close(done) }()
+		select {
+		case <-ctx.Done():
+		case <-done:
+		}
+		p.Close()
+	}()
+	return p, nil
+}
+
+// sshPTY is a PTYSession backed by one SSH session with a PTY attached.
+type sshPTY struct {
+	sess  *ssh.Session
+	stdin io.WriteCloser
+}
+
+func (p *sshPTY) Write(b []byte) (int, error) { return p.stdin.Write(b) }
+
+func (p *sshPTY) Resize(rows, cols int) error {
+	if rows <= 0 || cols <= 0 {
+		return nil
+	}
+	return p.sess.WindowChange(rows, cols)
+}
+
+func (p *sshPTY) Close() error {
+	_ = p.stdin.Close()
+	return p.sess.Close()
+}
+
 func (h *qemuHandle) CopyIn(ctx context.Context, localPath, guestPath string) error {
 	f, err := os.Open(localPath)
 	if err != nil {
@@ -194,6 +270,7 @@ func (h *qemuHandle) SetWorkspace(ctx context.Context, dir string) error {
 }
 
 var _ WorkspaceSetter = (*qemuHandle)(nil)
+var _ Interactive = (*qemuHandle)(nil)
 
 // Shutdown powers the VM off (best-effort graceful), kills the process if it
 // lingers, and removes the transient overlay and seed. The base image and any

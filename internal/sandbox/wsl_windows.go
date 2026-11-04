@@ -218,6 +218,64 @@ func (h *wslHandle) Exec(ctx context.Context, agent core.AgentID, cmd Cmd, out i
 	return ExitStatus{Code: code}, nil
 }
 
+// OpenTerminal runs cmd under a pseudo-terminal inside WSL so full-screen programs
+// work as in a real terminal. wsl.exe gives us plain pipes, not a console, so we
+// allocate the PTY on the Linux side with util-linux `script`: it spawns the target
+// on a fresh pty whose stdin/stdout we drive through the pipes. The initial size is
+// set with `stty` inside that pty. Live resize is not supported on WSL (script's pty
+// size is fixed at spawn); the QEMU backend resizes live.
+func (h *wslHandle) OpenTerminal(ctx context.Context, agent core.AgentID, cmd Cmd, rows, cols int, out io.Writer) (PTYSession, error) {
+	if len(cmd.Argv) == 0 {
+		return nil, errors.New("sandbox/wsl: empty terminal command")
+	}
+	if rows <= 0 {
+		rows = 24
+	}
+	if cols <= 0 {
+		cols = 80
+	}
+	target := quoteArgv(cmd.Argv)
+	// Inside the pty: set its size, export a sensible TERM, then exec the target.
+	inner := fmt.Sprintf("stty rows %d cols %d 2>/dev/null; export TERM=xterm-256color; exec %s", rows, cols, target)
+	// `script -qfc <inner> /dev/null` allocates the pty; -f flushes so output streams.
+	outer := "exec script -qfc " + shellQuote(inner) + " /dev/null"
+
+	cctx, cancel := context.WithCancel(ctx)
+	args := append(h.baseArgs(cmd.Dir, h.execUser(agent, cmd.Policy)), "--", "bash", "-lc", outer)
+	c := exec.CommandContext(cctx, "wsl.exe", args...)
+	c.Env = wslEnv()
+	c.Stdout = out
+	c.Stderr = out
+	stdin, err := c.StdinPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("sandbox/wsl: terminal stdin: %w", err)
+	}
+	if err := c.Start(); err != nil {
+		cancel()
+		return nil, fmt.Errorf("sandbox/wsl: start terminal: %w", err)
+	}
+	go func() { _ = c.Wait(); cancel() }() // reap and release the context when it exits
+	return &wslPTY{stdin: stdin, cancel: cancel}, nil
+}
+
+// wslPTY is a PTYSession backed by a wsl.exe process running `script`.
+type wslPTY struct {
+	stdin  io.WriteCloser
+	cancel context.CancelFunc
+}
+
+func (p *wslPTY) Write(b []byte) (int, error) { return p.stdin.Write(b) }
+
+// Resize is a no-op on WSL: the `script`-allocated pty's size is fixed at open.
+func (p *wslPTY) Resize(rows, cols int) error { return nil }
+
+func (p *wslPTY) Close() error {
+	_ = p.stdin.Close()
+	p.cancel()
+	return nil
+}
+
 func (h *wslHandle) CopyIn(ctx context.Context, localPath, guestPath string) error {
 	f, err := os.Open(localPath)
 	if err != nil {
@@ -254,3 +312,14 @@ func (h *wslHandle) CopyOut(ctx context.Context, guestPath, localPath string) er
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
+
+// quoteArgv joins argv into a single shell command string, quoting each element.
+func quoteArgv(argv []string) string {
+	parts := make([]string, len(argv))
+	for i, a := range argv {
+		parts[i] = shellQuote(a)
+	}
+	return strings.Join(parts, " ")
+}
+
+var _ Interactive = (*wslHandle)(nil)

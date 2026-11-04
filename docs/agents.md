@@ -120,14 +120,25 @@ The `revshell` tool (granted to any agent with `bash`) sets up a named netcat
 listener inside the sandbox that catches a shell connecting back from the target,
 and keeps it writable so the agent can drive it. Its actions are `open` (start a
 listener on a port), `send` (write one command line to the connected shell and read
-back what follows), `read` (return recent output), `list` (show every channel and
-whether its listener is up), and `close` (stop the listener). Each channel is backed
-by an input FIFO and an output log in the engagement workspace
-(`<workspace>/channels/<name>/`), and its listener runs as a persistent job that
-survives the opening agent's turns until it is closed or the engagement ends. Every
-open channel shows up in the operator's **command panes** list, where you can open a
-pane to watch it and type to its shell yourself (see
-[the interface](tui.md)). All of it stays inside the sandbox.
+back what follows), `read` (return recent output), `list` (show every channel, its
+state, and who holds write access), `close` (stop the listener), and the
+write-arbitration actions below. Each channel is backed by an input FIFO and an
+output log in the engagement workspace (`<workspace>/channels/<name>/`), and its
+listener runs as a persistent job that survives the opening agent's turns until it is
+closed or the engagement ends.
+
+A channel can be shared by several subagents, but only ONE may `send` to it at a
+time: each channel has a single write token. The opener holds it first, an unheld
+channel is auto-claimed by the first sender, and a subagent can `acquire` a free
+channel or `release` its own token. The **orchestrator (Main) is the arbiter**: only
+Main can `grant` the token to a named subagent, so it decides who drives a shared
+channel and when. Concurrent sends can never interleave bytes on the wire regardless,
+because each channel serializes its writes.
+
+Every open channel shows up in the operator's **command panes** list, where you can
+open a pane to watch it and type to its shell yourself (see [the interface](tui.md));
+the operator's own typing is a human override and does not take the agents' write
+token. All of it stays inside the sandbox.
 
 ## Model tiers
 
