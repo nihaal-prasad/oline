@@ -22,6 +22,9 @@ The wizard asks each setting in order, skipping steps that don't apply; Enter ad
 4. **Start**: new engagement or resume.
 5. **Environment**: pick a sandbox. Lists WSL distros and QEMU images, plus "create
    new". See [sandbox.md](sandbox.md).
+   - **Disk size** (only when creating a new VM): how many GB the new VM's disk may
+     use. Installing offensive tooling fills a small image fast, so the default is
+     generous; the guest grows its root filesystem to the chosen size on first boot.
 6. **Resume / import**: pick an existing engagement or import one from a host
    archive, then choose whether to load its history.
 7. **Scope**: pentester, the in-scope targets as free text (IPs, CIDRs, and domains

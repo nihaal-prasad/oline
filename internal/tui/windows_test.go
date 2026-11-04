@@ -82,6 +82,30 @@ func TestWindowsCreateSwitchKill(t *testing.T) {
 	}
 }
 
+// TestOpenShellFromNonShellTab: Ctrl-b $ on an Info/Subagents tab (which can't
+// hold command panes) opens the shell in a fresh Shell tab instead of splitting.
+func TestOpenShellFromNonShellTab(t *testing.T) {
+	for _, k := range []tabKind{tabInfo, tabSubagents} {
+		m := runningModel(t)
+		m.windows[0].kind = k
+		before := len(m.windows)
+		m.openShellPane()
+		if len(m.windows) != before+1 {
+			t.Fatalf("%v: expected a new tab (windows %d -> %d)", k, before, len(m.windows))
+		}
+		w := m.windows[m.winIdx]
+		if w.kind != tabShell {
+			t.Errorf("%v: new tab kind = %v, want tabShell", k, w.kind)
+		}
+		if m.focusShell() == nil {
+			t.Errorf("%v: new Shell tab should have a focused shell pane", k)
+		}
+		if n := len(leaves(m.paneRoot)); n != 1 {
+			t.Errorf("%v: new Shell tab should have exactly one pane, got %d", k, n)
+		}
+	}
+}
+
 func TestShellPane(t *testing.T) {
 	m := runningModel(t)
 	orderBefore := len(m.order)

@@ -61,7 +61,9 @@ offers, besides any WSL distros:
 - **Debian 13 VM (download on first use)**: oline downloads the official Debian 13
   cloud image, verifies it against the published `SHA512SUMS`, boots it on a
   disposable overlay, and provisions the per-agent users and egress. The base image
-  is cached under `<root>/images`.
+  is cached under `<root>/images`. The wizard asks how many GB of disk to give the
+  VM; the overlay is grown to that size (the base stays untouched) and the guest
+  grows its root filesystem to use it on first boot.
 - **A qcow2 you supply**: drop a cloud image (with cloud-init) at
   `<root>/images/<name>.qcow2` and it appears as an environment.
 

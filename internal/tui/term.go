@@ -160,11 +160,22 @@ func (m *model) openTermWith(id core.AgentID, argv []string, policy sandbox.Egre
 		m.termCh = make(chan core.AgentID, 1)
 	}
 
-	// Split first so the layout gives the new leaf a size to open the PTY at.
-	m.zoom = false
+	// Place the pane first so the layout gives it a size to open the PTY at. From a
+	// non-Shell tab (Info / Subagents), open the terminal in a fresh Shell tab rather
+	// than splitting a tab that can't hold command panes; otherwise split the focus.
 	leaf := newTermLeaf(id)
-	m.paneRoot, m.focusPane = splitPaneWith(m.paneRoot, m.focusPane, splitV, leaf)
-	m.relayout()
+	prevWin := m.winIdx
+	newTab := m.needNewCommandTab()
+	if newTab {
+		m.openLeafInNewShellTab(leaf) // saves the prior tab, activates the new one, relayouts
+	} else {
+		if m.paneRoot == nil || m.focusPane == nil {
+			return
+		}
+		m.zoom = false
+		m.paneRoot, m.focusPane = splitPaneWith(m.paneRoot, m.focusPane, splitV, leaf)
+		m.relayout()
+	}
 	cols, rows := termSize(leaf)
 
 	emu := vt.NewSafeEmulator(cols, rows)
@@ -173,8 +184,14 @@ func (m *model) openTermWith(id core.AgentID, argv []string, policy sandbox.Egre
 	sess, err := inter.OpenTerminal(ctx, core.AgentID("User"), sandbox.Cmd{Argv: argv, Policy: policy}, rows, cols, out)
 	if err != nil {
 		cancel()
-		m.paneRoot, m.focusPane = closePane(m.paneRoot, leaf)
-		m.relayout()
+		if newTab {
+			// Drop the just-created empty Shell tab and return to the prior one.
+			m.windows = m.windows[:len(m.windows)-1]
+			m.activateWindow(prevWin)
+		} else {
+			m.paneRoot, m.focusPane = closePane(m.paneRoot, leaf)
+			m.relayout()
+		}
 		m.status = "could not open terminal: " + err.Error()
 		return
 	}

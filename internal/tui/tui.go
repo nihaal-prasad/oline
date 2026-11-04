@@ -212,6 +212,7 @@ const (
 	wKey            // shown only if a chosen model's provider has no API key yet
 	wStart
 	wEnv
+	wDisk // new-environment only: how much disk to allocate to the created VM
 	wResume
 	wImport
 	wHistory // resume only: load the prior conversation, or start from a clean slate
@@ -240,6 +241,8 @@ type model struct {
 	autoSel  int
 	scopeIn  textinput.Model
 	goalIn   textinput.Model
+	diskIn   textinput.Model // GB to allocate when creating a new VM (wDisk step)
+	diskGB   int             // parsed result of diskIn, applied to the created VM's disk
 	cands    []sandbox.Candidate
 	envSel   int
 	scanned  bool
@@ -438,6 +441,10 @@ func (m *model) applyModePlaceholders() {
 	}
 }
 
+// defaultDiskGB is the suggested disk size for a newly created VM (the wDisk step).
+// Installing offensive tooling fills a small disk fast, so the default is generous.
+const defaultDiskGB = 20
+
 func newModel(mode config.Mode, store *config.Store, roster *agents.Roster) *model {
 	si := textinput.New()
 	si.Placeholder = scopePlaceholderPentest
@@ -452,6 +459,11 @@ func newModel(mode config.Mode, store *config.Store, roster *agents.Roster) *mod
 		gi.Placeholder = goalPlaceholderExploit
 	}
 	gi.Width = 64
+	di := textinput.New()
+	di.Placeholder = "GB for the new VM's disk (e.g. 20)"
+	di.SetValue(strconv.Itoa(defaultDiskGB))
+	di.CharLimit = 5
+	di.Width = 24
 	ci := textinput.New()
 	ci.Placeholder = "message the focused agent…  (Ctrl-b then a key for commands)"
 	ci.Width = 64
@@ -475,6 +487,7 @@ func newModel(mode config.Mode, store *config.Store, roster *agents.Roster) *mod
 		step:           wMode,
 		scopeIn:        si,
 		goalIn:         gi,
+		diskIn:         di,
 		input:          ci,
 		importIn:       ii,
 		vpnIn:          vi,
@@ -904,10 +917,36 @@ func (m *model) wizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.step = wResume
 				return m, listEngagementsCmd(cand)
 			}
+			// A brand-new environment (currently the QEMU "download & create" VM) gets
+			// a disk-size step; existing environments keep their disk, so skip it.
+			if cand.NeedsCreate {
+				m.step = wDisk
+				m.diskIn.Focus()
+				return m, nil
+			}
 			m.step = wScope
 			m.scopeIn.Focus()
 		}
 		return m, nil
+
+	case wDisk:
+		if k == "enter" {
+			v := strings.TrimSpace(m.diskIn.Value())
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 || n > 10000 {
+				m.wizErr = "enter a whole number of GB (1-10000), e.g. 20"
+				return m, nil
+			}
+			m.diskGB = n
+			m.wizErr = ""
+			m.diskIn.Blur()
+			m.step = wScope
+			m.scopeIn.Focus()
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.diskIn, cmd = m.diskIn.Update(msg)
+		return m, cmd
 
 	case wResume:
 		n := len(m.engagements) // index of the "import from host" option
@@ -1547,6 +1586,7 @@ func (m *model) startEngagement() (tea.Model, tea.Cmd) {
 		Persist:       eff.QEMU.Persist,
 		HostFirewall:  eff.QEMU.HostFirewall && runtime.GOOS == "linux",
 		AllowInternet: wire.RosterAllowsInternet(m.mode, m.roster),
+		DiskGB:        m.diskGB, // 0 unless the wDisk step set it (new VM only)
 	}
 	return m, prepareSandboxCmd(sandboxPrep{
 		cand:       cand,
@@ -2715,6 +2755,26 @@ func (m *model) newWindow() {
 	m.status = "new window " + m.windows[m.winIdx].name
 }
 
+// needNewCommandTab reports whether a shell/terminal must open in a fresh Shell
+// tab instead of the active one. Only the Info and Subagents tabs can't hold
+// command panes; a Shell tab or a free (customizable-mode) tab holds them fine.
+func (m *model) needNewCommandTab() bool {
+	m.ensureWindows()
+	k := m.windows[m.winIdx].kind
+	return k == tabInfo || k == tabSubagents
+}
+
+// openLeafInNewShellTab appends a new Shell tab whose sole pane is leaf and
+// activates it (relayout gives the leaf a size). Used when the operator opens a
+// shell/terminal (Ctrl-b $ / Ctrl-b T) from a non-Shell tab in enforced mode.
+func (m *model) openLeafInNewShellTab(leaf *pane) {
+	m.saveWindow()
+	m.zoom = false
+	w := &windowState{root: leaf, focus: leaf, name: tabShell.label(), kind: tabShell}
+	m.windows = append(m.windows, w)
+	m.activateWindow(len(m.windows) - 1)
+}
+
 // renumberTabs refreshes tab names: numeric for free tabs, the kind label for
 // enforced tabs. Called after the window set changes.
 func (m *model) renumberTabs() {
@@ -3393,6 +3453,10 @@ func (m *model) viewWizard() string {
 	}
 	step(m.step == wStart, "2. Engagement", radio(m.startSel, "New engagement", "Resume a previous engagement"))
 	step(m.step == wEnv, "3. Environment", m.envBodyView())
+	if m.step == wDisk {
+		step(true, "   Disk size for the new VM (GB)",
+			"    "+m.diskIn.View()+"\n    "+styleMuted.Render("how much disk the created VM may use; installing tools fills a small disk fast"))
+	}
 
 	scopeWord := "Scope"
 	scopeResumeLabel := "5. Scope (confirm — targets may have changed)"

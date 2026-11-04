@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha512"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -127,6 +128,45 @@ func (q *qemuSandbox) makeOverlay(ctx context.Context, base, id string) (string,
 	return overlay, nil
 }
 
+// resizeOverlay grows the overlay's virtual disk to gb gigabytes so tool installs
+// don't fill a small base image. It is a no-op when gb <= 0 or the image is already
+// at least that large (qcow2 is sparse, so this only raises the cap; the guest's
+// cloud-init grows the root filesystem to use it on first boot). The base image is
+// untouched. qemu-img only grows, never shrinks.
+func (q *qemuSandbox) resizeOverlay(ctx context.Context, overlay string, gb int) error {
+	if gb <= 0 {
+		return nil
+	}
+	img := qemuImg()
+	if img == "" {
+		return fmt.Errorf("sandbox/qemu: qemu-img not found (needed to size the VM disk)")
+	}
+	target := int64(gb) << 30 // GiB, matching qemu-img's G suffix
+	if cur, err := qcowVirtualSize(ctx, img, overlay); err == nil && cur >= target {
+		return nil // already at least this large; don't attempt a shrink
+	}
+	cmd := exec.CommandContext(ctx, img, "resize", overlay, fmt.Sprintf("%dG", gb))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("sandbox/qemu: size VM disk to %dG: %w: %s", gb, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// qcowVirtualSize returns the image's virtual size in bytes via `qemu-img info`.
+func qcowVirtualSize(ctx context.Context, img, path string) (int64, error) {
+	out, err := exec.CommandContext(ctx, img, "info", "--output=json", path).Output()
+	if err != nil {
+		return 0, err
+	}
+	var info struct {
+		VirtualSize int64 `json:"virtual-size"`
+	}
+	if err := json.Unmarshal(out, &info); err != nil {
+		return 0, err
+	}
+	return info.VirtualSize, nil
+}
+
 // makeSeedISO writes a cloud-init NoCloud seed ISO (volume label CIDATA) that
 // creates the sudo-capable provisioning user with authLine as its key.
 func (q *qemuSandbox) makeSeedISO(id, authLine string) (string, error) {
@@ -165,9 +205,15 @@ func (q *qemuSandbox) makeSeedISO(id, authLine string) (string, error) {
 }
 
 // cloudInitUserData is the NoCloud user-data that creates the sudo-capable
-// provisioning user with authLine as its only SSH key (password login off).
+// provisioning user with authLine as its only SSH key (password login off). It also
+// grows the root partition and filesystem to fill the disk, so a disk we resized
+// larger (see resizeOverlay) becomes usable space on first boot.
 func cloudInitUserData(authLine string) string {
 	return "#cloud-config\n" +
+		"growpart:\n" +
+		"  mode: auto\n" +
+		"  devices: ['/']\n" +
+		"resize_rootfs: true\n" +
 		"users:\n" +
 		"  - name: " + sshProvisionUser + "\n" +
 		"    sudo: 'ALL=(ALL) NOPASSWD:ALL'\n" +

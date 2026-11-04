@@ -108,6 +108,10 @@ type BootOpts struct {
 	Persist       bool
 	HostFirewall  bool
 	AllowInternet bool
+	// DiskGB, when > 0, grows the created VM's disk (the CoW overlay) to this many
+	// gigabytes so tool installs don't fill a small image. The guest's cloud-init
+	// grows the root filesystem to use it on first boot. 0 keeps the base image size.
+	DiskGB int
 }
 
 // Create downloads (if needed) and boots the managed Debian base image. A

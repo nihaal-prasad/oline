@@ -156,6 +156,34 @@ func TestWizardNewFlow(t *testing.T) {
 	}
 }
 
+// TestWizardDiskStep: the new-VM disk-size step parses a valid GB value into
+// diskGB and advances to Scope, and rejects a non-numeric entry (staying put).
+func TestWizardDiskStep(t *testing.T) {
+	m, _ := tempHomeModel(t)
+	var tm tea.Model = m
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	mm := tm.(*model)
+	mm.step = wDisk
+	mm.diskIn.SetValue("50")
+	mm.diskIn.Focus()
+	tm, _ = tm.Update(enter())
+	if mm = tm.(*model); mm.step != wScope {
+		t.Fatalf("after disk entry: step=%v, want wScope", mm.step)
+	}
+	if mm.diskGB != 50 {
+		t.Errorf("diskGB = %d, want 50", mm.diskGB)
+	}
+
+	// A non-numeric entry is rejected and the wizard stays on the disk step.
+	mm.step = wDisk
+	mm.diskIn.SetValue("abc")
+	tm, _ = tm.Update(enter())
+	if tm.(*model).step != wDisk {
+		t.Errorf("invalid disk size should stay on wDisk, got step=%v", tm.(*model).step)
+	}
+}
+
 func TestWizardResumeImportAndVPN(t *testing.T) {
 	t.Setenv("FIREWORKS_API_KEY", "test-key") // key present -> no key step
 	m, _ := tempHomeModel(t)                  // isolated empty home: models unconfigured

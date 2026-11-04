@@ -118,12 +118,15 @@ func (h *qemuHandle) OpenTerminal(ctx context.Context, agent core.AgentID, cmd C
 	if err != nil {
 		return nil, fmt.Errorf("sandbox/qemu: open terminal: %w", err)
 	}
-	// Raw-ish PTY: the VT emulator on the TUI side does echo and line editing, so the
-	// guest line discipline must not (ECHO off, ICANON off). ISIG stays on so Ctrl-C
-	// reaches programs as SIGINT.
+	// A normal cooked PTY, exactly like a real terminal: the guest line discipline
+	// echoes typed input and does line editing (ECHO + ICANON on), and the TUI's VT
+	// emulator renders the result. Full-screen programs (vim, htop, gdb -tui) switch
+	// the PTY to raw mode themselves. ISIG on so Ctrl-C reaches programs as SIGINT.
+	// (Without ECHO here the operator sees nothing they type — the emulator does not
+	// echo locally.)
 	modes := ssh.TerminalModes{
-		ssh.ECHO:          0,
-		ssh.ICANON:        0,
+		ssh.ECHO:          1,
+		ssh.ICANON:        1,
 		ssh.ISIG:          1,
 		ssh.TTY_OP_ISPEED: 115200,
 		ssh.TTY_OP_OSPEED: 115200,
@@ -414,6 +417,14 @@ func (q *qemuSandbox) boot(ctx context.Context, base, id string, opts BootOpts) 
 	overlay, err := q.makeOverlay(ctx, base, id)
 	if err != nil {
 		os.Remove(seed)
+		return nil, err
+	}
+	// Grow the writable overlay to the requested size so tool installs don't fill a
+	// small base image; the guest's cloud-init grows the root filesystem to match on
+	// first boot. The base image stays pristine. 0 = keep the base size.
+	if err := q.resizeOverlay(ctx, overlay, opts.DiskGB); err != nil {
+		os.Remove(seed)
+		os.Remove(overlay)
 		return nil, err
 	}
 	hn, tap, err := maybeHostNet(opts)

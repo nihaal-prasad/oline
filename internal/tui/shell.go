@@ -143,14 +143,21 @@ func (m *model) createShellLeaf() *pane {
 	return newShellLeaf(id)
 }
 
-// openShellPane splits the focused pane and makes the new pane an interactive
-// shell. Bound to Ctrl-b $.
+// openShellPane makes a new interactive shell pane. Bound to Ctrl-b $. On a Shell
+// tab (or in customizable mode) it splits the focused pane; from a non-Shell tab
+// (Info / Subagents) it opens the shell in a fresh Shell tab instead, since those
+// tabs can't hold command panes.
 func (m *model) openShellPane() {
+	leaf := m.createShellLeaf()
+	if m.needNewCommandTab() {
+		m.openLeafInNewShellTab(leaf)
+		m.status = "opened a new " + tabShell.label() + " tab with a shell (" + string(leaf.agent) + ")"
+		return
+	}
 	if m.paneRoot == nil || m.focusPane == nil {
 		return
 	}
 	m.zoom = false
-	leaf := m.createShellLeaf()
 	m.paneRoot, m.focusPane = splitPaneWith(m.paneRoot, m.focusPane, splitV, leaf)
 	m.relayout()
 	m.status = "opened shell pane (" + string(leaf.agent) + ")"
