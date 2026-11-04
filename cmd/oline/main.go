@@ -29,7 +29,8 @@ func main() {
 	envFlag := flag.String("env", "", "skip the wizard and start directly in this sandbox (e.g. a WSL distro name)")
 	scopeFlag := flag.String("scope", "", "in-scope targets (direct start)")
 	goalFlag := flag.String("goal", "", "engagement goal (direct start)")
-	manualFlag := flag.Bool("manual", false, "manual mode (direct start); default automatic")
+	plannerFlag := flag.Bool("planner", false, "planner mode (direct start): AI proposes, you approve each step; default automatic")
+	manualFlag := flag.Bool("manual", false, "deprecated alias for -planner")
 	editFlag := flag.Bool("edit", false, "open the model/provider editor and exit (no engagement)")
 	initFlag := flag.Bool("init-config", false, "write the mode's default config.yml, models.yml and prompt files to ~/oline/config/<mode>/ for editing, then exit")
 	forceFlag := flag.Bool("force", false, "with -init-config: overwrite existing config files instead of keeping them")
@@ -56,7 +57,7 @@ func main() {
 		printRoster(mode)
 		return
 	}
-	opts := tui.Options{Scope: *scopeFlag, Goal: *goalFlag, EnvID: *envFlag, Manual: *manualFlag, Edit: *editFlag}
+	opts := tui.Options{Scope: *scopeFlag, Goal: *goalFlag, EnvID: *envFlag, Planner: *plannerFlag || *manualFlag, Edit: *editFlag}
 	if err := tui.LaunchWith(mode, opts); err != nil {
 		fmt.Fprintln(os.Stderr, "oline:", err)
 		os.Exit(1)

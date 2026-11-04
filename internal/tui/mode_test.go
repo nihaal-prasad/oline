@@ -11,7 +11,7 @@ import (
 func TestCycleMode(t *testing.T) {
 	m := testModel(t)
 	m.sess = &engine.Session{Mode: core.Automatic}
-	want := []core.RunMode{core.Manual, core.Watcher, core.Automatic}
+	want := []core.RunMode{core.Planner, core.Watcher, core.Automatic}
 	for i, w := range want {
 		m.cycleMode()
 		if m.sess.Mode != w {

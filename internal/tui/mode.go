@@ -12,14 +12,14 @@ import (
 
 // Operating-mode switching and the "share a pane with the AI" action.
 //
-// The engagement mode (automatic | manual | watcher) can change mid-run. Ctrl-b m
+// The engagement mode (automatic | planner | watcher) can change mid-run. Ctrl-b m
 // cycles it; the change takes effect immediately (the engine reads the mode live,
 // so watcher's execution block applies to the very next tool call) and the
 // orchestrator is told so the models adapt. Watcher mode is "share on demand": the
 // AI never ingests the terminals on its own, so Ctrl-b a pushes the focused pane's
 // recent content to the orchestrator when the operator wants its read on it.
 
-// cycleMode advances automatic -> manual -> watcher -> automatic (Ctrl-b m).
+// cycleMode advances automatic -> planner -> watcher -> automatic (Ctrl-b m).
 func (m *model) cycleMode() {
 	if m.sess == nil {
 		m.status = "no engagement yet"
@@ -54,8 +54,8 @@ func modeBrief(mode core.RunMode) string {
 	switch mode {
 	case core.Watcher:
 		return "WATCHER: you execute NOTHING (bash, bash_bg and revshell are hard-blocked by the harness); the operator runs every command themselves in the terminal panes. Watch, read and write files in the workspace, and ADVISE with concise concrete guidance. Do not spawn action subagents to run things (they are blocked too); use read-only/advisory help only. Tell any subagent you do spawn that it is in watcher mode. The operator shares terminal output with you when they want your read on it."
-	case core.Manual:
-		return "MANUAL: propose each step and get the operator's EXPLICIT approval before anything runs; assume a plan is unapproved until they clearly say yes. One approved step at a time."
+	case core.Planner:
+		return "PLANNER: propose each step and get the operator's EXPLICIT approval before anything runs; assume a plan is unapproved until they clearly say yes. One approved step at a time. (You still carry out an approved step yourself.)"
 	default:
 		return "AUTOMATIC: run the engagement end-to-end yourself, within scope, pausing only for the usual gates (destructive actions, scope ambiguity, when you are unsure)."
 	}

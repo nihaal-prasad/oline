@@ -42,7 +42,7 @@ oline -version
 Pass the engagement settings on the command line to start directly:
 
 ```bash
-oline -mode pentester -env <wsl-distro> -scope "10.0.0.5, 10.0.0.0/24" -goal "prove RCE" [-manual]
+oline -mode pentester -env <wsl-distro> -scope "10.0.0.5, 10.0.0.0/24" -goal "prove RCE" [-planner]
 ```
 
 ### Flags
@@ -53,7 +53,7 @@ oline -mode pentester -env <wsl-distro> -scope "10.0.0.5, 10.0.0.0/24" -goal "pr
 | `-env <name>` | skip the wizard and start in this sandbox (for example a WSL distro name) |
 | `-scope "<targets>"` | in-scope IPs, CIDRs, and domains |
 | `-goal "<text>"` | engagement goal |
-| `-manual` | manual mode; default is automatic |
+| `-planner` | planner mode (AI proposes, you approve each step); default is automatic. `-manual` is a deprecated alias |
 | `-edit` | open the model/provider editor and exit |
 | `-init-config` | write the mode's default `config.yml`, `models.yml`, and prompt files to `~/oline/config/<mode>/`, then exit (`-force` overwrites existing) |
 | `-print` | print the resolved roster and exit |

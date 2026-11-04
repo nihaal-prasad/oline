@@ -48,7 +48,7 @@ oline -version
 Skip the wizard and start directly:
 
 ```bash
-oline -mode pentester -env <wsl-distro> -scope "10.0.0.5, 10.0.0.0/24" -goal "prove RCE" [-manual]
+oline -mode pentester -env <wsl-distro> -scope "10.0.0.5, 10.0.0.0/24" -goal "prove RCE" [-planner]
 ```
 
 On the first run, the setup wizard asks for your OpenAI-compatible provider (name, base URL, API

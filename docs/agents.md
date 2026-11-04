@@ -65,7 +65,7 @@ The orchestrator uses these coordination tools:
   context.
 - `inspect`: view a live subagent's state, recent history, and latest thoughts.
 - `send_message`: steer a peer or the orchestrator.
-- `ask`: ask the user a question. In manual and watcher mode it reaches you in the
+- `ask`: ask the user a question. In planner and watcher mode it reaches you in the
   TUI and the agent waits for your answer; in automatic mode it is recorded and the
   agent proceeds.
 - `resources`: snapshot the sandbox's CPU, memory, and disk load.

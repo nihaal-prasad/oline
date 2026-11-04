@@ -16,11 +16,11 @@ import (
 // Options can skip the wizard and start an engagement directly (useful for a
 // non-interactive launch and for verifying the running view).
 type Options struct {
-	Scope  string
-	Goal   string
-	EnvID  string // when set, the wizard is skipped and this environment is opened
-	Manual bool
-	Edit   bool // launch straight into the model/provider editor (no engagement)
+	Scope   string
+	Goal    string
+	EnvID   string // when set, the wizard is skipped and this environment is opened
+	Planner bool   // start in planner mode (direct start); default automatic
+	Edit    bool   // launch straight into the model/provider editor (no engagement)
 }
 
 // Launch runs the TUI with the interactive setup wizard.

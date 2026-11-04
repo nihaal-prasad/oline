@@ -370,9 +370,9 @@ type model struct {
 func (m *model) configureDirect(o Options) {
 	m.scopeIn.SetValue(o.Scope)
 	m.goalIn.SetValue(o.Goal)
-	// Direct start (scripting/CI) is automatic unless -manual is passed. Set it
-	// explicitly so the wizard's manual-by-default doesn't carry into this path.
-	if o.Manual {
+	// Direct start (scripting/CI) is automatic unless -planner is passed. Set it
+	// explicitly so the wizard's planner-by-default doesn't carry into this path.
+	if o.Planner {
 		m.autoSel = 1
 	} else {
 		m.autoSel = 0
@@ -429,7 +429,7 @@ func newModel(mode config.Mode, store *config.Store, roster *agents.Roster) *mod
 		awaitingAnswer: map[core.AgentID]bool{},
 		showThoughts:   false, // agent thoughts are hidden by default (Ctrl-b t toggles)
 		showRoster:     true,  // the right-side Options pane shows by default (Ctrl-b ? toggles)
-		autoSel:        1,     // manual mode is selected by default in the wizard (0 = automatic, 1 = manual)
+		autoSel:        1,     // planner mode is selected by default in the wizard (0 = automatic, 1 = planner, 2 = watcher)
 		mdCache:        map[int]*glamour.TermRenderer{},
 	}
 	if mode == config.ModeExploiter {
@@ -3169,7 +3169,7 @@ func (m *model) viewWizard() string {
 
 	step(m.step == wAuto, "7. Automation", radio(m.autoSel,
 		"Automatic (AI runs end-to-end)",
-		"Manual (AI proposes, you approve each step)",
+		"Planner (AI proposes, you approve each step)",
 		"Watcher (you run everything; AI only watches and advises)"))
 
 	if m.preparing {
@@ -3728,7 +3728,7 @@ func keyHelp() string {
  s   summary+diagram
  d   diagram
  t   toggle thoughts
- m   cycle mode (auto/manual/watcher)
+ m   cycle mode (auto/planner/watcher)
  a   share pane with the AI
  b   time budget
  e   editor
@@ -3767,7 +3767,7 @@ func truncate(s string, n int) string {
 func runModeFromSel(sel int) core.RunMode {
 	switch sel {
 	case 1:
-		return core.Manual
+		return core.Planner
 	case 2:
 		return core.Watcher
 	default:

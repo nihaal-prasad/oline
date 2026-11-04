@@ -38,7 +38,7 @@ skipped. Press Enter to advance.
    instructions for the resumed run (leave it blank to skip).
 9. **VPN** (optional): point oline at an OpenVPN config so the sandbox connects
    through a VPN before agents start. WSL only.
-10. **Automation**: pick automatic, manual, or watcher (see [Modes](#modes)
+10. **Automation**: pick automatic, planner, or watcher (see [Modes](#modes)
     below). You can switch while running with `Ctrl-b m`.
 
 ## Running view
@@ -78,7 +78,7 @@ The default layout tiles panes like tmux:
 - A subagent's pane begins with the task prompt the orchestrator gave it; scroll to
   the top to read it.
 - The status bar shows the roster, scope, environment, the operating mode
-  (automatic / manual / watcher), and the concurrency count.
+  (automatic / planner / watcher), and the concurrency count.
 - The command line sends a message to the focused agent. When a shell pane is
   focused it runs commands instead.
 
@@ -98,12 +98,12 @@ toggles). Click a tool call to expand it and see the full command and its output
 
 The engagement runs in one of three operating modes, shown in the status bar. Pick
 one in the setup wizard, and switch at any time while running with `Ctrl-b m` (it
-cycles automatic to manual to watcher); the change takes effect immediately and the
+cycles automatic to planner to watcher); the change takes effect immediately and the
 AI is told so it adapts.
 
 - **Automatic**: the AI runs the engagement end to end on its own, pausing only for
   its built-in gates (destructive actions, scope ambiguity, when it is unsure).
-- **Manual**: the AI proposes each step and waits for your explicit approval before
+- **Planner**: the AI proposes each step and waits for your explicit approval before
   anything runs, one approved step at a time.
 - **Watcher**: you run everything yourself in the terminal panes; the AI executes
   nothing. `bash`, `bash_bg`, and `revshell` are hard-blocked for every agent, so
@@ -141,7 +141,7 @@ Press `Ctrl-b`, then one of these keys:
 | `s` | refresh the Summary and Diagram panes now |
 | `d` | refresh the Diagram pane now |
 | `t` | toggle agent thoughts |
-| `m` | cycle the operating mode (automatic / manual / watcher) |
+| `m` | cycle the operating mode (automatic / planner / watcher) |
 | `a` | share the focused pane's current content with the AI |
 | `b` | change the focused agent's time budget |
 | `e` | open the model/provider editor |

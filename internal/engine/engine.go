@@ -83,7 +83,7 @@ type MsgKind int
 const (
 	MsgSteer      MsgKind = iota // orchestrator/user steering a running agent
 	MsgPeer                      // a peer or the user chatting with this agent
-	MsgUserAnswer                // manual-mode USER-ANSWER relay
+	MsgUserAnswer                // planner/watcher-mode USER-ANSWER relay
 	MsgResult                    // a spawned child's final result
 	MsgJobDone                   // a background job this agent started has finished
 	MsgBudget                    // an engine time-budget reminder / notice
@@ -124,7 +124,7 @@ type Session struct {
 	LLMFor    LLMResolver
 	ConfigFor ConfigResolver
 	Events    chan event.Event
-	Mode      core.RunMode // automatic | manual | watcher; drives `ask` blocking and the watcher execution block. May change mid-engagement.
+	Mode      core.RunMode // automatic | planner | watcher; drives `ask` blocking and the watcher execution block. May change mid-engagement.
 	// Interactive keeps the orchestrator alive between turns: when it finishes a
 	// turn with no tool calls it goes idle and WAITS for the next message (a user
 	// instruction or a peer) instead of ending the run. The TUI sets this so the
@@ -1947,7 +1947,7 @@ func (a *Agent) doAsk(ctx context.Context, tc llm.ToolCall) (string, bool) {
 	if a.s.Mode == core.Automatic {
 		return "Automatic mode: no interactive user is available right now. Proceed using your best judgment, strictly within the authorized scope; do not block waiting on this.", false
 	}
-	// Manual/watcher mode: block for a user answer relayed into the mailbox.
+	// Planner/watcher mode: block for a user answer relayed into the mailbox.
 	for {
 		select {
 		case env := <-a.box:
@@ -2165,7 +2165,7 @@ var primitiveSchemas = map[string]llm.FunctionDef{
 	},
 	"ask": {
 		Name:        "ask",
-		Description: "Put a question to the user. In manual and watcher mode this blocks for their answer; in automatic mode it records the question and tells you to proceed.",
+		Description: "Put a question to the user. In planner and watcher mode this blocks for their answer; in automatic mode it records the question and tells you to proceed.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"question":{"type":"string"},"options":{"type":"array","items":{"type":"string"}}},"required":["question"]}`),
 	},
 	"record_finding": {
