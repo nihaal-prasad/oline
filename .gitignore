@@ -12,3 +12,6 @@ secrets.yml
 *.swp
 .idea/
 .vscode/
+
+# Old binaries
+oline.exe~
