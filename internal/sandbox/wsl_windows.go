@@ -124,6 +124,26 @@ func (h *wslHandle) SetupEgress(ctx context.Context, scope Scope) error {
 	return nil
 }
 
+// Shutdown removes the per-agent firewall rules when the engagement ends. Unlike
+// QEMU (where the whole VM is destroyed), a WSL distro keeps running after oline
+// exits, so without this the OLINE_OUT chain would linger in the running distro.
+// It tears the firewall down completely (deletes the OLINE_OUT chain and its OUTPUT
+// hook, IPv4 and IPv6); the oline-* users and the engagement workspace are left in
+// place. The TUI calls this on exit, after agents are cancelled, so nothing is
+// running under the rules when they are removed.
+func (h *wslHandle) Shutdown(ctx context.Context) error {
+	if h.egress == nil {
+		return nil
+	}
+	_, err := h.egress.rootExec(ctx, buildEgressTeardown())
+	h.egress.applied = false
+	return err
+}
+
+// Compile-time check: a WSL handle is a Shutdowner, so the TUI tears its firewall
+// down on exit (see the shutdown path).
+var _ Shutdowner = (*wslHandle)(nil)
+
 // execUser resolves which guest user a given agent's command runs as.
 func (h *wslHandle) execUser(agent core.AgentID, policy EgressPolicy) string {
 	if h.egress != nil {

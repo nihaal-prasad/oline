@@ -2628,8 +2628,10 @@ func (m *model) shutdown() {
 	for _, sh := range m.shells { // cancel any user shell commands still running
 		sh.stop()
 	}
-	// Stop a VM-backed sandbox (QEMU) so no guest process is orphaned; WSL has
-	// nothing to stop and doesn't implement Shutdowner.
+	// Shut the sandbox down after agents are cancelled (above): QEMU powers off the
+	// VM; WSL tears down the per-agent firewall rules (the distro keeps running, so
+	// the rules would otherwise linger). Done last so nothing is running under the
+	// rules when they are removed.
 	if m.sess != nil && m.sess.Sandbox != nil {
 		if sd, ok := m.sess.Sandbox.(sandbox.Shutdowner); ok {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)

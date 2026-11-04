@@ -41,6 +41,10 @@ Changing scope while running re-applies these rules. See [tui.md](tui.md).
 oline imports or reuses a managed distro. Agents run as the unprivileged `oline-*`
 users in a shared workspace, governed by root-owned iptables rules.
 
+The distro keeps running after oline exits, so when the engagement ends oline
+removes its firewall rules (the `OLINE_OUT` chain, IPv4 and IPv6) once the agents
+have stopped. The `oline-*` users and the workspace are left in place for reuse.
+
 The installer runs as root, which on WSL can change the in-guest rules. Use QEMU
 when you need the boundary to hold against a root agent.
 
