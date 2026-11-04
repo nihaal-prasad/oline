@@ -158,7 +158,12 @@ func (m *model) refreshLayoutSnapshot() {
 		// Don't persist a lone shell tab: a shell can't be restored, so it would come
 		// back as a stray Main tab and the default shell tab would pile up on top of it
 		// each resume. (A fresh default shell tab is re-created on resume anyway.)
-		if w.root != nil && w.root.leaf && (w.root.shell || w.root.rev || w.root.term) {
+		// The auto-layout tab is transient (re-created empty on next start) and holds
+		// live agent panes that shouldn't be restored as a frozen layout; skip it.
+		if w.auto {
+			continue
+		}
+		if w.root != nil && w.root.leaf && (w.root.shell || w.root.rev || w.root.term || w.root.empty) {
 			continue
 		}
 		sw := savedWindow{Name: w.name, Zoom: w.zoom, Root: toSavedPane(w.root)}
@@ -188,7 +193,7 @@ func toSavedPane(p *pane) *savedPane {
 			sp.Summary, sp.Agent = true, string(summaryPaneID)
 		case p.diagram:
 			sp.Diagram, sp.Agent = true, string(diagramPaneID)
-		case p.shell, p.rev, p.term:
+		case p.shell, p.rev, p.term, p.empty:
 			sp.Agent = string(core.Main)
 		default:
 			sp.Agent = string(p.agent)

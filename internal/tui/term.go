@@ -159,6 +159,7 @@ func (m *model) openTermWith(id core.AgentID, argv []string, policy sandbox.Egre
 		m.termCh = make(chan core.AgentID, 1)
 	}
 
+	m.cancelAutoActive("you opened a terminal pane")
 	// Split first so the layout gives the new leaf a size to open the PTY at.
 	m.zoom = false
 	leaf := newTermLeaf(id)

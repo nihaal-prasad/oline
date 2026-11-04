@@ -143,6 +143,7 @@ Press `Ctrl-b`, then one of these keys:
 | `t` | toggle agent thoughts |
 | `m` | cycle the operating mode (automatic / planner / watcher) |
 | `a` | share the focused pane's current content with the AI |
+| `A` | re-enable auto-layout for the focused tab |
 | `b` | change the focused agent's time budget |
 | `e` | open the model/provider editor |
 | `?` | show or hide the Options pane |
@@ -158,6 +159,17 @@ agent (or runs a command in a focused shell pane).
 `Ctrl-b 1` to `Ctrl-b 9` jump by number, and `Ctrl-b &` closes the current one (not
 the last). When more than one window exists, a tab strip appears in the header;
 click a tab to switch to it.
+
+#### The auto-layout tab
+
+The second tab starts empty and arranges spawned subagents on its own. The first
+subagent opens a single pane; the second splits it left/right; the third splits the
+left pane into top/bottom; the fourth splits the right pane into top/bottom. Once all
+four panes are full, the next subagent takes over a pane whose subagent has finished,
+or, if all are still running, the pane with the longest-running subagent. Any edit
+you make to that tab (splitting, closing, moving, or retargeting a pane) cancels the
+auto-layout for it. `Ctrl-b A` re-enables auto-layout for the focused tab, rebuilding
+it from the current subagents; only one tab is auto at a time.
 
 ### Command panes
 

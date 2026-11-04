@@ -124,6 +124,7 @@ func (m *model) openRevPane(name string) {
 	if m.paneRoot == nil || m.focusPane == nil {
 		return
 	}
+	m.cancelAutoActive("you opened a reverse-shell pane")
 	if m.revs == nil {
 		m.revs = map[core.AgentID]*revState{}
 	}

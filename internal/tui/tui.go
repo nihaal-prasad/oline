@@ -296,7 +296,10 @@ type model struct {
 	terms       map[core.AgentID]*termState
 	termSeq     int
 	termCh      chan core.AgentID
-	listenInput bool          // the command line is entering a reverse-shell listener port
+	listenInput bool // the command line is entering a reverse-shell listener port
+	// spawnTime records when each subagent was spawned, so the auto-layout can pick
+	// the longest-running pane to reuse once all four slots are full.
+	spawnTime   map[core.AgentID]time.Time
 	histMu      sync.Mutex    // serializes saveHistory across the UI and ticker goroutines
 	savedLayout []savedWindow // last UI-goroutine snapshot of the window/pane layout (under histMu)
 	savedWinIdx int           // active window index for that snapshot
@@ -427,6 +430,7 @@ func newModel(mode config.Mode, store *config.Store, roster *agents.Roster) *mod
 		dirty:          map[core.AgentID]bool{},
 		states:         map[core.AgentID]core.State{},
 		awaitingAnswer: map[core.AgentID]bool{},
+		spawnTime:      map[core.AgentID]time.Time{},
 		showThoughts:   false, // agent thoughts are hidden by default (Ctrl-b t toggles)
 		showRoster:     true,  // the right-side Options pane shows by default (Ctrl-b ? toggles)
 		autoSel:        1,     // planner mode is selected by default in the wizard (0 = automatic, 1 = planner, 2 = watcher)
@@ -1575,12 +1579,13 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Ensure a default shell tab: after any restore, if the layout has no shell pane,
-	// open a second tab with one (done here, after the windows are finalized, so a
-	// restore can't orphan it). Stay on the main tab.
-	if !m.anyShellPane() {
-		shellTab := m.createShellLeaf()
-		m.windows = append(m.windows, &windowState{root: shellTab, focus: shellTab, name: strconv.Itoa(len(m.windows) + 1)})
+	// Ensure a second tab for subagent panes: when the layout has only the main tab,
+	// add an empty auto-layout tab. It starts blank; as the orchestrator spawns
+	// subagents, panes open there on their own (see autoPlaceSpawn). Done after the
+	// windows are finalized so a restore can't orphan it. Stay on the main tab.
+	if len(m.windows) == 1 {
+		auto := newEmptyLeaf()
+		m.windows = append(m.windows, &windowState{root: auto, focus: auto, name: strconv.Itoa(len(m.windows) + 1), auto: true})
 	}
 
 	start := "engagement starting"
@@ -2002,6 +2007,7 @@ func (m *model) mouseRelease(x, y int) {
 	m.dragPane = nil
 	if m.dragMoved {
 		if dest := paneAt(m.paneRoot, x, y); dest != nil && dest != src {
+			m.cancelAutoActive("you moved a pane")
 			m.swapPaneViews(src, dest)
 			m.focusPane = dest
 			m.relayout()
@@ -2242,6 +2248,8 @@ func (m *model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cycleMode()
 		case "a":
 			m.sharePaneToAI()
+		case "A":
+			m.enableAutoHere()
 		case "q":
 			m.shutdown()
 			return m, tea.Quit
@@ -2341,17 +2349,17 @@ func (m *model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// The Summary / Findings panes are read-only views, not agents: typing into
 		// them would message a non-existent agent. Route a message to the orchestrator
 		// instead and tell the user.
-		if m.focusInfoPane() {
+		if m.focusInfoPane() || (m.focusPane != nil && m.focusPane.empty) {
 			if strings.TrimSpace(m.input.Value()) != "" {
-				m.status = "that pane is a read-only view — focus an agent (↑/↓) to send a message"
+				m.status = "nothing to message here — focus an agent (↑/↓) to send a message"
 			}
 			return m, nil
 		}
 		text := strings.TrimSpace(m.input.Value())
 		if text != "" {
 			to := m.focusedAgent()
-			// If an agent is waiting on a question (e.g. a comprehension-gate
-			// `ask`), the next message ANSWERS it — route it as a user-answer so
+			// If an agent is waiting on a question (e.g. an `ask`), the next message
+			// ANSWERS it — route it as a user-answer so
 			// the asking agent's `ask` unblocks, not as a steer it would ignore.
 			kind := engine.MsgSteer
 			if ans := m.answerTarget(to); ans != "" {
@@ -2382,6 +2390,7 @@ func (m *model) doSplit(d paneDir) {
 	if m.paneRoot == nil || m.focusPane == nil {
 		return
 	}
+	m.cancelAutoActive("you split a pane")
 	m.zoom = false
 	m.paneRoot, m.focusPane = splitPane(m.paneRoot, m.focusPane, d, m.focusedAgent())
 	m.relayout()
@@ -2391,6 +2400,7 @@ func (m *model) closePaneCmd() {
 	if m.paneRoot == nil || m.focusPane == nil {
 		return
 	}
+	m.cancelAutoActive("you closed a pane")
 	m.reapShell(m.focusPane)
 	m.reapRev(m.focusPane)
 	m.reapTerm(m.focusPane)
@@ -2668,6 +2678,9 @@ func (m *model) sendDiagram() {
 // reopened — just navigate a pane onto it). A live shell pane is never clobbered:
 // a different non-shell pane is retargeted instead.
 func (m *model) setFocus(id core.AgentID) {
+	// Retargeting a pane changes which subagent/view it shows — a user edit that
+	// cancels the auto-layout on this tab.
+	m.cancelAutoActive("you changed a pane's view")
 	p := m.focusPane
 	if p != nil && (p.shell || p.rev || p.term) {
 		// A command pane (shell / reverse-shell) can't just be retargeted — its live
@@ -2890,6 +2903,7 @@ func (m *model) mutate(ev event.Event) {
 		}
 	case event.Spawned:
 		m.addAgent(e.Child)
+		m.autoPlaceSpawn(e.Child) // open/arrange its pane on the auto-layout tab
 		m.tr(core.Main).addRich(styleAccent.Render("→ spawned ") + string(e.Child) + styleMuted.Render(" ("+e.Role+")"))
 		m.markDirty(core.Main)
 		// Put the orchestrator's task prompt at the TOP of the new subagent's pane so
@@ -3371,6 +3385,8 @@ func (m *model) renderLeaf(p *pane) string {
 		label = "Summary"
 	case p.diagram:
 		label = "Diagram"
+	case p.empty:
+		label = "Subagents (auto-layout)"
 	}
 	title := styleMuted.Render(label)
 	if p == m.focusPane {
@@ -3391,8 +3407,13 @@ func (m *model) renderLeaf(p *pane) string {
 	}
 	head := lipgloss.NewStyle().Width(innerW).MaxHeight(1).Render(title)
 	body := p.vp.View()
-	if p.term {
+	switch {
+	case p.term:
 		body = m.renderTerm(p, innerW, innerH-1, p == m.focusPane)
+	case p.empty:
+		hint := "No subagents yet.\n\nPanes open here automatically as the\norchestrator spawns subagents.\n\nAny edit to this tab cancels that;\nCtrl-b A re-enables it."
+		body = lipgloss.NewStyle().Width(innerW).Height(innerH-1).
+			Align(lipgloss.Center, lipgloss.Center).Foreground(styleMuted.GetForeground()).Render(hint)
 	}
 	return border.Width(innerW).Height(innerH).Render(head + "\n" + body)
 }
@@ -3730,6 +3751,7 @@ func keyHelp() string {
  t   toggle thoughts
  m   cycle mode (auto/planner/watcher)
  a   share pane with the AI
+ A   re-enable auto-layout here
  b   time budget
  e   editor
  ?   show/hide pane

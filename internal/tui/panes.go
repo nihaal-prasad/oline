@@ -15,6 +15,13 @@ type windowState struct {
 	focus *pane
 	zoom  bool
 	name  string
+
+	// auto: this tab arranges spawned subagents on its own (see autoPlaceSpawn). It
+	// starts as the empty second tab; a user edit to the tab cancels it (auto=false),
+	// and Ctrl-b A re-enables it for the focused tab. autoSlots holds the agent ids in
+	// the 2x2 slot order (top-left, right/top-right, bottom-left, bottom-right).
+	auto      bool
+	autoSlots []core.AgentID
 }
 
 // pane is a node in the tmux-style split tree. A leaf shows one agent's
@@ -31,6 +38,7 @@ const (
 const (
 	summaryPaneID = core.AgentID("\x00summary")
 	diagramPaneID = core.AgentID("\x00diagram")
+	emptyPaneID   = core.AgentID("\x00empty")
 )
 
 type pane struct {
@@ -40,6 +48,7 @@ type pane struct {
 	shell   bool // true: an interactive shell the user types into (not an agent view)
 	rev     bool // true: a reverse-shell channel pane (streams a channel, user types commands to its shell)
 	term    bool // true: a fully terminal-emulated PTY pane (vim/htop work; raw keys forwarded)
+	empty   bool // true: a blank placeholder (the auto tab before any subagent spawns)
 	summary bool // true: the live engagement-summary pane (content from m.summary)
 	diagram bool // true: the live ASCII map pane (content from m.diagram)
 
@@ -84,6 +93,12 @@ func newSummaryLeaf() *pane {
 }
 func newDiagramLeaf() *pane {
 	return &pane{agent: diagramPaneID, leaf: true, diagram: true, ratio: 0.5, vp: viewport.New(10, 10)}
+}
+
+// newEmptyLeaf is a blank placeholder pane: the auto tab shows it until the first
+// subagent spawns. It renders a short hint and holds no transcript.
+func newEmptyLeaf() *pane {
+	return &pane{agent: emptyPaneID, leaf: true, empty: true, ratio: 0.5, vp: viewport.New(10, 10)}
 }
 
 func leaves(p *pane) []*pane {

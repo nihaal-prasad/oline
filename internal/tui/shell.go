@@ -168,6 +168,7 @@ func (m *model) openShellPane() {
 	if m.paneRoot == nil || m.focusPane == nil {
 		return
 	}
+	m.cancelAutoActive("you opened a shell pane")
 	m.zoom = false
 	leaf := m.createShellLeaf()
 	m.paneRoot, m.focusPane = splitPaneWith(m.paneRoot, m.focusPane, splitV, leaf)
