@@ -166,7 +166,7 @@ func TestEditorSaveProvider(t *testing.T) {
 	m.eFields[1].SetValue("fw_edited_key")
 	m.saveItem()
 
-	data, err := os.ReadFile(filepath.Join(home, "oline", "config", "pentester", "models.yml"))
+	data, err := os.ReadFile(filepath.Join(home, "oline", "config", "models.yml"))
 	if err != nil {
 		t.Fatalf("models.yml not written: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestEditorRoleCost(t *testing.T) {
 	}
 
 	// Persisted to the user override, and the provider's other models survive.
-	data, err := os.ReadFile(filepath.Join(home, "oline", "config", "pentester", "models.yml"))
+	data, err := os.ReadFile(filepath.Join(home, "oline", "config", "models.yml"))
 	if err != nil {
 		t.Fatalf("models.yml not written: %v", err)
 	}

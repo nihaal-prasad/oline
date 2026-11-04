@@ -52,8 +52,8 @@ func TestEnsureModel(t *testing.T) {
 		t.Errorf("new model cost should start at 0, got %v", got.Cost.Input)
 	}
 
-	// Persisted, and the embedded models survive alongside it.
-	data, err := os.ReadFile(filepath.Join(home, "config", "pentester", "models.yml"))
+	// Persisted to the shared models.yml, and the embedded models survive alongside it.
+	data, err := os.ReadFile(filepath.Join(home, "config", "models.yml"))
 	if err != nil {
 		t.Fatalf("models.yml not written: %v", err)
 	}
@@ -137,6 +137,93 @@ func TestAddProviderRoundTrips(t *testing.T) {
 	}
 	if len(p.Models) != 2 || p.Models[0].ID != "gpt-4o" {
 		t.Errorf("models not preserved: %+v", p.Models)
+	}
+}
+
+// TestModelSetupSharedAcrossModes: configuring providers and tier roles in one
+// mode makes the other mode load fully configured (no second setup wizard). This
+// is the fix for the bug where exploiter re-prompted for models already set up in
+// pentester.
+func TestModelSetupSharedAcrossModes(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("OLINE_HOME", home)
+
+	// Configure everything while in pentester mode.
+	pent, err := config.Load(config.ModePentester, assets.PentesterFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pent.AddProvider("fireworks", "https://api.fireworks.ai/inference/v1", "secret:fireworks",
+		[]config.ModelDef{{ID: "big-model"}, {ID: "small-model"}}); err != nil {
+		t.Fatalf("AddProvider: %v", err)
+	}
+	for tier, sel := range map[string]string{
+		"big":    "fireworks/big-model",
+		"medium": "fireworks/big-model",
+		"small":  "fireworks/small-model",
+	} {
+		if err := pent.SaveModelRole(tier, sel); err != nil {
+			t.Fatalf("SaveModelRole(%s): %v", tier, err)
+		}
+	}
+
+	// It landed in the shared file, not a per-mode one.
+	if _, err := os.Stat(filepath.Join(home, "config", "models.yml")); err != nil {
+		t.Fatalf("shared models.yml should exist: %v", err)
+	}
+
+	// Loading exploiter — never configured directly — must inherit all of it.
+	expl, err := config.Load(config.ModeExploiter, assets.ExploiterFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !expl.ModelsConfigured() {
+		t.Error("exploiter should be configured (inherited from pentester), but ModelsConfigured() is false")
+	}
+	r := expl.ModelRoles()
+	if r.Big != "fireworks/big-model" || r.Small != "fireworks/small-model" {
+		t.Errorf("exploiter did not inherit tier roles: %+v", r)
+	}
+	if _, ok := expl.Providers()["fireworks"]; !ok {
+		t.Error("exploiter did not inherit the fireworks provider")
+	}
+}
+
+// TestMigrateLegacyPerModeSetup: a user who configured models before the shared
+// layer existed (setup written under config/<mode>/) is migrated on next load so
+// both modes inherit it.
+func TestMigrateLegacyPerModeSetup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("OLINE_HOME", home)
+
+	// Simulate the old on-disk layout: pentester configured, no shared file.
+	pentDir := filepath.Join(home, "config", "pentester")
+	if err := os.MkdirAll(pentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pentDir, "models.yml"),
+		[]byte("providers:\n  fireworks:\n    baseUrl: https://api.fireworks.ai/inference/v1\n    api: openai\n    apiKeyRef: secret:fireworks\n    models:\n      - id: big-model\n      - id: small-model\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pentDir, "config.yml"),
+		[]byte("modelRoles:\n  big: fireworks/big-model\n  medium: fireworks/big-model\n  small: fireworks/small-model\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Loading exploiter triggers the one-time migration and inherits the setup.
+	expl, err := config.Load(config.ModeExploiter, assets.ExploiterFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !expl.ModelsConfigured() {
+		t.Error("exploiter should be configured after migrating pentester's legacy setup")
+	}
+	if _, ok := expl.Providers()["fireworks"]; !ok {
+		t.Error("legacy provider was not migrated to the shared layer")
+	}
+	// The shared file now exists, so the migration won't run again.
+	if _, err := os.Stat(filepath.Join(home, "config", "models.yml")); err != nil {
+		t.Errorf("shared models.yml should have been created by migration: %v", err)
 	}
 }
 

@@ -20,8 +20,9 @@ make dist                 # cross-compiled binaries into the project root (or: p
 
 `oline` ships with no provider. On the first run, the setup wizard asks for your
 OpenAI-compatible provider: a name, a base URL, an API key, and a model for each
-tier. It saves the provider to `~/oline/config/<mode>/models.yml` and the key to
-`~/oline/config/secrets.yml`.
+tier. It saves the provider and your tier choices to `~/oline/config/models.yml`
+and the key to `~/oline/config/secrets.yml`. Because that file is shared by every
+mode, you set this up once and both pentester and exploiter use it.
 
 A provider's key can instead come from an environment variable: set its `apiKeyRef`
 in `models.yml` to `env:NAME` and export `NAME`. See

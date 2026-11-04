@@ -9,9 +9,10 @@ Everything oline keeps on the host lives under one root directory: `~/oline`, or
 <root>/
   config/
     secrets.yml              # API keys (mode 0600, git-ignored)
+    models.yml               # providers and model tier roles, shared by every mode
     pentester/               # per-mode config and prompts
-      config.yml             #   roles, concurrency, budgets, bash deny, agent overrides
-      models.yml             #   providers, models, context window, max tokens, cost
+      config.yml             #   concurrency, budgets, bash deny, agent overrides
+      models.yml             #   optional per-mode provider/model overrides
       SYSTEM_TEMPLATE.md      #   orchestrator prompt
       PERSONALITY.md          #   orchestrator personality
       METHODOLOGY.md          #   methodology (pentester)
@@ -24,10 +25,16 @@ Everything oline keeps on the host lives under one root directory: `~/oline`, or
   images/                     # cached QEMU base images and user qcow2 files
 ```
 
-Config loads in layers: the defaults built into the binary, then any files you
-place under `<root>/config/<mode>/`, then edits you make in the app (saved back to
-those files). A `config.yml` or `models.yml` only needs the keys you want to
-change; the rest use the defaults.
+Config loads in layers: the defaults built into the binary, then any per-mode files
+you place under `<root>/config/<mode>/`, then the shared `<root>/config/models.yml`,
+then edits you make in the app. A `config.yml` or `models.yml` only needs the keys
+you want to change; the rest use the defaults.
+
+Your providers and your big/medium/small tier selections are the same whatever mode
+you run, so they live in the shared `<root>/config/models.yml` and apply to every
+mode. The wizard and the in-app editor write them there, so setting them up once in
+one mode configures them for all of them. Everything else (budgets, concurrency,
+bash rules, per-agent overrides, and prompts) stays per-mode.
 
 ## Scaffold the config: `oline -init-config`
 
@@ -46,7 +53,7 @@ with the defaults. Edited files load on the next run.
 
 | You want to change | Edit |
 |---|---|
-| The model for each tier (big/medium/small) | `config.yml` `modelRoles` (or `-edit`, or the wizard) |
+| The model for each tier (big/medium/small) | shared `models.yml` `modelRoles` (or `-edit`, or the wizard); applies to every mode |
 | Which tier an agent runs on, its thinking level | `config.yml` `agents.<name>.tier` (or `-edit`), or `tier:` in `agents/<name>.md` |
 | A provider's base URL / API key | `models.yml` `baseUrl` and `secrets.yml` (or `-edit`) |
 | Model list, context window, output `maxTokens` | `models.yml` under the provider's `models` |
@@ -112,9 +119,11 @@ agents: {}                   # per-agent overrides
 
 ## models.yml and providers
 
-oline ships with no provider. The first-run wizard writes the one you configure
-here; you can also add or edit providers directly. `models.yml` defines the
-OpenAI-compatible providers and their models:
+oline ships with no provider. The first-run wizard writes the one you configure to
+the shared `<root>/config/models.yml`; you can also add or edit providers there
+directly, and every mode picks them up. `models.yml` defines the OpenAI-compatible
+providers and their models, and holds the big/medium/small tier selections under
+`modelRoles`:
 
 ```yaml
 providers:

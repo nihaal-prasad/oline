@@ -1,9 +1,16 @@
 // Package config loads and merges oline's harness configuration.
 //
-// Three layers, lowest precedence first:
+// Four layers, lowest precedence first:
 //  1. embedded defaults            (assets/<mode>/config.yml + models.yml)
-//  2. on-disk user overrides       (~/oline/config/<mode>/config.yml + models.yml)
-//  3. in-session edits             (applied via Save*, persisted to layer 2)
+//  2. per-mode user overrides      (~/oline/config/<mode>/config.yml + models.yml)
+//  3. shared provider/model setup  (~/oline/config/models.yml)
+//  4. in-session edits             (applied via Save*, persisted to layer 2 or 3)
+//
+// Providers and model tier roles are global to the user's setup (identical for
+// every mode), so they live in the shared layer 3 and are loaded for every mode;
+// the setup wizard and the in-app editor write them there, so configuring one mode
+// configures them all. Everything else (costs, budgets, tools, prompts) is per-mode
+// in layer 2.
 //
 // API keys are never stored in config.yml/models.yml. Each provider carries an
 // apiKeyRef ("env:NAME" or "secret:<provider>") resolved at runtime; keys saved
@@ -300,6 +307,13 @@ func Load(mode Mode, defaultsFS fs.FS) (*Store, error) {
 	}
 	s.userDir = filepath.Join(s.configDir, string(mode))
 
+	// Provider definitions and tier roles are global to the user's setup — the same
+	// for every mode — so they live in a shared layer (see below). A one-time
+	// migration promotes any legacy per-mode model/provider setup into that shared
+	// file before it is read, so a user who configured one mode doesn't have to
+	// reconfigure the other.
+	migrateSharedModels(s.configDir, mode)
+
 	// Remember the embedded providers so a user override that sets only some of a
 	// provider's fields (e.g. SaveProvider writes just baseUrl) doesn't wipe the
 	// rest: yaml.v3 replaces a map value wholesale rather than deep-merging, so we
@@ -309,7 +323,7 @@ func Load(mode Mode, defaultsFS fs.FS) (*Store, error) {
 		baseProviders[k] = v
 	}
 
-	// Layer 2: on-disk user overrides (optional).
+	// Layer 2: per-mode on-disk user overrides (optional).
 	for _, name := range []string{"config.yml", "models.yml"} {
 		p := filepath.Join(s.userDir, name)
 		data, err := os.ReadFile(p)
@@ -322,6 +336,17 @@ func Load(mode Mode, defaultsFS fs.FS) (*Store, error) {
 		if err := yaml.Unmarshal(data, &root); err != nil {
 			return nil, fmt.Errorf("config: parsing %s: %w", p, err)
 		}
+	}
+
+	// Layer 3: shared cross-mode provider/model-role overrides
+	// (~/oline/config/models.yml). Loaded last so the user's one-time provider and
+	// tier setup applies to every mode and wins over any stale per-mode values.
+	if data, err := os.ReadFile(s.sharedModelsPath()); err == nil {
+		if err := yaml.Unmarshal(data, &root); err != nil {
+			return nil, fmt.Errorf("config: parsing %s: %w", s.sharedModelsPath(), err)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("config: reading %s: %w", s.sharedModelsPath(), err)
 	}
 
 	// Fill back any provider fields the override left unset (zero), so overriding
@@ -358,6 +383,121 @@ func Load(mode Mode, defaultsFS fs.FS) (*Store, error) {
 
 	s.eff = root
 	return s, nil
+}
+
+// sharedModelsPath is the user's cross-mode provider/model-role override file
+// (~/oline/config/models.yml). Providers and tier roles are global to the user's
+// setup, so they are stored here — next to secrets.yml — rather than under a mode
+// subdirectory, and loaded for every mode.
+func (s *Store) sharedModelsPath() string { return filepath.Join(s.configDir, "models.yml") }
+
+// allModes lists the roster modes whose legacy per-mode config may hold model or
+// provider setup to migrate into the shared layer.
+func allModes() []Mode { return []Mode{ModePentester, ModeExploiter} }
+
+// migrateSharedModels promotes a one-time legacy per-mode model/provider setup
+// into the shared ~/oline/config/models.yml so every mode inherits it. Earlier
+// versions stored providers in config/<mode>/models.yml and tier roles in
+// config/<mode>/config.yml, so configuring one mode left the other unconfigured
+// (it would re-run the setup wizard). This runs only when the shared file does not
+// yet exist, and takes the current mode's values first, then any other mode's, for
+// each of providers and roles. It is best-effort: on any error it simply leaves the
+// shared file absent, and the normal setup wizard still applies.
+func migrateSharedModels(configDir string, current Mode) {
+	shared := filepath.Join(configDir, "models.yml")
+	if _, err := os.Stat(shared); err == nil {
+		return // already migrated, or written by the wizard/editor
+	}
+	order := append([]Mode{current}, otherModes(current)...)
+	var providers, roles map[string]any
+	for _, m := range order {
+		if providers == nil {
+			if r := readYAMLMap(filepath.Join(configDir, string(m), "models.yml")); r != nil {
+				if p, ok := r["providers"].(map[string]any); ok && len(p) > 0 {
+					providers = p
+				}
+			}
+		}
+		if roles == nil {
+			if r := readYAMLMap(filepath.Join(configDir, string(m), "config.yml")); r != nil {
+				if rl, ok := r["modelRoles"].(map[string]any); ok && hasNonEmptyValue(rl) {
+					roles = rl
+				}
+			}
+		}
+	}
+	if providers == nil && roles == nil {
+		return // nothing legacy to promote
+	}
+	promoted := map[string]any{}
+	if providers != nil {
+		promoted["providers"] = providers
+	}
+	if roles != nil {
+		promoted["modelRoles"] = roles
+	}
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		return
+	}
+	if data, err := yaml.Marshal(promoted); err == nil {
+		_ = os.WriteFile(shared, data, 0o600)
+	}
+}
+
+// otherModes returns every known mode except m.
+func otherModes(m Mode) []Mode {
+	var out []Mode
+	for _, x := range allModes() {
+		if x != m {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+// readYAMLMap reads and decodes a YAML file into a top-level map, returning nil on
+// any error (missing file, parse failure).
+func readYAMLMap(path string) map[string]any {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var r map[string]any
+	if yaml.Unmarshal(data, &r) != nil {
+		return nil
+	}
+	return r
+}
+
+// hasNonEmptyValue reports whether any value in m is a non-empty string (used to
+// decide whether a legacy modelRoles block is worth migrating).
+func hasNonEmptyValue(m map[string]any) bool {
+	for _, v := range m {
+		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// editSharedModels read-modify-writes the shared models.yml (0600), passing the
+// decoded top-level map (created when the file is absent) to mutate. This is the
+// single write path for the user's global provider and tier-role setup.
+func (s *Store) editSharedModels(mutate func(root map[string]any)) error {
+	path := s.sharedModelsPath()
+	root := readYAMLMap(path)
+	if root == nil {
+		root = map[string]any{}
+	}
+	mutate(root)
+	if err := os.MkdirAll(s.configDir, 0o700); err != nil {
+		return fmt.Errorf("config: creating %s: %w", s.configDir, err)
+	}
+	data, err := yaml.Marshal(root)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
 }
 
 // Effective returns the merged configuration.
@@ -450,9 +590,9 @@ func (s *Store) SaveSecret(provider, key string) error {
 	return os.WriteFile(filepath.Join(s.configDir, "secrets.yml"), data, 0o600)
 }
 
-// SaveProvider persists a provider's baseURL into the user models.yml override
-// (~/oline/config/<mode>/models.yml) and updates the in-memory store. It never
-// writes an API key — keys go to secrets.yml via SaveSecret.
+// SaveProvider persists a provider's baseURL into the shared models.yml override
+// (~/oline/config/models.yml) and updates the in-memory store. It never writes an
+// API key — keys go to secrets.yml via SaveSecret.
 func (s *Store) SaveProvider(name, baseURL string) error {
 	p, ok := s.eff.Providers[name]
 	if !ok {
@@ -460,42 +600,13 @@ func (s *Store) SaveProvider(name, baseURL string) error {
 	}
 	p.BaseURL = baseURL
 	s.eff.Providers[name] = p
-
-	// Load the existing user models.yml (if any) and rewrite ONLY this provider's
-	// baseUrl, so embedded defaults (and any other user content) are preserved
-	// rather than frozen into the override layer.
-	userPath := filepath.Join(s.userDir, "models.yml")
-	var userRoot map[string]any
-	if data, err := os.ReadFile(userPath); err == nil {
-		_ = yaml.Unmarshal(data, &userRoot)
-	}
-	if userRoot == nil {
-		userRoot = map[string]any{}
-	}
-	provMap, _ := userRoot["providers"].(map[string]any)
-	if provMap == nil {
-		provMap = map[string]any{}
-	}
-	entry, _ := provMap[name].(map[string]any)
-	if entry == nil {
-		entry = map[string]any{}
-	}
-	entry["baseUrl"] = baseURL
-	provMap[name] = entry
-	userRoot["providers"] = provMap
-
-	if err := os.MkdirAll(s.userDir, 0o700); err != nil {
-		return fmt.Errorf("config: creating %s: %w", s.userDir, err)
-	}
-	data, err := yaml.Marshal(userRoot)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(userPath, data, 0o600)
+	// Rewrite ONLY this provider's baseUrl, so embedded defaults (and any other
+	// content) are preserved rather than frozen into the override layer.
+	return s.writeProviderEntry(name, map[string]any{"baseUrl": baseURL})
 }
 
-// SaveModelCost persists one model's cost (USD per 1M tokens) into the user
-// models.yml override (~/oline/config/<mode>/models.yml) and updates the in-memory
+// SaveModelCost persists one model's cost (USD per 1M tokens) into the shared
+// models.yml override (~/oline/config/models.yml) and updates the in-memory
 // store. The override layer replaces a provider's whole model list wholesale (see
 // Load's fill-back), so this writes the provider's full current model list with the
 // updated cost — keeping every other model and all of this model's other fields
@@ -517,7 +628,7 @@ func (s *Store) SaveModelCost(provider, modelID string, cost Cost) error {
 		return fmt.Errorf("config: provider %q has no model %q", provider, modelID)
 	}
 	s.eff.Providers[provider] = p
-	return s.writeUserProviderModels(provider, p.Models)
+	return s.writeProviderModels(provider, p.Models)
 }
 
 // EnsureModel makes sure provider's catalog contains a model with id modelID,
@@ -527,7 +638,7 @@ func (s *Store) SaveModelCost(provider, modelID string, cost Cost) error {
 // spec, compat) when the provider has one, so a model from the same provider works
 // out of the box; its cost starts at zero for the user to set. With no sibling it
 // gets conservative empty defaults (the engine then uses its fallbacks). It
-// persists to the user models.yml and reports whether it added the model.
+// persists to the shared models.yml and reports whether it added the model.
 func (s *Store) EnsureModel(provider, modelID string) (added bool, err error) {
 	p, ok := s.eff.Providers[provider]
 	if !ok {
@@ -551,53 +662,38 @@ func (s *Store) EnsureModel(provider, modelID string) (added bool, err error) {
 	}
 	p.Models = append(p.Models, nm)
 	s.eff.Providers[provider] = p
-	if err := s.writeUserProviderModels(provider, p.Models); err != nil {
+	if err := s.writeProviderModels(provider, p.Models); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-// writeUserProviderModels rewrites one provider's full model list in the user
+// writeProviderModels rewrites one provider's full model list in the shared
 // models.yml override.
-func (s *Store) writeUserProviderModels(provider string, models []ModelDef) error {
-	return s.writeUserProviderEntry(provider, map[string]any{"models": models})
+func (s *Store) writeProviderModels(provider string, models []ModelDef) error {
+	return s.writeProviderEntry(provider, map[string]any{"models": models})
 }
 
-// writeUserProviderEntry merges fields into one provider's entry in the user
+// writeProviderEntry merges fields into one provider's entry in the shared
 // models.yml override, preserving the rest of that file and the provider's other
 // keys. The override layer replaces a provider's model list wholesale, so a models
 // field must carry the full list.
-func (s *Store) writeUserProviderEntry(provider string, fields map[string]any) error {
-	userPath := filepath.Join(s.userDir, "models.yml")
-	var userRoot map[string]any
-	if data, err := os.ReadFile(userPath); err == nil {
-		_ = yaml.Unmarshal(data, &userRoot)
-	}
-	if userRoot == nil {
-		userRoot = map[string]any{}
-	}
-	provMap, _ := userRoot["providers"].(map[string]any)
-	if provMap == nil {
-		provMap = map[string]any{}
-	}
-	entry, _ := provMap[provider].(map[string]any)
-	if entry == nil {
-		entry = map[string]any{}
-	}
-	for k, v := range fields {
-		entry[k] = v
-	}
-	provMap[provider] = entry
-	userRoot["providers"] = provMap
-
-	if err := os.MkdirAll(s.userDir, 0o700); err != nil {
-		return fmt.Errorf("config: creating %s: %w", s.userDir, err)
-	}
-	data, err := yaml.Marshal(userRoot)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(userPath, data, 0o600)
+func (s *Store) writeProviderEntry(provider string, fields map[string]any) error {
+	return s.editSharedModels(func(root map[string]any) {
+		provMap, _ := root["providers"].(map[string]any)
+		if provMap == nil {
+			provMap = map[string]any{}
+		}
+		entry, _ := provMap[provider].(map[string]any)
+		if entry == nil {
+			entry = map[string]any{}
+		}
+		for k, v := range fields {
+			entry[k] = v
+		}
+		provMap[provider] = entry
+		root["providers"] = provMap
+	})
 }
 
 // DefineProvider sets a provider in the in-memory store only (no disk write). Used
@@ -610,7 +706,7 @@ func (s *Store) DefineProvider(name string, p Provider) {
 }
 
 // AddProvider defines a new OpenAI-compatible provider (base URL, api-key
-// reference, and its models) in the user models.yml and the in-memory store. This
+// reference, and its models) in the shared models.yml and the in-memory store. This
 // is how a provider is configured: oline ships none by default. The name is the
 // selector prefix, so it must be non-empty with no space or '/'.
 func (s *Store) AddProvider(name, baseURL, apiKeyRef string, models []ModelDef) error {
@@ -626,7 +722,7 @@ func (s *Store) AddProvider(name, baseURL, apiKeyRef string, models []ModelDef) 
 	p.APIKeyRef = strings.TrimSpace(apiKeyRef)
 	p.Models = models
 	s.DefineProvider(name, p)
-	return s.writeUserProviderEntry(name, map[string]any{
+	return s.writeProviderEntry(name, map[string]any{
 		"baseUrl":   p.BaseURL,
 		"api":       p.API,
 		"apiKeyRef": p.APIKeyRef,
@@ -674,8 +770,9 @@ func (s *Store) ModelsConfigured() bool {
 	return strings.TrimSpace(r.Big) != "" && strings.TrimSpace(r.Medium) != "" && strings.TrimSpace(r.Small) != ""
 }
 
-// SaveModelRole persists one tier's model selector into the user config.yml
-// (~/oline/config/<mode>/config.yml) and updates the in-memory store.
+// SaveModelRole persists one tier's model selector into the shared models.yml
+// (~/oline/config/models.yml) and updates the in-memory store. Tier roles are
+// global to the user's setup, so they apply to every mode.
 func (s *Store) SaveModelRole(tier, selector string) error {
 	switch strings.ToLower(tier) {
 	case "big":
@@ -687,28 +784,14 @@ func (s *Store) SaveModelRole(tier, selector string) error {
 	default:
 		return fmt.Errorf("config: unknown model tier %q (want big|medium|small)", tier)
 	}
-	userCfgPath := filepath.Join(s.userDir, "config.yml")
-	var userRoot map[string]any
-	if data, err := os.ReadFile(userCfgPath); err == nil {
-		_ = yaml.Unmarshal(data, &userRoot)
-	}
-	if userRoot == nil {
-		userRoot = map[string]any{}
-	}
-	roles, _ := userRoot["modelRoles"].(map[string]any)
-	if roles == nil {
-		roles = map[string]any{}
-	}
-	roles[strings.ToLower(tier)] = selector
-	userRoot["modelRoles"] = roles
-	if err := os.MkdirAll(s.userDir, 0o700); err != nil {
-		return fmt.Errorf("config: creating %s: %w", s.userDir, err)
-	}
-	data, err := yaml.Marshal(userRoot)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(userCfgPath, data, 0o600)
+	return s.editSharedModels(func(root map[string]any) {
+		roles, _ := root["modelRoles"].(map[string]any)
+		if roles == nil {
+			roles = map[string]any{}
+		}
+		roles[strings.ToLower(tier)] = selector
+		root["modelRoles"] = roles
+	})
 }
 
 // SaveTUICustomizablePanes persists the Customizable Panes TUI setting into the
