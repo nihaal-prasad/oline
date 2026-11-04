@@ -300,6 +300,20 @@ func resolveScope(in []string) (v4, v6 []string) {
 	return v4, v6
 }
 
+// sanitizeOneCIDR canonicalizes a single IPv4 address or prefix for safe
+// interpolation into a root nft script, or returns "" if it is malformed. A bare
+// address is returned as-is (a /32 host route in nft daddr terms).
+func sanitizeOneCIDR(s string) string {
+	s = strings.TrimSpace(s)
+	if p, err := netip.ParsePrefix(s); err == nil && p.Addr().Is4() {
+		return p.String()
+	}
+	if a, err := netip.ParseAddr(s); err == nil && a.Is4() {
+		return a.String()
+	}
+	return ""
+}
+
 func sanitizeCIDRs(in []string) []string {
 	var out []string
 	for _, s := range in {

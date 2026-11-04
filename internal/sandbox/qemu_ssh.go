@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
@@ -14,20 +16,32 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// genSSHKey makes a throwaway ed25519 keypair for talking to one VM. The signer
-// is kept in memory for the VM's lifetime (VMs are disposable), and authLine is
-// the authorized_keys entry injected via cloud-init.
-func genSSHKey() (ssh.Signer, string, error) {
+// genSSHKey makes an ed25519 keypair for talking to one VM. The signer drives the
+// SSH client, authLine is the authorized_keys entry injected via cloud-init, and
+// keyPEM is the PKCS#8 private key so a persisted (resumable) VM can reuse it on a
+// later boot (cloud-init only injects the key on first boot).
+func genSSHKey() (signer ssh.Signer, authLine string, keyPEM []byte, err error) {
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
-	signer, err := ssh.NewSignerFromKey(priv)
+	signer, err = ssh.NewSignerFromKey(priv)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
-	authLine := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
-	return signer, authLine, nil
+	der, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+	authLine = strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
+	return signer, authLine, keyPEM, nil
+}
+
+// loadSSHKey parses a PKCS#8 private-key PEM (as written by genSSHKey) back into a
+// signer, for resuming a persisted VM with the key it was first provisioned with.
+func loadSSHKey(keyPEM []byte) (ssh.Signer, error) {
+	return ssh.ParsePrivateKey(keyPEM)
 }
 
 // sshConfig builds a client config for the given user and key. The host key check

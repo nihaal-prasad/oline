@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -36,6 +37,38 @@ func (q *qemuSandbox) baseImagePath(id string) string {
 
 // runDir holds the transient per-boot overlay and seed ISO.
 func (q *qemuSandbox) runDir() string { return filepath.Join(q.imagesDir, ".run") }
+
+// State (persistent-resume) layout: each resumable engagement keeps its disk
+// overlay and the SSH key it was provisioned with under .state/<engagement>/.
+const (
+	stateDiskName = "disk.qcow2"
+	stateKeyName  = "key.pem"
+)
+
+// stateDir is where a persisted engagement's disk + key live.
+func (q *qemuSandbox) stateDir(engagement string) string {
+	return filepath.Join(q.imagesDir, ".state", sanitizeHostname(engagement))
+}
+
+// ResumableEngagements lists engagements with a persisted QEMU disk (sorted), so
+// the TUI can offer them on the resume step.
+func (q *qemuSandbox) ResumableEngagements() []string {
+	entries, err := os.ReadDir(filepath.Join(q.imagesDir, ".state"))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if st, err := os.Stat(filepath.Join(q.imagesDir, ".state", e.Name(), stateDiskName)); err == nil && !st.IsDir() {
+			out = append(out, e.Name())
+		}
+	}
+	sort.Strings(out)
+	return out
+}
 
 // ensureBaseImage returns the Debian base image path, downloading and verifying
 // it (against the published SHA512SUMS) on first use.

@@ -65,12 +65,18 @@ offers, besides any WSL distros:
 - **A qcow2 you supply**: drop a cloud image (with cloud-init) at
   `<root>/images/<name>.qcow2` and it appears as an environment.
 
-Per-agent egress is enforced the same way as WSL. On a Linux host you can also pin
-the guest to a tap device and filter with host `nftables`, for a boundary the guest
-cannot change even as root.
+Per-agent egress is enforced the same way as WSL. On a Linux host, set
+`qemu.hostFirewall: true` to also pin the guest to a host-owned tap device and
+`nftables` rules: a whole-guest cap (loopback plus the in-scope targets, plus the
+internet when the roster has internet agents) that a root agent inside the guest
+cannot change. SSH stays on a user-mode NIC. It needs root on the host (oline uses
+`sudo`) and is ignored on other hosts.
 
-QEMU VMs are disposable: the overlay is discarded on exit, so QEMU engagements do
-not support resume.
+QEMU VMs are disposable by default: the overlay is discarded on exit. Set
+`qemu.persist: true` to keep each engagement's disk (and its SSH key) so you can
+resume it with its workspace and installed tooling intact. Resume needs a clean
+shutdown; a crash does not persist the disk (the host workspace backup still does).
+Resumable engagements appear on the wizard's resume step.
 
 ## Tool-layer blocks
 

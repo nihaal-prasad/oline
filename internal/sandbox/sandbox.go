@@ -10,11 +10,11 @@
 //     granting Privileged. Because the kernel is shared with the host, WSL is
 //     the weaker boundary.
 //   - QEMU (active): a separate kernel, so the stronger isolation. Per-agent
-//     egress is currently enforced by the same root-owned in-guest iptables
-//     owner-match rules as WSL (applied over SSH). The stronger host-side tap +
-//     nftables filter the guest cannot touch regardless of in-guest root
-//     (BuildNftRules) is implemented and unit-tested but not yet wired into the
-//     launch path.
+//     egress is enforced by the same root-owned in-guest iptables owner-match
+//     rules as WSL (applied over SSH). On a Linux host, qemu.hostFirewall adds a
+//     host-owned tap + nftables whole-guest cap (BuildHostNftRules) the guest
+//     cannot change even as root; SSH stays on a user-mode NIC. The disk is
+//     disposable unless qemu.persist keeps it for resume.
 //
 // Tool-layer checks (bash deny patterns, the file tools' host-path guard) are
 // defense-in-depth on top of the network boundary.

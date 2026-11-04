@@ -44,6 +44,20 @@ func policyFor(mode config.Mode, role string) sandbox.EgressPolicy {
 	return sandbox.InScopeOnly
 }
 
+// RosterAllowsInternet reports whether any agent in the roster has a network
+// policy that can reach the internet (InternetNoTarget or Privileged). The QEMU
+// host firewall uses it to decide whether its whole-guest cap must permit general
+// egress; the in-guest per-agent rules still do the fine-grained split.
+func RosterAllowsInternet(mode config.Mode, roster *agents.Roster) bool {
+	for _, name := range roster.Names() {
+		switch policyFor(mode, name) {
+		case sandbox.InternetNoTarget, sandbox.Privileged:
+			return true
+		}
+	}
+	return false
+}
+
 // NewLLMResolver builds an engine.LLMResolver from the config store: it maps a
 // "provider/model-id" selector to a client (baseURL + resolved key) and the bare
 // model id.

@@ -27,14 +27,20 @@ const bootTimeout = 3 * time.Minute
 // confines each agent exactly as on WSL.
 type qemuHandle struct {
 	id      string
-	overlay string // transient CoW disk (removed on Shutdown)
-	seedISO string // cloud-init seed (removed on Shutdown)
+	overlay string // CoW disk; removed on Shutdown unless persist is set (then kept for resume)
+	seedISO string // cloud-init seed (removed on Shutdown; empty on a resumed boot)
 	sshPort int
 	signer  ssh.Signer
 	cmd     *exec.Cmd // the qemu-system process
 	client  *ssh.Client
-	egress  *sshEgress
+	egress  EgressController
 	workdir string // default guest cwd for agent commands (the engagement workspace)
+
+	imagesDir     string  // host images root, for persisting the disk on Shutdown
+	persist       bool    // keep the disk (and SSH key) for resume instead of discarding
+	keyPEM        []byte  // the VM's SSH private key, persisted so resume can reuse it
+	hostNet       hostNet // host tap + nftables boundary (Linux, qemu.hostFirewall); nil otherwise
+	allowInternet bool    // host firewall: permit general internet egress for the guest
 }
 
 func (h *qemuHandle) Info() EnvInfo { return EnvInfo{ID: h.id, Backend: BackendQEMU} }
@@ -243,7 +249,10 @@ func (h *qemuHandle) EgressController() EgressController {
 }
 
 // SetupEgress provisions the per-policy unprivileged users and root-owned
-// firewall rules inside the VM (over SSH), then routes Exec through them.
+// firewall rules inside the VM (over SSH), then routes Exec through them. When a
+// host tap boundary is active (qemu.hostFirewall on Linux), it also applies the
+// host-side nftables scope rules and wraps both so a live scope change updates
+// each.
 func (h *qemuHandle) SetupEgress(ctx context.Context, scope Scope) error {
 	e := newSSHEgress(h)
 	if err := e.ensureUsers(ctx); err != nil {
@@ -252,7 +261,14 @@ func (h *qemuHandle) SetupEgress(ctx context.Context, scope Scope) error {
 	if err := e.ApplyBaseline(scope); err != nil {
 		return err
 	}
-	h.egress = e
+	if h.hostNet != nil {
+		if err := h.hostNet.applyScope(scope, h.allowInternet); err != nil {
+			return fmt.Errorf("sandbox/qemu: host firewall: %w", err)
+		}
+		h.egress = &compositeEgress{in: e, host: h.hostNet, allowInternet: h.allowInternet}
+	} else {
+		h.egress = e
+	}
 	return nil
 }
 
@@ -273,8 +289,8 @@ var _ WorkspaceSetter = (*qemuHandle)(nil)
 var _ Interactive = (*qemuHandle)(nil)
 
 // Shutdown powers the VM off (best-effort graceful), kills the process if it
-// lingers, and removes the transient overlay and seed. The base image and any
-// user-supplied image are left intact for reuse.
+// lingers, tears down the host tap boundary (if any), and either keeps the disk
+// for resume (persist) or removes it. The base/user image is always left intact.
 func (h *qemuHandle) Shutdown(ctx context.Context) error {
 	if h.client != nil {
 		var b bytes.Buffer
@@ -293,11 +309,55 @@ func (h *qemuHandle) Shutdown(ctx context.Context) error {
 			<-done
 		}
 	}
+	// Remove the host tap + nftables now that the VM is down (nothing to filter).
+	if h.hostNet != nil {
+		_ = h.hostNet.teardown()
+	}
+	// Persist the disk (and key) for resume on a clean shutdown; otherwise discard.
+	if h.persist {
+		if err := h.persistDisk(); err == nil {
+			if h.seedISO != "" {
+				os.Remove(h.seedISO) // the seed is first-boot only; a resume doesn't use it
+			}
+			return nil
+		}
+		// fall through to cleanup if persisting failed (don't leak the overlay)
+	}
 	if h.overlay != "" {
 		os.Remove(h.overlay)
 	}
 	if h.seedISO != "" {
 		os.Remove(h.seedISO)
+	}
+	return nil
+}
+
+// persistDisk moves the VM's overlay and SSH key under the engagement's state
+// directory so bootResume can bring it back. The engagement is taken from the
+// workspace path SetWorkspace recorded.
+func (h *qemuHandle) persistDisk() error {
+	if h.overlay == "" || h.imagesDir == "" {
+		return fmt.Errorf("sandbox/qemu: cannot persist: no overlay/images dir")
+	}
+	eng := filepath.Base(h.workdir)
+	if h.workdir == "" || eng == "." || eng == string(filepath.Separator) {
+		return fmt.Errorf("sandbox/qemu: cannot persist: engagement workspace unknown")
+	}
+	dir := filepath.Join(h.imagesDir, ".state", sanitizeHostname(eng))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	disk := filepath.Join(dir, stateDiskName)
+	if h.overlay != disk { // first persist: move the overlay into place (already there on resume)
+		if err := os.Rename(h.overlay, disk); err != nil {
+			return err
+		}
+		h.overlay = disk
+	}
+	if len(h.keyPEM) > 0 {
+		if err := os.WriteFile(filepath.Join(dir, stateKeyName), h.keyPEM, 0o600); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -336,13 +396,14 @@ func waitCloudInit(ctx context.Context, client *ssh.Client) {
 		nil, &b)
 }
 
-// boot creates a disposable overlay + cloud-init seed on top of base, launches
-// the VM headless, and waits for SSH. The returned handle owns the VM.
-func (q *qemuSandbox) boot(ctx context.Context, base, id string) (Handle, error) {
+// boot creates a CoW overlay + cloud-init seed on top of base, launches the VM
+// headless (with a host tap when opts.HostFirewall), and waits for SSH. The
+// returned handle owns the VM; it persists its disk on Shutdown when opts.Persist.
+func (q *qemuSandbox) boot(ctx context.Context, base, id string, opts BootOpts) (Handle, error) {
 	if qemuBinary() == "" {
 		return nil, qemuUnavailable()
 	}
-	signer, authLine, err := genSSHKey()
+	signer, authLine, keyPEM, err := genSSHKey()
 	if err != nil {
 		return nil, err
 	}
@@ -355,17 +416,21 @@ func (q *qemuSandbox) boot(ctx context.Context, base, id string) (Handle, error)
 		os.Remove(seed)
 		return nil, err
 	}
-	port, err := freePort()
+	hn, tap, err := maybeHostNet(opts)
 	if err != nil {
 		os.Remove(seed)
 		os.Remove(overlay)
 		return nil, err
 	}
+	port, err := freePort()
+	if err != nil {
+		cleanupBoot(hn, seed, overlay)
+		return nil, err
+	}
 
-	cmd := exec.Command(qemuBinary(), BuildQemuArgs(overlay, seed, 2048, 2, port)...)
+	cmd := exec.Command(qemuBinary(), BuildQemuArgs(overlay, seed, 2048, 2, port, tap)...)
 	if err := cmd.Start(); err != nil {
-		os.Remove(seed)
-		os.Remove(overlay)
+		cleanupBoot(hn, seed, overlay)
 		return nil, fmt.Errorf("sandbox/qemu: launch: %w", err)
 	}
 
@@ -377,15 +442,189 @@ func (q *qemuSandbox) boot(ctx context.Context, base, id string) (Handle, error)
 	if err != nil {
 		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait() // reap so we don't leak a zombie / process handle
-		os.Remove(seed)
-		os.Remove(overlay)
+		cleanupBoot(hn, seed, overlay)
 		return nil, fmt.Errorf("sandbox/qemu: %w", err)
 	}
 	// SSH comes up mid-boot; wait for cloud-init to finish provisioning (user,
 	// packages) so egress setup doesn't race a half-configured guest.
 	waitCloudInit(dialCtx, client)
+	if hn != nil {
+		if err := configureGuestTap(dialCtx, client, hn); err != nil {
+			_ = client.Close()
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+			cleanupBoot(hn, seed, overlay)
+			return nil, err
+		}
+	}
 	return &qemuHandle{
 		id: id, overlay: overlay, seedISO: seed, sshPort: port,
 		signer: signer, cmd: cmd, client: client,
+		imagesDir: q.imagesDir, persist: opts.Persist, keyPEM: keyPEM,
+		hostNet: hn, allowInternet: opts.AllowInternet,
 	}, nil
+}
+
+// bootResume brings a persisted engagement back: it boots the kept disk (no seed;
+// cloud-init already ran) with the SSH key the VM was provisioned with, so the
+// workspace and installed tooling return intact. Re-establishes the host tap when
+// opts.HostFirewall is set.
+func (q *qemuSandbox) bootResume(ctx context.Context, engagement string, opts BootOpts) (Handle, error) {
+	if qemuBinary() == "" {
+		return nil, qemuUnavailable()
+	}
+	dir := q.stateDir(engagement)
+	disk := filepath.Join(dir, stateDiskName)
+	if st, err := os.Stat(disk); err != nil || st.IsDir() {
+		return nil, fmt.Errorf("sandbox/qemu: no resumable disk for %q at %s", engagement, disk)
+	}
+	keyPEM, err := os.ReadFile(filepath.Join(dir, stateKeyName))
+	if err != nil {
+		return nil, fmt.Errorf("sandbox/qemu: resume key: %w", err)
+	}
+	signer, err := loadSSHKey(keyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox/qemu: resume key: %w", err)
+	}
+	hn, tap, err := maybeHostNet(opts)
+	if err != nil {
+		return nil, err
+	}
+	port, err := freePort()
+	if err != nil {
+		cleanupBoot(hn, "", "")
+		return nil, err
+	}
+	cmd := exec.Command(qemuBinary(), BuildQemuArgs(disk, "", 2048, 2, port, tap)...)
+	if err := cmd.Start(); err != nil {
+		cleanupBoot(hn, "", "")
+		return nil, fmt.Errorf("sandbox/qemu: launch: %w", err)
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, bootTimeout)
+	defer cancel()
+	client, err := dialSSH(dialCtx, port, sshConfig(sshProvisionUser, signer))
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		cleanupBoot(hn, "", "")
+		return nil, fmt.Errorf("sandbox/qemu: %w", err)
+	}
+	if hn != nil {
+		if err := configureGuestTap(dialCtx, client, hn); err != nil {
+			_ = client.Close()
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+			cleanupBoot(hn, "", "")
+			return nil, err
+		}
+	}
+	return &qemuHandle{
+		id: engagement, overlay: disk, seedISO: "", sshPort: port,
+		signer: signer, cmd: cmd, client: client,
+		imagesDir: q.imagesDir, persist: true, keyPEM: keyPEM,
+		hostNet: hn, allowInternet: opts.AllowInternet,
+		workdir: WSLWorkspace + "/" + engagement,
+	}, nil
+}
+
+// maybeHostNet creates the host tap boundary when opts.HostFirewall is set
+// (Linux only), returning the controller and the tap device name for the launch
+// args. With the flag off it returns (nil, "", nil).
+func maybeHostNet(opts BootOpts) (hostNet, string, error) {
+	if !opts.HostFirewall {
+		return nil, "", nil
+	}
+	hn, err := newHostNet()
+	if err != nil {
+		return nil, "", err
+	}
+	return hn, hn.tap(), nil
+}
+
+// cleanupBoot removes transient boot artifacts and tears down the host tap on a
+// failed launch. Empty paths are skipped (resume has no seed/overlay to remove).
+func cleanupBoot(hn hostNet, seed, overlay string) {
+	if hn != nil {
+		_ = hn.teardown()
+	}
+	if seed != "" {
+		os.Remove(seed)
+	}
+	if overlay != "" {
+		os.Remove(overlay)
+	}
+}
+
+// configureGuestTap makes the guest route agent egress out the host tap (its
+// default route) while keeping the SLIRP NIC for the SSH control channel.
+func configureGuestTap(ctx context.Context, client *ssh.Client, hn hostNet) error {
+	script := guestTapRouteScript(hn.guestIP(), hn.hostIP())
+	var b bytes.Buffer
+	code, err := runSSHCombined(ctx, client, "sudo -n bash -s", strings.NewReader(script), &b)
+	if err != nil || code != 0 {
+		return fmt.Errorf("sandbox/qemu: configure guest tap route (exit %d): %v: %s", code, err, strings.TrimSpace(b.String()))
+	}
+	return nil
+}
+
+// guestTapRouteScript assigns guestIP to the guest's tap NIC (the ethernet NIC
+// that is NOT the SLIRP 10.0.2.0/24 one) and makes hostIP its default route. The
+// SLIRP NIC keeps its address so the loopback SSH hostfwd still works.
+func guestTapRouteScript(guestIP, hostIP string) string {
+	return strings.Join([]string{
+		"set -e",
+		`slirp=$(ip -o -4 addr show | awk '/inet 10\.0\.2\./{print $2; exit}')`,
+		`tap=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^(en|eth)' | grep -v "^${slirp}$" | head -1)`,
+		`[ -n "$tap" ] || { echo "no secondary NIC for the host tap" >&2; exit 1; }`,
+		fmt.Sprintf("ip addr replace %s/30 dev \"$tap\"", guestIP),
+		`ip link set "$tap" up`,
+		fmt.Sprintf("ip route replace default via %s dev \"$tap\"", hostIP),
+	}, "\n")
+}
+
+// hostNet is the host-side tap + nftables boundary for a QEMU guest (Linux only).
+// Nothing it configures lives inside the guest, so a root agent cannot change it.
+type hostNet interface {
+	tap() string       // tap device name, for the QEMU -netdev
+	guestIP() string   // IP the guest assigns to its tap NIC
+	hostIP() string    // the tap's host-side IP (the guest's default gateway)
+	guestCIDR() string // the /30 spanning host + guest
+	// applyScope (re)applies the forward-filter + NAT rules for scope. allowInternet
+	// permits general egress (roster has internet agents); the in-guest iptables
+	// still does the per-agent split.
+	applyScope(scope Scope, allowInternet bool) error
+	teardown() error
+}
+
+// compositeEgress applies BOTH the in-guest per-agent rules and the host-side
+// whole-guest cap on each scope change, while routing Exec via the in-guest users.
+type compositeEgress struct {
+	in            *sshEgress
+	host          hostNet
+	allowInternet bool
+}
+
+func (c *compositeEgress) ApplyBaseline(scope Scope) error {
+	if err := c.in.ApplyBaseline(scope); err != nil {
+		return err
+	}
+	if c.host != nil {
+		return c.host.applyScope(scope, c.allowInternet)
+	}
+	return nil
+}
+
+func (c *compositeEgress) PathFor(agent core.AgentID, policy EgressPolicy) (NetPath, error) {
+	return c.in.PathFor(agent, policy)
+}
+
+func (c *compositeEgress) Teardown() error {
+	var hostErr error
+	if c.host != nil {
+		hostErr = c.host.teardown()
+	}
+	if err := c.in.Teardown(); err != nil {
+		return err
+	}
+	return hostErr
 }

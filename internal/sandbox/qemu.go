@@ -14,15 +14,16 @@ import (
 
 // qemuSandbox is the cross-platform QEMU backend. Its isolation is the strongest
 // available (a separate kernel — no shared-kernel escape, and the host /mnt
-// drives aren't present). It boots a disposable copy-on-write overlay of a base
-// image and drives it over SSH (Exec/Copy/Backup), satisfying the same
-// sandbox.Handle interface as WSL.
+// drives aren't present). It boots a copy-on-write overlay of a base image and
+// drives it over SSH (Exec/Copy/Backup), satisfying the same sandbox.Handle
+// interface as WSL. The overlay is disposable by default; with qemu.persist on it
+// is kept per engagement so the engagement can be resumed (see boot / bootResume).
 //
-// Egress: the active path enforces per-agent egress with root-owned IN-GUEST
-// iptables (buildEgressRules, applied over SSH), the same as WSL. The stronger
-// host-side tap + nftables filter (BuildNftRules) — which the guest cannot touch
-// even as root — is implemented and unit-tested but not yet wired into the
-// runtime launch path; use it on a Linux host when you need that guarantee.
+// Egress: per-agent egress is enforced with root-owned IN-GUEST iptables
+// (buildEgressRules, applied over SSH), the same as WSL. On a Linux host, with
+// qemu.hostFirewall on, the guest is additionally pinned to a host-owned tap whose
+// traffic is filtered by host nftables (BuildHostNftRules) — a whole-guest cap the
+// guest cannot change even as root. SSH stays on a user-mode (SLIRP) NIC.
 type qemuSandbox struct{ imagesDir string }
 
 // NewQEMU returns the QEMU-backed Sandbox. Images live under ~/oline/images.
@@ -98,6 +99,17 @@ func (q *qemuSandbox) Scan(ctx context.Context) ([]Candidate, error) {
 	return cands, nil
 }
 
+// BootOpts carries the per-boot options the TUI selects from config: whether to
+// keep the disk for resume, and whether to pin the guest behind a host tap +
+// nftables (Linux only). allowInternet tells the host firewall to permit general
+// internet egress for the whole guest (the roster has internet agents); the
+// in-guest per-agent rules still split scope / internet / isolated.
+type BootOpts struct {
+	Persist       bool
+	HostFirewall  bool
+	AllowInternet bool
+}
+
 // Create downloads (if needed) and boots the managed Debian base image. A
 // user-supplied qcow2 is used instead by dropping it in the images dir and
 // opening it by id (see Open).
@@ -109,11 +121,11 @@ func (q *qemuSandbox) Create(ctx context.Context, spec Spec) (Handle, error) {
 	if err != nil {
 		return nil, err
 	}
-	return q.boot(ctx, base, debianImageID)
+	return q.boot(ctx, base, debianImageID, BootOpts{})
 }
 
 // Open boots an existing image (its qcow2 lives at <imagesDir>/<id>.qcow2) on a
-// disposable overlay and returns a live handle.
+// fresh overlay and returns a live handle.
 func (q *qemuSandbox) Open(ctx context.Context, id string) (Handle, error) {
 	if qemuBinary() == "" {
 		return nil, qemuUnavailable()
@@ -122,7 +134,46 @@ func (q *qemuSandbox) Open(ctx context.Context, id string) (Handle, error) {
 	if st, err := os.Stat(base); err != nil || st.IsDir() {
 		return nil, fmt.Errorf("sandbox/qemu: image %q not found at %s", id, base)
 	}
-	return q.boot(ctx, base, id)
+	return q.boot(ctx, base, id, BootOpts{})
+}
+
+// OpenWith boots a base image with explicit boot options (persist / host
+// firewall). The TUI uses it for a new QEMU engagement when qemu.persist or
+// qemu.hostFirewall is set.
+func (q *qemuSandbox) OpenWith(ctx context.Context, id string, opts BootOpts) (Handle, error) {
+	if qemuBinary() == "" {
+		return nil, qemuUnavailable()
+	}
+	var base string
+	if id == debianImageID {
+		b, err := q.ensureBaseImage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		base = b
+	} else {
+		base = q.baseImagePath(id)
+		if st, err := os.Stat(base); err != nil || st.IsDir() {
+			return nil, fmt.Errorf("sandbox/qemu: image %q not found at %s", id, base)
+		}
+	}
+	return q.boot(ctx, base, id, opts)
+}
+
+// Resume brings a persisted engagement's VM back (see bootResume). The disk and
+// SSH key must still exist under the engagement's state dir.
+func (q *qemuSandbox) Resume(ctx context.Context, engagement string, opts BootOpts) (Handle, error) {
+	return q.bootResume(ctx, engagement, opts)
+}
+
+// QEMUControl is the QEMU backend's extra capability surface the TUI uses beyond
+// the generic Sandbox interface: boot with options (persist / host firewall),
+// resume a persisted engagement, and list the resumable ones. NewQEMU's result
+// implements it; the TUI type-asserts for it.
+type QEMUControl interface {
+	OpenWith(ctx context.Context, id string, opts BootOpts) (Handle, error)
+	Resume(ctx context.Context, engagement string, opts BootOpts) (Handle, error)
+	ResumableEngagements() []string
 }
 
 // Destroy removes a managed (oline-) base image and its on-disk state. It never
@@ -141,39 +192,77 @@ func qemuUnavailable() error {
 	return errors.New("sandbox/qemu: qemu-system not found — install QEMU (and ensure it's on PATH or in Program Files) to use this backend")
 }
 
-// BuildQemuArgs constructs the headless launch command line. User-mode (SLIRP)
-// networking gives the guest NAT'd outbound, so per-agent egress is enforced by
-// the in-guest root-owned iptables owner rules (allow/deny by destination); the
-// SSH hostfwd is the exec transport, and the cloud-init seed is a CD-ROM. (On a
-// Linux host you can instead pin the guest to a tap and filter with host
-// nftables — BuildNftRules — for a boundary the guest cannot touch even as root.)
-func BuildQemuArgs(overlay, seedISO string, memMB, cpus, sshPort int) []string {
-	return []string{
+// BuildQemuArgs constructs the headless launch command line.
+//
+// n0 is always a user-mode (SLIRP) NIC with a loopback SSH hostfwd: the exec
+// transport, on 127.0.0.1 and so unaffected by any egress firewall. When tap is
+// non-empty, n1 is a second NIC bound to that host tap device; agent egress is
+// routed out it (the guest's default route) so host nftables can filter traffic
+// the guest cannot change even as root. seedISO is the cloud-init CD-ROM on first
+// boot; pass "" on resume (the disk is already provisioned).
+func BuildQemuArgs(overlay, seedISO string, memMB, cpus, sshPort int, tap string) []string {
+	args := []string{
 		"-machine", "accel=whpx:kvm:hvf:tcg",
 		"-m", strconv.Itoa(memMB),
 		"-smp", strconv.Itoa(cpus),
 		"-drive", "file=" + overlay + ",if=virtio,format=qcow2",
-		"-drive", "file=" + seedISO + ",media=cdrom",
+	}
+	if seedISO != "" {
+		args = append(args, "-drive", "file="+seedISO+",media=cdrom")
+	}
+	args = append(args,
 		"-netdev", fmt.Sprintf("user,id=n0,hostfwd=tcp:127.0.0.1:%d-:22", sshPort),
 		"-device", "virtio-net-pci,netdev=n0",
-		"-display", "none",
-		"-serial", "null",
+	)
+	if tap != "" {
+		args = append(args,
+			"-netdev", fmt.Sprintf("tap,id=n1,ifname=%s,script=no,downscript=no", tap),
+			"-device", "virtio-net-pci,netdev=n1",
+		)
 	}
+	return append(args, "-display", "none", "-serial", "null")
 }
 
-// BuildNftRules builds host nftables rules for the guest's tap interface: a
-// default-deny OUTPUT with ACCEPT only for the in-scope CIDRs. Applied by root
-// on the HOST, so nothing inside the guest can change them. (The internet-minus-
-// target path for the researcher is a second ruleset on a second tap/source.)
-func BuildNftRules(tap string, scope Scope) []string {
+// BuildHostNftRules builds the host-side nftables ruleset for the guest's tap: a
+// default-drop forward chain plus NAT masquerade for the guest's /30 source, so
+// every packet the guest sends off-box traverses rules root owns on the HOST and
+// the guest cannot change. In-scope target CIDRs are always accepted; when
+// allowInternet is set (the roster has internet agents) the rest of the internet
+// is accepted too and the per-agent split is left to the in-guest iptables,
+// otherwise everything but the targets is dropped. guestCIDR is the tap /30 (e.g.
+// 172.16.231.0/30). The add/delete/add idiom makes the script idempotent.
+func BuildHostNftRules(tap, guestCIDR string, scope Scope, allowInternet bool) []string {
 	rules := []string{
-		fmt.Sprintf("add table inet oline"),
-		fmt.Sprintf("add chain inet oline fwd { type filter hook forward priority 0 ; policy drop ; }"),
+		"add table inet oline",
+		"delete table inet oline",
+		"add table inet oline",
+		"add chain inet oline fwd { type filter hook forward priority 0 ; policy drop ; }",
 		fmt.Sprintf("add rule inet oline fwd iifname %q ct state established,related accept", tap),
+		fmt.Sprintf("add rule inet oline fwd oifname %q ct state established,related accept", tap),
 	}
 	for _, c := range sanitizeCIDRs(scope.Targets) {
 		rules = append(rules, fmt.Sprintf("add rule inet oline fwd iifname %q ip daddr %s accept", tap, c))
 	}
-	rules = append(rules, fmt.Sprintf("add rule inet oline fwd iifname %q drop", tap))
+	if allowInternet {
+		rules = append(rules, fmt.Sprintf("add rule inet oline fwd iifname %q accept", tap))
+	}
+	// else: the default drop policy caps the guest to loopback + the targets.
+
+	// NAT the guest /30 so the accepted destinations are reachable off-box.
+	rules = append(rules,
+		"add table ip oline_nat",
+		"delete table ip oline_nat",
+		"add table ip oline_nat",
+		"add chain ip oline_nat post { type nat hook postrouting priority 100 ; policy accept ; }",
+		fmt.Sprintf("add rule ip oline_nat post ip saddr %s oifname != %q masquerade", sanitizeOneCIDR(guestCIDR), tap),
+	)
 	return rules
+}
+
+// buildHostNftTeardown removes both oline host tables (idempotent).
+func buildHostNftTeardown() []string {
+	return []string{
+		"add table inet oline", "delete table inet oline",
+		"add table ip oline_nat", "delete table ip oline_nat",
+	}
 }

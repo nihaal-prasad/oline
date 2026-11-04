@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -62,9 +63,16 @@ type engListMsg struct {
 	err   error
 }
 
-func listEngagementsCmd(distro string) tea.Cmd {
+func listEngagementsCmd(cand sandbox.Candidate) tea.Cmd {
 	return func() tea.Msg {
-		names, err := sandbox.ListWSLEngagements(context.Background(), distro)
+		if cand.Backend == sandbox.BackendQEMU {
+			// QEMU resumes from a persisted VM disk on the host, not from distro files.
+			if qc, ok := sandbox.NewQEMU().(sandbox.QEMUControl); ok {
+				return engListMsg{names: qc.ResumableEngagements()}
+			}
+			return engListMsg{}
+		}
+		names, err := sandbox.ListWSLEngagements(context.Background(), cand.ID)
 		return engListMsg{names: names, err: err}
 	}
 }
@@ -135,20 +143,35 @@ type sandboxReadyMsg struct {
 	err error
 }
 
-// prepareSandboxCmd opens (or creates) the chosen environment and sets up
+// sandboxPrep bundles everything prepareSandboxCmd needs to open or resume an
+// environment off the UI goroutine.
+type sandboxPrep struct {
+	cand       sandbox.Candidate
+	scopeStr   string
+	allowIPv6  bool
+	qemu       sandbox.BootOpts // persist / host firewall / allow-internet (QEMU only)
+	resume     bool
+	engagement string // the QEMU engagement to resume (resume + QEMU only)
+}
+
+// prepareSandboxCmd opens (or creates/resumes) the chosen environment and sets up
 // per-agent egress, all off the UI goroutine.
-func prepareSandboxCmd(cand sandbox.Candidate, scopeStr string, allowIPv6 bool) tea.Cmd {
+func prepareSandboxCmd(p sandboxPrep) tea.Cmd {
+	cand := p.cand
 	return func() tea.Msg {
 		ctx := context.Background()
 		var h sandbox.Handle
 		var err error
 		switch cand.Backend {
 		case sandbox.BackendQEMU:
-			qs := sandbox.NewQEMU()
-			if cand.NeedsCreate {
-				h, err = qs.Create(ctx, sandbox.Spec{Backend: sandbox.BackendQEMU})
+			qc, ok := sandbox.NewQEMU().(sandbox.QEMUControl)
+			if !ok {
+				return sandboxReadyMsg{err: fmt.Errorf("qemu backend does not support controlled boot")}
+			}
+			if p.resume {
+				h, err = qc.Resume(ctx, p.engagement, p.qemu)
 			} else {
-				h, err = qs.Open(ctx, cand.ID)
+				h, err = qc.OpenWith(ctx, cand.ID, p.qemu)
 			}
 		default:
 			h, err = sandbox.NewWSL().Open(ctx, cand.ID)
@@ -156,8 +179,8 @@ func prepareSandboxCmd(cand sandbox.Candidate, scopeStr string, allowIPv6 bool) 
 		if err != nil {
 			return sandboxReadyMsg{err: fmt.Errorf("open %s: %w", cand.ID, err)}
 		}
-		pol := scope.Parse(scopeStr)
-		if err := h.SetupEgress(ctx, sandbox.Scope{Targets: append(pol.CIDRs(), pol.Domains()...), AllowIPv6: allowIPv6}); err != nil {
+		pol := scope.Parse(p.scopeStr)
+		if err := h.SetupEgress(ctx, sandbox.Scope{Targets: append(pol.CIDRs(), pol.Domains()...), AllowIPv6: p.allowIPv6}); err != nil {
 			// Don't strand the sandbox we just opened/booted (a QEMU VM may be
 			// running) when egress fails and we abort back to the wizard.
 			if sd, ok := h.(sandbox.Shutdowner); ok {
@@ -849,13 +872,16 @@ func (m *model) wizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if cand.Backend == sandbox.BackendQEMU && m.resume {
-				m.wizErr = "QEMU VMs are disposable — resume isn't available; start a new engagement."
-				return m, nil
+				qc, _ := sandbox.NewQEMU().(sandbox.QEMUControl)
+				if qc == nil || len(qc.ResumableEngagements()) == 0 {
+					m.wizErr = "no resumable QEMU engagements — enable qemu.persist and finish an engagement first (a clean shutdown persists the disk)."
+					return m, nil
+				}
 			}
 			m.selDistro = cand.ID
 			if m.resume {
 				m.step = wResume
-				return m, listEngagementsCmd(cand.ID)
+				return m, listEngagementsCmd(cand)
 			}
 			m.step = wScope
 			m.scopeIn.Focus()
@@ -881,9 +907,12 @@ func (m *model) wizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.engagement = m.engagements[m.engSel]
 			// Prefill the scope field with the saved targets as a convenience, but
-			// still ask: a reverted lab may have changed the target IPs.
-			if data, err := sandbox.ReadWSLFile(context.Background(), m.selDistro, sandbox.WSLWorkspace+"/"+m.engagement+"/00-scope.md"); err == nil && data != "" {
-				m.scopeIn.SetValue(strings.Join(scope.Parse(data).CIDRs(), ", "))
+			// still ask: a reverted lab may have changed the target IPs. QEMU resumes
+			// from a VM disk (no host-readable scope file), so prefill only for WSL.
+			if m.cands[m.envSel].Backend != sandbox.BackendQEMU {
+				if data, err := sandbox.ReadWSLFile(context.Background(), m.selDistro, sandbox.WSLWorkspace+"/"+m.engagement+"/00-scope.md"); err == nil && data != "" {
+					m.scopeIn.SetValue(strings.Join(scope.Parse(data).CIDRs(), ", "))
+				}
 			}
 			// If this engagement has saved conversation history, offer to load it or
 			// start clean; otherwise there is nothing to load, so go straight on.
@@ -1490,7 +1519,20 @@ func (m *model) startEngagement() (tea.Model, tea.Cmd) {
 	m.prepCand = cand
 	m.preparing = true
 	m.wizErr = ""
-	return m, prepareSandboxCmd(cand, m.egressScope(), m.store.Effective().Network.AllowIPv6)
+	eff := m.store.Effective()
+	qopts := sandbox.BootOpts{
+		Persist:       eff.QEMU.Persist,
+		HostFirewall:  eff.QEMU.HostFirewall && runtime.GOOS == "linux",
+		AllowInternet: wire.RosterAllowsInternet(m.mode, m.roster),
+	}
+	return m, prepareSandboxCmd(sandboxPrep{
+		cand:       cand,
+		scopeStr:   m.egressScope(),
+		allowIPv6:  eff.Network.AllowIPv6,
+		qemu:       qopts,
+		resume:     m.resume && cand.Backend == sandbox.BackendQEMU,
+		engagement: m.engagement,
+	})
 }
 
 // beginSession builds and launches the engagement once the sandbox handle is
@@ -1631,8 +1673,9 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 
 	// Resume: make sure the engagement's files are in the canonical workspace,
 	// whether they came from a host path, a path already in the environment, or
-	// an existing engagement picked from the list.
-	if m.resume {
+	// an existing engagement picked from the list. A resumed QEMU VM already holds
+	// its workspace on the persisted disk, so there is nothing to place.
+	if m.resume && cand.Backend != sandbox.BackendQEMU {
 		m.placeResumeFiles(cand.ID)
 	}
 

@@ -48,8 +48,26 @@ type Root struct {
 	Backup         Backup                   `yaml:"backup"`
 	Budget         Budget                   `yaml:"budget"`
 	Network        Network                  `yaml:"network"`
+	QEMU           QEMU                     `yaml:"qemu"`
 	TUI            TUISettings              `yaml:"tui"`
 	Tools          []CommandToolSpec        `yaml:"tools"`
+}
+
+// QEMU holds options for the QEMU backend; the WSL backend ignores them.
+type QEMU struct {
+	// Persist keeps the VM's disk (a copy-on-write overlay of the base image)
+	// between runs, so a QEMU engagement can be resumed with its workspace and
+	// installed tooling intact. Off by default: QEMU engagements are disposable.
+	// Resume needs a clean shutdown (a crash does not persist the disk); the host
+	// workspace backup protects the files either way.
+	Persist bool `yaml:"persist"`
+	// HostFirewall (Linux host only) runs the guest behind a host-side tap device
+	// and nftables rules that cap the whole guest to loopback and the in-scope
+	// targets (plus the wider internet when the roster has internet agents). This
+	// outer boundary holds even against a root agent inside the guest, unlike the
+	// in-guest iptables. It needs root on the host (oline uses sudo) and is ignored
+	// on non-Linux hosts and for WSL.
+	HostFirewall bool `yaml:"hostFirewall"`
 }
 
 // CommandToolSpec is a user-defined custom tool declared in config (no recompile):
