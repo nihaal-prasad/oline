@@ -161,22 +161,42 @@ func tierOf(t string) string {
 func tierRoster(roster *agents.Roster) string {
 	byTier := map[string][]string{}
 	for _, name := range roster.Names() {
-		t := tierOf(roster.Agents[name].Tier)
-		byTier[t] = append(byTier[t], core.CanonRole(name)) // present names capitalized
+		d := roster.Agents[name]
+		t := tierOf(d.Tier)
+		entry := core.CanonRole(name) // present names capitalized
+		if desc := firstLine(d.Description); desc != "" {
+			entry += " (" + desc + ")"
+		}
+		byTier[t] = append(byTier[t], entry)
 	}
 	var sb strings.Builder
 	sb.WriteString("\n\n# Subagent model tiers\n")
-	sb.WriteString("Each subagent runs on a FIXED model tier that you cannot change at spawn time:\n")
+	sb.WriteString("Each subagent runs on a FIXED model tier that you cannot change at spawn time. Spawn one by its name (the part before the parenthesis), which routes the task to the agent whose purpose fits:\n")
 	for _, t := range []string{"big", "medium", "small"} {
 		label := map[string]string{"big": "big (strongest reasoning)", "medium": "medium (balanced)", "small": "small (fastest, weakest)"}[t]
 		list := "none"
 		if len(byTier[t]) > 0 {
-			list = strings.Join(byTier[t], ", ")
+			list = strings.Join(byTier[t], "; ")
 		}
 		fmt.Fprintf(&sb, "- %s: %s\n", label, list)
 	}
 	sb.WriteString("You run on the big tier. If a lower-tier subagent keeps failing at a task that needs stronger reasoning (bad analysis, repeated mistakes, stuck), do not just reprompt it — hand that piece to a higher-tier agent from the lists above (`task` it), which is more capable. Match the work to the tier: routine, high-volume steps are fine on small/medium; hard reasoning belongs on big.\n")
 	return sb.String()
+}
+
+// firstLine returns a one-line, length-capped form of an agent description for the
+// roster listing (so the orchestrator knows each agent's purpose, custom ones
+// included), without dumping a whole paragraph.
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = strings.TrimSpace(s[:i])
+	}
+	const max = 160
+	if len(s) > max {
+		s = strings.TrimSpace(s[:max]) + "…"
+	}
+	return s
 }
 
 // grantCoordination ensures every agent can message peers/orchestrator, ask the

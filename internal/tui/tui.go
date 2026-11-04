@@ -1490,13 +1490,16 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	cand := m.prepCand
 	pol := scope.Parse(m.scopeIn.Value())
 
-	reg := buildRegistry()
+	reg := buildRegistry(m.store)
 	llmFor := wire.NewLLMResolver(m.store)
 	orch, resolver := wire.Build(m.mode, m.store, m.roster)
 
 	m.events = make(chan event.Event, 4096) // generous buffer; the TUI batch-drains it
 	m.sess = engine.NewSession(reg, h, llmFor, resolver, m.events, m.store.Effective().MaxConcurrency)
 	m.sess.Mode = runModeFromSel(m.autoSel)
+	// Custom tools (config command tools + Go extension tools) execute, so watcher
+	// mode must block them along with bash/bash_bg/revshell.
+	m.sess.ExecTools = customToolNames(m.store)
 	m.sess.Interactive = true // keep Main alive between turns so the user can keep chatting
 	// Let update_diagram enforce the LIVE Diagram-pane width (read fresh each call, so
 	// a resize is reflected immediately).

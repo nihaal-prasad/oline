@@ -42,6 +42,23 @@ type Root struct {
 	Budget         Budget                   `yaml:"budget"`
 	Network        Network                  `yaml:"network"`
 	TUI            TUISettings              `yaml:"tui"`
+	Tools          []CommandToolSpec        `yaml:"tools"`
+}
+
+// CommandToolSpec is a user-defined custom tool declared in config (no recompile):
+// a named tool whose call runs a shell command inside the sandbox. Grant it to an
+// agent by listing its Name in that agent's `tools:` frontmatter.
+type CommandToolSpec struct {
+	Name        string `yaml:"name"`
+	Description string `yaml:"description"`
+	// Parameters is a JSON-Schema object describing the tool's arguments (written as
+	// nested YAML). Empty means the tool takes no arguments.
+	Parameters map[string]any `yaml:"parameters"`
+	// Command is the shell command template run inside the sandbox; each {{arg}}
+	// placeholder is replaced with the shell-quoted value of that argument.
+	Command string `yaml:"command"`
+	// Dir is the guest working directory ("" => the engagement workspace).
+	Dir string `yaml:"dir"`
 }
 
 // TUISettings holds terminal-UI preferences (not engagement behavior).

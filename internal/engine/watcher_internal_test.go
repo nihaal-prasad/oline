@@ -57,3 +57,15 @@ func TestWatcherModeBlocksBashInDispatch(t *testing.T) {
 		t.Errorf("bash must not be watcher-blocked in automatic mode, got: %s", out)
 	}
 }
+
+func TestWatcherBlocksCustomExecTool(t *testing.T) {
+	sb := &revSB{}
+	a, s, _, cancel := newRevAgent(t, sb)
+	defer cancel()
+	s.Mode = core.Watcher
+	s.ExecTools = map[string]bool{"my_custom_tool": true}
+	out, isErr := a.dispatch(context.Background(), llm.ToolCall{Name: "my_custom_tool", Arguments: `{}`})
+	if !isErr || !strings.Contains(out, "watcher mode") {
+		t.Errorf("a custom exec tool should be blocked in watcher mode, got (isErr=%v): %s", isErr, out)
+	}
+}

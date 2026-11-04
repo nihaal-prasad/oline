@@ -125,6 +125,10 @@ type Session struct {
 	ConfigFor ConfigResolver
 	Events    chan event.Event
 	Mode      core.RunMode // automatic | planner | watcher; drives `ask` blocking and the watcher execution block. May change mid-engagement.
+	// ExecTools names custom tools that execute inside the sandbox (config command
+	// tools and Go extension tools). Watcher mode blocks these alongside
+	// bash/bash_bg/revshell, so "the operator runs everything" stays a guarantee.
+	ExecTools map[string]bool
 	// Interactive keeps the orchestrator alive between turns: when it finishes a
 	// turn with no tool calls it goes idle and WAITS for the next message (a user
 	// instruction or a peer) instead of ending the run. The TUI sets this so the
@@ -1340,7 +1344,7 @@ func (a *Agent) dispatch(ctx context.Context, tc llm.ToolCall) (content string, 
 	// tools regardless of the per-agent allow-list; file I/O, research and advisory
 	// coordination stay available so agents can still read/write the workspace and
 	// advise. Read live, so a mid-engagement switch takes effect on the next call.
-	if a.s.Mode == core.Watcher && watcherBlocks(tc.Name, tc.Arguments) {
+	if a.s.Mode == core.Watcher && (watcherBlocks(tc.Name, tc.Arguments) || a.s.ExecTools[tc.Name]) {
 		a.s.emit(event.Notice{Agent: a.id, Level: "warn", Text: string(a.id) + ": blocked " + tc.Name + " (watcher mode — the operator runs commands)"})
 		return "watcher mode is active: the operator runs all commands themselves, so you cannot execute. This " + tc.Name + " call was blocked. You may still read and write files in the workspace and advise the operator — do that instead.", true
 	}
