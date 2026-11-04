@@ -61,12 +61,16 @@ type Schema struct {
 
 // Call is one tool invocation.
 type Call struct {
-	Agent   core.AgentID         // who is calling (drives egress policy + workspace scoping)
-	Args    json.RawMessage      // raw JSON arguments from the model
-	Sandbox sandbox.Handle       // where sandboxed tools execute
-	Policy  sandbox.EgressPolicy // the calling agent's egress policy (routes exec to its guest user)
-	Emit    func(Result)         // stream partial output (e.g. bash stdout) to the TUI/history
-	Locks   *FileLocks           // cross-agent file-write locks (nil => no locking, e.g. in tests)
+	Agent core.AgentID    // who is calling (drives egress policy + workspace scoping)
+	Args  json.RawMessage // raw JSON arguments from the model
+	// Workspace is the engagement's guest workspace directory. File-tool relative
+	// paths resolve against it, and write/edit are confined to it (the Privileged
+	// installer excepted). Empty => the fallback root (tests / headless).
+	Workspace string
+	Sandbox   sandbox.Handle       // where sandboxed tools execute
+	Policy    sandbox.EgressPolicy // the calling agent's egress policy (routes exec to its guest user)
+	Emit      func(Result)         // stream partial output (e.g. bash stdout) to the TUI/history
+	Locks     *FileLocks           // cross-agent file-write locks (nil => no locking, e.g. in tests)
 }
 
 // Result is a tool's output.

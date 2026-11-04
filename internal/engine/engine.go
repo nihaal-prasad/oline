@@ -154,6 +154,11 @@ type Session struct {
 	// so a small summarizer model isn't sent more than it can accept.
 	SummarizerContextTokens int
 
+	// Workspace is the engagement's guest workspace directory (e.g.
+	// /opt/oline/engagements/<name>). File-tool relative paths resolve against it,
+	// and write/edit are confined to it (the Privileged installer excepted).
+	Workspace string
+
 	// DiagramWidth returns the LIVE content width (in display columns) of the TUI's
 	// Diagram pane, so update_diagram can reject a map whose lines would be clipped
 	// and tell the orchestrator the exact current limit. It is read fresh on every
@@ -1367,12 +1372,13 @@ func (a *Agent) dispatch(ctx context.Context, tc llm.ToolCall) (content string, 
 	}
 	a.s.emit(event.ToolStarted{Agent: a.id, Tool: tc.Name, ArgsPreview: preview(tc.Arguments), Args: tc.Arguments})
 	res, err := t.Execute(ctx, tools.Call{
-		Agent:   a.id,
-		Args:    json.RawMessage(tc.Arguments),
-		Sandbox: a.s.Sandbox,
-		Policy:  a.cfg.Policy,
-		Emit:    func(r tools.Result) { a.s.emit(event.ToolOutput{Agent: a.id, Chunk: r.Content}) },
-		Locks:   a.s.fileLocks,
+		Agent:     a.id,
+		Args:      json.RawMessage(tc.Arguments),
+		Workspace: a.s.Workspace,
+		Sandbox:   a.s.Sandbox,
+		Policy:    a.cfg.Policy,
+		Emit:      func(r tools.Result) { a.s.emit(event.ToolOutput{Agent: a.id, Chunk: r.Content}) },
+		Locks:     a.s.fileLocks,
 	})
 	if err != nil {
 		return fmt.Sprintf("tool %q failed: %v", tc.Name, err), true

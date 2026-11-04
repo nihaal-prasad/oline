@@ -1503,6 +1503,23 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	if !m.resume && m.engagement == "" {
 		m.engagement = "engagement-" + time.Now().Format("20060102-150405")
 	}
+	// Confine the agents' file writes to this engagement's workspace: file-tool
+	// relative paths resolve against it, and write/edit refuse any path outside it
+	// (the Privileged installer excepted). Matches the workspace path the
+	// orchestrator is told about in composePrompt.
+	// Point the sandbox's working directory at this engagement's workspace (creating
+	// it) so a relative path resolves there for every agent command, then confine
+	// file writes to it. Only confine once the cwd is actually set, so a failure
+	// falls back to the default cwd (and the broader workspace-root confinement)
+	// rather than a mismatched state.
+	engWorkspace := sandbox.WSLWorkspace + "/" + m.engagement
+	if wsr, ok := m.sess.Sandbox.(sandbox.WorkspaceSetter); ok {
+		if err := wsr.SetWorkspace(ctx, engWorkspace); err != nil {
+			m.writeln(core.Main, styleWarn.Render("could not set the engagement workspace directory: "+err.Error()))
+		} else {
+			m.sess.Workspace = engWorkspace
+		}
+	}
 	// Per-engagement activity log on the host (what every agent does/thinks/runs).
 	m.log = openEngLog(m.engagement)
 	m.log.setRedact(m.store.KnownSecrets()) // scrub any API keys an agent echoes

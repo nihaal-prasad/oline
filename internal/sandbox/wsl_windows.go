@@ -91,9 +91,10 @@ func (w *wslSandbox) Destroy(ctx context.Context, id string) error {
 // (unprivileged on a standard Kali install). Once SetupEgress runs, commands run
 // as the per-policy oline user instead.
 type wslHandle struct {
-	distro string
-	user   string
-	egress *wslEgress
+	distro  string
+	user    string
+	egress  *wslEgress
+	workdir string // default guest cwd for agent commands (the engagement workspace)
 }
 
 func (h *wslHandle) Info() EnvInfo { return EnvInfo{ID: h.distro, Backend: BackendWSL} }
@@ -144,6 +145,21 @@ func (h *wslHandle) Shutdown(ctx context.Context) error {
 // down on exit (see the shutdown path).
 var _ Shutdowner = (*wslHandle)(nil)
 
+// SetWorkspace creates the engagement workspace (group-writable by the oline users)
+// and makes it the default working directory for later agent commands. It runs the
+// creation from an existing directory (/opt/oline) so the command does not depend on
+// the workspace it is about to create.
+func (h *wslHandle) SetWorkspace(ctx context.Context, dir string) error {
+	script := "mkdir -p " + shellQuote(dir) + " && chmod 2775 " + shellQuote(dir)
+	if _, err := h.Exec(ctx, "setup", Cmd{Argv: []string{"bash", "-lc", script}, Dir: "/opt/oline"}, io.Discard); err != nil {
+		return err
+	}
+	h.workdir = dir
+	return nil
+}
+
+var _ WorkspaceSetter = (*wslHandle)(nil)
+
 // execUser resolves which guest user a given agent's command runs as.
 func (h *wslHandle) execUser(agent core.AgentID, policy EgressPolicy) string {
 	if h.egress != nil {
@@ -159,6 +175,9 @@ func (h *wslHandle) execUser(agent core.AgentID, policy EgressPolicy) string {
 // command never inherits the Windows cwd (which wsl.exe would otherwise map to
 // /mnt/c/... — off-limits for this harness).
 func (h *wslHandle) baseArgs(dir, user string) []string {
+	if dir == "" {
+		dir = h.workdir // the engagement workspace, once set
+	}
 	if dir == "" {
 		dir = "~"
 	}

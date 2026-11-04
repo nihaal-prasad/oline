@@ -96,6 +96,11 @@ logs a confirmed finding for the report; every agent has it. `update_summary` se
 the Summary pane and `update_diagram` sets the Diagram pane. `runtime` reports the
 agent's remaining time budget.
 
+`write` and `edit` can only write inside the engagement workspace
+(`/opt/oline/engagements/<name>`): a relative path is taken from that workspace, and a
+write anywhere else on the guest is refused. The `installer`, which runs as root to
+install tooling, is the one exception.
+
 File writes are serialized per file: two subagents cannot write the same file at
 once, and the second gets an error naming the one that holds it.
 

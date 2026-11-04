@@ -74,6 +74,14 @@ type Shutdowner interface {
 	Shutdown(ctx context.Context) error
 }
 
+// WorkspaceSetter is an optional Handle capability: it makes the engagement's
+// workspace directory the default working directory for agent commands (creating it
+// if needed), so a relative path resolves there and writes can be confined to it.
+// The TUI calls it once the engagement name is known.
+type WorkspaceSetter interface {
+	SetWorkspace(ctx context.Context, dir string) error
+}
+
 // Spec describes a new environment to create.
 type Spec struct {
 	Backend Backend

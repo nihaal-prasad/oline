@@ -34,6 +34,7 @@ type qemuHandle struct {
 	cmd     *exec.Cmd // the qemu-system process
 	client  *ssh.Client
 	egress  *sshEgress
+	workdir string // default guest cwd for agent commands (the engagement workspace)
 }
 
 func (h *qemuHandle) Info() EnvInfo { return EnvInfo{ID: h.id, Backend: BackendQEMU} }
@@ -53,6 +54,9 @@ func (h *qemuHandle) execUser(policy EgressPolicy) string {
 // workspace, as the policy's guest user.
 func (h *qemuHandle) wrap(cmd Cmd) string {
 	dir := cmd.Dir
+	if dir == "" {
+		dir = h.workdir // the engagement workspace, once set
+	}
 	if dir == "" {
 		dir = "/opt/oline"
 	}
@@ -175,6 +179,21 @@ func (h *qemuHandle) SetupEgress(ctx context.Context, scope Scope) error {
 	h.egress = e
 	return nil
 }
+
+// SetWorkspace creates the engagement workspace (group-writable by the oline users)
+// and makes it the default working directory for later agent commands. It runs the
+// creation from an existing directory (/opt/oline) so the command does not depend on
+// the workspace it is about to create.
+func (h *qemuHandle) SetWorkspace(ctx context.Context, dir string) error {
+	script := "mkdir -p " + sshQuote(dir) + " && chmod 2775 " + sshQuote(dir)
+	if _, err := h.Exec(ctx, "setup", Cmd{Argv: []string{"bash", "-lc", script}, Dir: "/opt/oline"}, io.Discard); err != nil {
+		return err
+	}
+	h.workdir = dir
+	return nil
+}
+
+var _ WorkspaceSetter = (*qemuHandle)(nil)
 
 // Shutdown powers the VM off (best-effort graceful), kills the process if it
 // lingers, and removes the transient overlay and seed. The base image and any

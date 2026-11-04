@@ -80,6 +80,10 @@ On top of the network boundary:
   Configure them under `bash.patterns` in `config.yml`.
 - The file tools (`read`, `write`, `edit`, and the search tools) reject host `/mnt`
   paths.
+- `write` and `edit` only write inside the engagement workspace
+  (`/opt/oline/engagements/<name>`); a relative path is taken from that workspace, and
+  a write anywhere else on the guest is refused. The `installer` is the exception: it
+  runs as root to install tooling and may write anywhere.
 
 ## The workspace
 
