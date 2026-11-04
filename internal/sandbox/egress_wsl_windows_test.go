@@ -75,6 +75,40 @@ func TestLiveEgress(t *testing.T) {
 	t.Log("per-agent egress enforced and un-bypassable by the agent")
 }
 
+// TestLiveEgressTeardownClears proves the per-agent firewall is fully removed after
+// teardown: the OLINE_OUT chain exists once SetupEgress has run, and is gone after
+// TeardownWSLEgress. Gated on OLINE_TEST_WSL; reversible.
+func TestLiveEgressTeardownClears(t *testing.T) {
+	distro := os.Getenv("OLINE_TEST_WSL")
+	if distro == "" {
+		t.Skip("OLINE_TEST_WSL not set; skipping live egress-teardown test")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	h, err := sandbox.NewWSL().Open(ctx, distro)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.SetupEgress(ctx, sandbox.Scope{Targets: []string{"1.1.1.1/32"}}); err != nil {
+		t.Fatalf("SetupEgress: %v", err)
+	}
+	chain := func() string {
+		var out bytes.Buffer
+		_, _ = h.Exec(ctx, "test", sandbox.Cmd{Argv: []string{"bash", "-lc", "iptables -L OLINE_OUT 2>&1 | head -1"}, Policy: sandbox.Privileged}, &out)
+		return out.String()
+	}
+	if !strings.Contains(chain(), "OLINE_OUT") {
+		t.Fatalf("OLINE_OUT chain missing after SetupEgress: %q", chain())
+	}
+	if err := sandbox.TeardownWSLEgress(distro); err != nil {
+		t.Fatalf("teardown: %v", err)
+	}
+	if strings.Contains(chain(), "Chain OLINE_OUT") {
+		t.Errorf("OLINE_OUT chain still present after teardown: %q", chain())
+	}
+}
+
 // TestLivePrivilegedIsRoot proves the installer's Privileged egress policy runs
 // as root inside the sandbox (so it can install software), while every other
 // policy runs as an unprivileged, scope-restricted user with no root. Gated on

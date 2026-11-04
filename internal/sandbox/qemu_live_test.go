@@ -6,11 +6,30 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/nihaal-prasad/oline/internal/sandbox"
 )
+
+// syncBuf is a concurrency-safe output sink for a streaming OpenTerminal session.
+type syncBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
 
 func writeTemp(t *testing.T, content string) string {
 	t.Helper()
@@ -68,5 +87,28 @@ func TestLiveQEMU(t *testing.T) {
 	if err := h.CopyIn(ctx, writeTemp(t, "hello oline"), "/opt/oline/engagements/probe.txt"); err != nil {
 		t.Fatalf("CopyIn: %v", err)
 	}
-	t.Log("QEMU VM booted, egress applied, exec + copy verified")
+
+	// A PTY-backed terminal reports a real tty (the SSH RequestPty path).
+	inter, ok := h.(sandbox.Interactive)
+	if !ok {
+		t.Fatal("QEMU handle does not implement Interactive")
+	}
+	buf := &syncBuf{}
+	sess, err := inter.OpenTerminal(ctx, "test", sandbox.Cmd{Argv: []string{"bash", "-li"}}, 24, 80, buf)
+	if err != nil {
+		t.Fatalf("OpenTerminal: %v", err)
+	}
+	_, _ = sess.Write([]byte("tty\n"))
+	time.Sleep(1500 * time.Millisecond)
+	_, _ = sess.Write([]byte("exit\n"))
+	time.Sleep(300 * time.Millisecond)
+	if err := sess.Resize(30, 100); err != nil {
+		t.Errorf("Resize: %v", err)
+	}
+	_ = sess.Close()
+	if !strings.Contains(buf.String(), "/dev/pts/") {
+		t.Errorf("QEMU terminal did not report a pty: %q", buf.String())
+	}
+
+	t.Log("QEMU VM booted, egress applied, exec + copy + pty verified")
 }
