@@ -397,10 +397,16 @@ const inputPromptReserve = 6
 func newModel(mode config.Mode, store *config.Store, roster *agents.Roster) *model {
 	si := textinput.New()
 	si.Placeholder = "in-scope only — e.g. 10.0.0.5, 10.0.0.0/24, app.example.com"
+	if mode == config.ModeExploiter {
+		si.Placeholder = "application to analyze — a local path, or a URL/name for the installer to fetch"
+	}
 	si.CharLimit = 1024
 	si.Width = 64
 	gi := textinput.New()
 	gi.Placeholder = "goal — e.g. capture the flag at /root/flag.txt; prove RCE"
+	if mode == config.ModeExploiter {
+		gi.Placeholder = "goal — e.g. find and prove an exploitable bug; build a working PoC"
+	}
 	gi.Width = 64
 	ci := textinput.New()
 	ci.Placeholder = "message the focused agent…  (Ctrl-b then a key for commands)"
@@ -1484,14 +1490,14 @@ func (m *model) startEngagement() (tea.Model, tea.Cmd) {
 	m.prepCand = cand
 	m.preparing = true
 	m.wizErr = ""
-	return m, prepareSandboxCmd(cand, m.scopeIn.Value(), m.store.Effective().Network.AllowIPv6)
+	return m, prepareSandboxCmd(cand, m.egressScope(), m.store.Effective().Network.AllowIPv6)
 }
 
 // beginSession builds and launches the engagement once the sandbox handle is
 // ready (egress already applied in prepareSandboxCmd).
 func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	cand := m.prepCand
-	pol := scope.Parse(m.scopeIn.Value())
+	pol := scope.Parse(m.egressScope())
 
 	reg := wire.BuildRegistry(m.store)
 	llmFor := wire.NewLLMResolver(m.store)
@@ -1634,7 +1640,9 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	m.setupVPN(cand.ID)
 
 	// Egress was established (fail-closed) above; report the resulting policy.
-	if pol.Empty() && len(pol.Domains()) == 0 {
+	if m.mode == config.ModeExploiter {
+		m.writeln(core.Main, styleMuted.Render("egress enforced: agents are network-isolated (local target only); internet for installer (download) and judge/skeptic (research) only"))
+	} else if pol.Empty() && len(pol.Domains()) == 0 {
 		m.writeln(core.Main, styleWarn.Render("no targets parsed from scope — in-scope agents can reach NO network (strict). researcher/installer/judge/skeptic still get internet."))
 	} else {
 		m.writeln(core.Main, styleMuted.Render(fmt.Sprintf("egress enforced: in-scope IP/CIDR=%v · internet-minus-target for researcher/installer/judge/skeptic", pol.CIDRs())))
@@ -1710,14 +1718,38 @@ func (m *model) emitNotice(level, text string) {
 // applyScopeLive updates the engagement scope. While agents are running it
 // re-applies the per-agent firewall ON THE FLY and tells the orchestrator the
 // allowed scope changed; otherwise the new scope just takes effect at start.
+// egressScope is the scope text that feeds the per-agent egress firewall. In
+// exploiter mode "scope" names the application under analysis, not network targets,
+// and every exec agent is network-isolated anyway, so it yields no firewall targets.
+// In pentester mode it is the in-scope target list.
+func (m *model) egressScope() string {
+	if m.mode == config.ModeExploiter {
+		return ""
+	}
+	return m.scopeIn.Value()
+}
+
 func (m *model) applyScopeLive(raw string) {
 	m.scopeIn.SetValue(raw)
 	if m.sess == nil || m.sess.Sandbox == nil || m.router == nil {
 		return // not running — the new scope is used when the engagement starts
 	}
-	pol := scope.Parse(raw)
 	ec := m.sess.Sandbox.EgressController()
 	allowIPv6 := m.store.Effective().Network.AllowIPv6
+	if m.mode == config.ModeExploiter {
+		// The exploiter target is local; agents stay network-isolated regardless of
+		// scope. Treat the edit as a new application description, not a firewall change.
+		go func() {
+			if err := ec.ApplyBaseline(sandbox.Scope{AllowIPv6: allowIPv6}); err != nil {
+				m.emitNotice("error", "live scope update: firewall re-apply failed: "+err.Error())
+				return
+			}
+			m.router.Send(engine.Envelope{From: "User", To: core.Main, Kind: engine.MsgSteer,
+				Body: fmt.Sprintf("TARGET UPDATE from the operator: the application under analysis is now %q. Agents remain network-isolated (local target only); never attack a remote host.", strings.TrimSpace(raw))})
+		}()
+		return
+	}
+	pol := scope.Parse(raw)
 	go func() {
 		if err := ec.ApplyBaseline(sandbox.Scope{Targets: append(pol.CIDRs(), pol.Domains()...), AllowIPv6: allowIPv6}); err != nil {
 			m.emitNotice("error", "live scope update: firewall re-apply failed: "+err.Error())
@@ -1822,24 +1854,42 @@ func (m *model) composePrompt() string {
 		dir := sandbox.WSLWorkspace + "/" + m.engagement
 		fmt.Fprintf(&b, "RESUME the existing engagement %q. Its workspace is at %s.\n", m.engagement, dir)
 		b.WriteString("First rebuild the state of play: read 00-scope.md for the GOAL and prior context, and read the registers (assumptions.md, trust-zones.md, go-no-go.md, changes.md) and skim engagement-log.md. Do NOT redo completed work.\n")
-		fmt.Fprintf(&b, "CURRENT in scope (ONLY these — authoritative; they may have changed since the saved run, so they SUPERSEDE any scope recorded earlier): %s\n", strings.TrimSpace(m.scopeIn.Value()))
-		b.WriteString("Update 00-scope.md to reflect this current scope, then continue toward the goal.\n")
-		b.WriteString(m.networkPolicyLine())
+		if m.mode == config.ModeExploiter {
+			fmt.Fprintf(&b, "CURRENT target application (analyze ONLY this; it may have changed since the saved run and SUPERSEDES any recorded earlier): %s\n", strings.TrimSpace(m.scopeIn.Value()))
+			b.WriteString("Update 00-scope.md to reflect this target, then continue toward the goal.\n")
+			b.WriteString(exploiterLocalOnly)
+		} else {
+			fmt.Fprintf(&b, "CURRENT in scope (ONLY these — authoritative; they may have changed since the saved run, so they SUPERSEDE any scope recorded earlier): %s\n", strings.TrimSpace(m.scopeIn.Value()))
+			b.WriteString("Update 00-scope.md to reflect this current scope, then continue toward the goal.\n")
+			b.WriteString(m.networkPolicyLine())
+		}
 		if extra := strings.TrimSpace(m.goalIn.Value()); extra != "" {
 			fmt.Fprintf(&b, "ADDITIONAL INSTRUCTIONS from the user for this resume (follow these as well as continuing toward the goal): %s\n", extra)
 		}
 		b.WriteString(m.diagramWidthLine())
 		return b.String()
 	}
-	fmt.Fprintf(&b, "In scope (ONLY these — never touch anything else): %s\n", strings.TrimSpace(m.scopeIn.Value()))
+	if m.mode == config.ModeExploiter {
+		fmt.Fprintf(&b, "Target application (reverse engineer / analyze ONLY this): %s\n", strings.TrimSpace(m.scopeIn.Value()))
+	} else {
+		fmt.Fprintf(&b, "In scope (ONLY these — never touch anything else): %s\n", strings.TrimSpace(m.scopeIn.Value()))
+	}
 	fmt.Fprintf(&b, "Goal: %s\n", strings.TrimSpace(m.goalIn.Value()))
-	b.WriteString(m.networkPolicyLine())
+	if m.mode == config.ModeExploiter {
+		b.WriteString(exploiterLocalOnly)
+	} else {
+		b.WriteString(m.networkPolicyLine())
+	}
 	fmt.Fprintf(&b, "Your engagement workspace is %s/%s/ (also reachable as ~/engagements/%s/). Create it and keep 00-scope.md, the registers, and all artifacts there.\n",
 		sandbox.WSLWorkspace, m.engagement, m.engagement)
 	b.WriteString(m.diagramWidthLine())
 	b.WriteString("All execution happens inside the sandbox. Begin by recording scope, then proceed per your workflow.")
 	return b.String()
 }
+
+// exploiterLocalOnly tells the orchestrator that the exploiter target is local and
+// no agent may reach a remote host; only the installer fetches the app from the net.
+const exploiterLocalOnly = "The target runs LOCALLY inside the sandbox. You are NOT authorized to attack, scan, or exploit any remote host or service: every exec agent is network-isolated and can reach only the local machine (loopback). If the application must be obtained from the internet, have the installer (the one agent with internet access) download and install it; every other agent works offline against the local build.\n"
 
 // diagramWidthLine tells the orchestrator the exact current width of the Diagram
 // pane so its first map fits. The limit is also enforced by update_diagram (which
@@ -3220,6 +3270,12 @@ func (m *model) viewWizard() string {
 	step(m.step == wStart, "2. Engagement", radio(m.startSel, "New engagement", "Resume a previous engagement"))
 	step(m.step == wEnv, "3. Environment", m.envBodyView())
 
+	scopeWord := "Scope"
+	scopeResumeLabel := "5. Scope (confirm — targets may have changed)"
+	if m.mode == config.ModeExploiter {
+		scopeWord = "Application"
+		scopeResumeLabel = "5. Application (confirm — it may have changed)"
+	}
 	if m.resume {
 		step(m.step == wResume, "4. Previous engagement", m.resumeBodyView(radio))
 		if m.step == wImport {
@@ -3229,10 +3285,10 @@ func (m *model) viewWizard() string {
 			step(true, "   Conversation history", radio(m.histSel,
 				"Load the previous conversation history", "Start from a clean slate (no history)"))
 		}
-		step(m.step == wScope, "5. Scope (confirm — targets may have changed)", "    "+m.scopeIn.View())
+		step(m.step == wScope, scopeResumeLabel, "    "+m.scopeIn.View())
 		step(m.step == wGoal, "6. Additional instructions (optional)", "    "+m.goalIn.View())
 	} else {
-		step(m.step == wScope, "4. Scope", "    "+m.scopeIn.View())
+		step(m.step == wScope, "4. "+scopeWord, "    "+m.scopeIn.View())
 		step(m.step == wGoal, "5. Goal", "    "+m.goalIn.View())
 	}
 

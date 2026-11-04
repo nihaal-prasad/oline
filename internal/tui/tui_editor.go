@@ -26,7 +26,11 @@ func (m *model) openEditor() {
 	m.eItems = m.eItems[:0]
 	// Scope first: it can be changed live while agents run (re-applies the firewall
 	// and tells the orchestrator).
-	m.eItems = append(m.eItems, eItem{kind: "scope", name: "in-scope targets"})
+	scopeName := "in-scope targets"
+	if m.mode == config.ModeExploiter {
+		scopeName = "target application"
+	}
+	m.eItems = append(m.eItems, eItem{kind: "scope", name: scopeName})
 	// TUI settings: terminal-UI preferences (not engagement behavior).
 	m.eItems = append(m.eItems, eItem{kind: "tui", name: "customizable panes"})
 	// The orchestrator's prompt bundle, each editable like a subagent's prompt: its
@@ -84,8 +88,12 @@ func (m *model) buildFields() {
 	}
 	switch it.kind {
 	case "scope":
+		label := "in-scope targets (IPs / CIDRs / domains)"
+		if m.mode == config.ModeExploiter {
+			label = "target application (local path, or URL/name to fetch)"
+		}
 		m.eFields = []textinput.Model{
-			mk("in-scope targets (IPs / CIDRs / domains)", m.scopeIn.Value(), false),
+			mk(label, m.scopeIn.Value(), false),
 		}
 	case "tui":
 		val := "false"

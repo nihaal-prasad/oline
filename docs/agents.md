@@ -38,6 +38,11 @@ Develops proof-of-concept exploits for a target. It can start from a vulnerabili
 report, or discover the vulnerabilities itself when there is none. The orchestrator
 coordinates 9 subagents.
 
+The "scope" here is the application to analyze: a local path, or a URL/name for the
+installer to fetch. The target runs locally, so agents are network-isolated and
+never attack a remote host; only the installer (download) and judge/skeptic
+(research) reach the internet.
+
 | subagent | role |
 |---|---|
 | intake | read and understand a vulnerability report, when one is provided |

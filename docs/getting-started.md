@@ -52,7 +52,7 @@ oline -mode pentester -env <wsl-distro> -scope "10.0.0.5, 10.0.0.0/24" -goal "pr
 |---|---|
 | `-mode pentester\|exploiter` | which roster to load (default `pentester`) |
 | `-env <name>` | skip the wizard and start in this sandbox (for example a WSL distro name) |
-| `-scope "<targets>"` | in-scope IPs, CIDRs, and domains |
+| `-scope "<targets>"` | pentester: in-scope IPs, CIDRs, and domains. exploiter: the application to analyze (a local path, or a URL/name to fetch) |
 | `-goal "<text>"` | engagement goal |
 | `-planner` | planner mode (AI proposes, you approve each step); default is automatic. `-manual` is a deprecated alias |
 | `-edit` | open the model/provider editor and exit |

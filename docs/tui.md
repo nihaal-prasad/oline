@@ -24,9 +24,10 @@ The wizard asks each setting in order, skipping steps that don't apply; Enter ad
    new". See [sandbox.md](sandbox.md).
 6. **Resume / import**: pick an existing engagement or import one from a host
    archive, then choose whether to load its history.
-7. **Scope**: in-scope targets as free text; IPs, CIDRs, and domains are parsed out
-   (e.g. `10.0.0.0/24 and app.example.com`). IPs and CIDRs drive the firewall;
-   domains feed tool-layer checks and reporting.
+7. **Scope**: pentester, the in-scope targets as free text (IPs, CIDRs, and domains
+   parsed out; IPs and CIDRs drive the firewall, domains feed tool checks and
+   reporting). Exploiter, the application to analyze (a local path, or a URL/name for
+   the installer to fetch); agents stay network-isolated either way.
 8. **Goal**: what the engagement should achieve. When resuming, the saved goal is
    kept and this step takes optional extra instructions instead (blank to skip).
 9. **VPN** (optional, WSL only): an OpenVPN config the sandbox connects through

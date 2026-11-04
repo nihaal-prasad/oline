@@ -26,12 +26,14 @@ Each agent class runs as a distinct guest user:
 |---|---|---|
 | in-scope only | `oline-scope` | only the in-scope target |
 | internet, no target | `oline-net` | the internet, but never the target |
-| isolated | `oline-iso` | nothing |
+| isolated | `oline-iso` | nothing but loopback |
 | privileged | root | the installer, to set up tooling |
 
-- Most agents are in-scope only.
-- The `researcher` (pentester) and `judge` and `skeptic` (exploiter) reach the
-  internet but never the target.
+- Pentester: agents are in-scope only; `researcher` reaches the internet but not
+  the target.
+- Exploiter: the target runs locally, so agents are isolated (loopback only) and
+  can never reach a remote host. Only `installer` (download) and `judge`/`skeptic`
+  (research) get the internet.
 - The `installer` runs as root to install software.
 
 Changing scope while running re-applies these rules. See [tui.md](tui.md).

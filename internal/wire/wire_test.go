@@ -261,6 +261,24 @@ func TestBuildExploiter(t *testing.T) {
 			t.Errorf("%s is privileged; only the installer may be", name)
 		}
 	}
+	// Exploiter analyzes a LOCAL application: internet is limited to installer
+	// (Privileged, download) and judge/skeptic (InternetNoTarget, research). Every
+	// other agent is Isolated, so it can reach only the local target over loopback
+	// and can never attack a remote host.
+	internet := map[string]bool{"installer": true, "judge": true, "skeptic": true}
+	for _, name := range roster.Names() {
+		cfg, _ := resolver(name)
+		switch {
+		case name == "judge" || name == "skeptic":
+			if cfg.Policy != sandbox.InternetNoTarget {
+				t.Errorf("%s policy = %v, want InternetNoTarget", name, cfg.Policy)
+			}
+		case !internet[name]:
+			if cfg.Policy != sandbox.Isolated {
+				t.Errorf("%s policy = %v, want Isolated (exploiter exec agents are network-isolated)", name, cfg.Policy)
+			}
+		}
+	}
 }
 
 // TestLiveRecon runs the REAL recon subagent prompt against WSL Kali with a

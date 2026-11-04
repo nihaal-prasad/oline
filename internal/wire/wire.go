@@ -22,13 +22,24 @@ var internetAgents = map[string]bool{
 	"skeptic":    true,
 }
 
-func policyFor(role string) sandbox.EgressPolicy {
+// policyFor is the egress class for an agent in a given mode.
+//
+// Exploiter analyzes a LOCAL application, so no exploiter agent may reach the
+// network to attack a remote host: every one that isn't an explicit internet agent
+// is Isolated (loopback, and thus the local target, still works). Only the installer
+// (downloads the application) and the judge/skeptic (look things up) get internet.
+// Pentester attacks the in-scope targets, so its default is InScopeOnly.
+func policyFor(mode config.Mode, role string) sandbox.EgressPolicy {
 	if role == "installer" {
-		// The installer is the ONLY agent that runs as root (to install software).
+		// The installer is the ONLY agent that runs as root (to install software and,
+		// in exploiter mode, download the target application).
 		return sandbox.Privileged
 	}
 	if internetAgents[role] {
 		return sandbox.InternetNoTarget
+	}
+	if mode == config.ModeExploiter {
+		return sandbox.Isolated
 	}
 	return sandbox.InScopeOnly
 }
@@ -86,7 +97,7 @@ func Build(mode config.Mode, store *config.Store, roster *agents.Roster) (engine
 			System:           subagentSystem(def.Prompt),
 			Tools:            tools,
 			Spawns:           []string(def.Spawns),
-			Policy:           policyFor(def.Name),
+			Policy:           policyFor(mode, def.Name),
 			BudgetMinutes:    budget,
 			MaxContextTokens: ctxTokens,
 			MaxTokens:        modelMaxTokens(eff, model),
