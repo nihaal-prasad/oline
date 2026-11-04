@@ -63,7 +63,8 @@ func Build(mode config.Mode, store *config.Store, roster *agents.Roster) (engine
 		model := eff.ModelForTier(tier)
 		tools := grantCoordination([]string(def.Tools))
 		if containsStr(tools, "bash") {
-			tools = appendUnique(tools, "bash_bg") // agents with bash can also run background jobs
+			tools = appendUnique(tools, "bash_bg")  // agents with bash can also run background jobs
+			tools = appendUnique(tools, "revshell") // ...and set up reverse-shell listener channels
 		}
 		// Time budget (minutes): the agent's own value, else the config default;
 		// a negative frontmatter value means "no limit" (0 minutes).

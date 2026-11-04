@@ -136,13 +136,26 @@ agent (or runs a command in a focused shell pane).
 the last). When more than one window exists, a tab strip appears in the header;
 click a tab to switch to it.
 
-### Shell panes
+### Command panes
 
-`Ctrl-b $` opens a shell pane that runs commands in the sandbox as root. Open
-shells are listed under **user panes**. With a shell pane focused, the input line
-shows a `$` prompt; type a command and press Enter, and the output appears in the
-pane. The working directory is kept across commands. `Ctrl-b S` stops a running
-command. The egress firewall restricts agents, not your own shell.
+The **command panes** section of the Options sidebar lists two kinds of pane you
+can type into directly: your own shell panes and the agents' reverse-shell
+channels.
+
+**Shell panes.** `Ctrl-b $` opens a shell pane that runs commands in the sandbox as
+root. With a shell pane focused, the input line shows a `$` prompt; type a command
+and press Enter, and the output appears in the pane. The working directory is kept
+across commands. `Ctrl-b S` stops a running command. The egress firewall restricts
+agents, not your own shell.
+
+**Reverse-shell channels.** When an agent sets up a reverse-shell listener (with its
+`revshell` tool), the channel appears in the command-panes list as a `⇄` row with
+its name and port. Click the row to open a pane that streams the channel's live
+output; the row shows `(click to open)` until you do. With that pane focused the
+input line shows a `⇄` prompt, and a command you type is sent straight to the shell
+connected on the far end. The channel's listener is managed by the agents (they open
+and close it); the pane is just your window onto it, and closing the pane leaves the
+listener running.
 
 ### Pause, resume, and kill
 

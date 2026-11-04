@@ -101,12 +101,12 @@ func (m *model) anyShellPane() bool {
 	return false
 }
 
-// shellIDsSorted returns the live shell ids in the order they were opened (shell#1,
-// shell#2, …), skipping any that have been closed.
+// shellIDsSorted returns the live shell ids in the order they were opened (Shell#1,
+// Shell#2, …), skipping any that have been closed.
 func (m *model) shellIDsSorted() []core.AgentID {
 	var out []core.AgentID
 	for i := 1; i <= m.shellSeq; i++ {
-		id := core.AgentID(fmt.Sprintf("shell#%d", i))
+		id := core.AgentID(fmt.Sprintf("Shell#%d", i))
 		if _, ok := m.shells[id]; ok {
 			out = append(out, id)
 		}
@@ -152,7 +152,7 @@ func (m *model) createShellLeaf() *pane {
 		m.shells = map[core.AgentID]*shellState{}
 	}
 	m.shellSeq++
-	id := core.AgentID(fmt.Sprintf("shell#%d", m.shellSeq))
+	id := core.AgentID(fmt.Sprintf("Shell#%d", m.shellSeq))
 	sh := &shellState{id: id, cwd: shellHome}
 	m.shells[id] = sh
 
@@ -219,7 +219,12 @@ func (m *model) runShell(sh *shellState, cmd string) {
 }
 
 // applyShellMsg folds one shell output/completion message into the transcript.
+// Reverse-shell panes share shellCh, so route their messages first.
 func (m *model) applyShellMsg(msg shellMsg) {
+	if rs := m.revs[msg.id]; rs != nil {
+		m.applyRevMsg(rs, msg)
+		return
+	}
 	sh := m.shells[msg.id]
 	if sh == nil {
 		return

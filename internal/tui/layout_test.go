@@ -25,7 +25,7 @@ func TestAnyShellPane(t *testing.T) {
 	if m.anyShellPane() {
 		t.Error("no shell pane exists yet")
 	}
-	sh := newShellLeaf("shell#1")
+	sh := newShellLeaf("Shell#1")
 	m.windows = append(m.windows, &windowState{root: sh, focus: sh, name: "2"})
 	if !m.anyShellPane() {
 		t.Error("a shell window should be detected")
@@ -39,7 +39,7 @@ func TestLayoutSnapshotSkipsLoneShell(t *testing.T) {
 	m.w, m.h = 120, 40
 	m.paneRoot = newLeaf(core.Main)
 	m.focusPane = m.paneRoot
-	sh := newShellLeaf("shell#1")
+	sh := newShellLeaf("Shell#1")
 	m.windows = []*windowState{
 		{root: m.paneRoot, focus: m.paneRoot, name: "1"},
 		{root: sh, focus: sh, name: "2"},
@@ -80,7 +80,7 @@ func TestSavedPaneRoundTrip(t *testing.T) {
 // TestShellPaneSavesAsMain checks a live shell pane (which can't be restored) is
 // persisted as a Main view rather than a dangling shell.
 func TestShellPaneSavesAsMain(t *testing.T) {
-	sp := toSavedPane(newShellLeaf("shell#1"))
+	sp := toSavedPane(newShellLeaf("Shell#1"))
 	if !sp.Leaf || sp.Summary || sp.Diagram || sp.Agent != string(core.Main) {
 		t.Errorf("shell pane should save as a Main leaf, got %+v", sp)
 	}

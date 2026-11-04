@@ -81,6 +81,7 @@ Sandbox and file tools (run inside the sandbox):
 |---|---|
 | `bash` | run a shell command |
 | `bash_bg` | run a shell command as a background job (granted with `bash`) |
+| `revshell` | set up and drive a reverse-shell listener channel (granted with `bash`) |
 | `read` `write` `edit` | read and change files in the workspace |
 | `find` `grep` `glob` | search files in the workspace |
 | `web_search` | search the web (the internet-access grant) |
@@ -112,6 +113,21 @@ long-running work with `bash_bg` from the start. A background job and the proces
 it spawns keep running until the job finishes, it is stopped, or the engagement
 ends. Start servers and listeners with `bash_bg`. `Ctrl-b S` stops a job and the
 whole process tree it spawned.
+
+## Reverse-shell channels
+
+The `revshell` tool (granted to any agent with `bash`) sets up a named netcat
+listener inside the sandbox that catches a shell connecting back from the target,
+and keeps it writable so the agent can drive it. Its actions are `open` (start a
+listener on a port), `send` (write one command line to the connected shell and read
+back what follows), `read` (return recent output), `list` (show every channel and
+whether its listener is up), and `close` (stop the listener). Each channel is backed
+by an input FIFO and an output log in the engagement workspace
+(`<workspace>/channels/<name>/`), and its listener runs as a persistent job that
+survives the opening agent's turns until it is closed or the engagement ends. Every
+open channel shows up in the operator's **command panes** list, where you can open a
+pane to watch it and type to its shell yourself (see
+[the interface](tui.md)). All of it stays inside the sandbox.
 
 ## Model tiers
 

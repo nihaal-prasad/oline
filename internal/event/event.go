@@ -101,6 +101,21 @@ type Diagram struct {
 	Text string
 }
 
+// Channel announces a reverse-shell channel (a netcat listener the agents set up
+// via the `revshell` tool) opening or closing. The TUI tracks open channels and
+// lists them under "command panes", where the user can open a dedicated pane that
+// streams the channel's live output and sends typed commands to the connected
+// shell. Dir is the absolute guest path of the channel's working directory (where
+// its input FIFO and output log live); Port is the listener's TCP port.
+type Channel struct {
+	Name string
+	Port int
+	Dir  string
+	Open bool // true: just opened/listening; false: closed
+}
+
+func (Channel) isEvent() {}
+
 func (TokenDelta) isEvent()   {}
 func (ToolStarted) isEvent()  {}
 func (ToolOutput) isEvent()   {}

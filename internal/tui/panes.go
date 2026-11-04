@@ -38,6 +38,7 @@ type pane struct {
 	vp      viewport.Model
 	leaf    bool
 	shell   bool // true: an interactive shell the user types into (not an agent view)
+	rev     bool // true: a reverse-shell channel pane (streams a channel, user types commands to its shell)
 	summary bool // true: the live engagement-summary pane (content from m.summary)
 	diagram bool // true: the live ASCII map pane (content from m.diagram)
 
@@ -58,6 +59,14 @@ func newLeaf(agent core.AgentID) *pane {
 // the agent roster.
 func newShellLeaf(id core.AgentID) *pane {
 	return &pane{agent: id, leaf: true, shell: true, ratio: 0.5, vp: viewport.New(10, 10)}
+}
+
+// newRevLeaf is a leaf showing a reverse-shell channel: it streams the channel's
+// live output and, when focused, sends typed command lines to the connected shell.
+// Keyed by a synthetic id (rev#<name>) so it reuses the transcript/render machinery
+// without appearing in the agent roster.
+func newRevLeaf(id core.AgentID) *pane {
+	return &pane{agent: id, leaf: true, rev: true, ratio: 0.5, vp: viewport.New(10, 10)}
 }
 
 // newSummaryLeaf / newDiagramLeaf are the two live info panes. They reuse the

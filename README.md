@@ -31,7 +31,7 @@ Requires Go 1.27 or newer.
 ```bash
 go build ./cmd/oline      # or: make build
 go test ./...
-make dist                 # cross-compiled binaries into dist/ (or: pwsh ./build.ps1)
+make dist                 # cross-compiled binaries into the project root (or: pwsh ./build.ps1)
 ```
 
 ## Run

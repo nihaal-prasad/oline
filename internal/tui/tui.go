@@ -277,10 +277,18 @@ type model struct {
 	showThoughts bool
 	showRoster   bool // the whole right-side Options pane (on by default; Ctrl-b ? toggles)
 
-	// shells: user-driven shell panes, keyed by synthetic id (e.g. "shell#1").
-	shellCh     chan shellMsg
-	shells      map[core.AgentID]*shellState
-	shellSeq    int
+	// shells: user-driven shell panes, keyed by synthetic id (e.g. "Shell#1").
+	shellCh  chan shellMsg
+	shells   map[core.AgentID]*shellState
+	shellSeq int
+
+	// Reverse-shell channels (set up by agents via the `revshell` tool) and the
+	// operator panes attached to them. channels tracks every open channel in
+	// insertion order; revs holds the live tail/send state of panes the user opened
+	// for them (keyed by the synthetic pane id rev#<name>). Both share shellCh.
+	channels    map[string]*channelInfo
+	channelOrd  []string
+	revs        map[core.AgentID]*revState
 	histMu      sync.Mutex    // serializes saveHistory across the UI and ticker goroutines
 	savedLayout []savedWindow // last UI-goroutine snapshot of the window/pane layout (under histMu)
 	savedWinIdx int           // active window index for that snapshot
@@ -317,7 +325,8 @@ type model struct {
 	bodyH              int
 	rosterX            int
 	rosterAgentRows    map[int]core.AgentID // absolute screen Y -> agent, for roster click hit-testing
-	rosterUserPaneRows map[int]core.AgentID // absolute screen Y -> opened shell id (user panes section)
+	rosterUserPaneRows map[int]core.AgentID // absolute screen Y -> opened shell id (command panes section)
+	rosterChannelRows  map[int]string       // absolute screen Y -> channel name (command panes section)
 	rosterScroll       int                  // scroll offset (content lines) of the Options pane
 	rosterFollow       bool                 // on the next render, scroll the Options pane to show the selection
 
@@ -1898,6 +1907,10 @@ func (m *model) mousePress(x, y int, overRoster bool) {
 			m.focusShellByID(id)
 			return
 		}
+		if name, ok := m.rosterChannelRows[y]; ok { // a channel: open/jump to its pane
+			m.openRevPane(name)
+			return
+		}
 		if id, ok := m.rosterAgentRows[y]; ok {
 			m.setFocus(id)
 		}
@@ -2100,8 +2113,8 @@ func (m *model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.navPane('j')
 		// agent + view controls
 		case "p":
-			if m.focusShell() != nil {
-				m.status = "this pane is a shell, not an agent"
+			if m.focusCommandPane() {
+				m.status = "this pane is a command pane, not an agent"
 			} else {
 				m.router.Pause(focus)
 				m.status = "paused " + string(focus)
@@ -2110,8 +2123,8 @@ func (m *model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.router.PauseAll()
 			m.status = "paused ALL agents"
 		case "r":
-			if m.focusShell() != nil {
-				m.status = "this pane is a shell, not an agent"
+			if m.focusCommandPane() {
+				m.status = "this pane is a command pane, not an agent"
 			} else {
 				m.router.Resume(focus)
 				m.status = "resumed " + string(focus)
@@ -2120,8 +2133,8 @@ func (m *model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.router.ResumeAll()
 			m.status = "resumed ALL agents"
 		case "K":
-			if m.focusShell() != nil {
-				m.status = "this pane is a shell, not an agent"
+			if m.focusCommandPane() {
+				m.status = "this pane is a command pane, not an agent"
 			} else {
 				m.router.Kill(focus)
 				m.status = "killed " + string(focus)
@@ -2135,6 +2148,8 @@ func (m *model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				} else {
 					m.status = "no shell command is running"
 				}
+			} else if m.focusRev() != nil {
+				m.status = "a reverse-shell channel's listener is managed by agents (revshell close)"
 			} else {
 				n := m.router.StopCommands(focus)
 				m.status = fmt.Sprintf("stopped %d running command(s) for %s", n, focus)
@@ -2166,8 +2181,8 @@ func (m *model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "b":
 			// Set / change / remove the focused agent's time budget.
-			if m.focusShell() != nil {
-				m.status = "this pane is a shell, not an agent"
+			if m.focusCommandPane() {
+				m.status = "this pane is a command pane, not an agent"
 			} else if focus == core.Main {
 				m.status = "the orchestrator (Main) has no time budget"
 			} else {
@@ -2233,6 +2248,16 @@ func (m *model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		// A focused reverse-shell pane sends the typed line to the connected shell
+		// (through the channel's input FIFO), rather than to an agent.
+		if rs := m.focusRev(); rs != nil {
+			cmd := strings.TrimSpace(m.input.Value())
+			m.input.SetValue("")
+			if cmd != "" {
+				m.sendRev(rs, cmd)
+			}
+			return m, nil
+		}
 		// The Summary / Findings panes are read-only views, not agents: typing into
 		// them would message a non-existent agent. Route a message to the orchestrator
 		// instead and tell the user.
@@ -2287,6 +2312,7 @@ func (m *model) closePaneCmd() {
 		return
 	}
 	m.reapShell(m.focusPane)
+	m.reapRev(m.focusPane)
 	m.paneRoot, m.focusPane = closePane(m.paneRoot, m.focusPane)
 	m.zoom = false
 	m.relayout()
@@ -2320,6 +2346,7 @@ func (m *model) reapShell(p *pane) {
 func (m *model) reapShells(p *pane) {
 	for _, l := range leaves(p) {
 		m.reapShell(l)
+		m.reapRev(l)
 	}
 }
 
@@ -2811,6 +2838,8 @@ func (m *model) mutate(ev event.Event) {
 	case event.Diagram:
 		m.diagram = e.Text
 		m.markDirty(diagramPaneID) // refresh the live Diagram pane
+	case event.Channel:
+		m.applyChannel(e.Name, e.Port, e.Dir, e.Open)
 	}
 }
 
@@ -3167,6 +3196,8 @@ func (m *model) viewRunning() string {
 		inPrompt = styleWarn.Render(" ⏱ ")
 	case m.focusShell() != nil:
 		inPrompt = styleAccent.Render(" $ ")
+	case m.focusRev() != nil:
+		inPrompt = styleAccent.Render(" ⇄ ")
 	case m.answerTarget(m.focusedAgent()) != "":
 		inPrompt = styleWarn.Render(" ❓ ")
 	}
@@ -3200,6 +3231,8 @@ func (m *model) renderLeaf(p *pane) string {
 	switch {
 	case p.shell:
 		label = string(p.agent) + "  $ shell"
+	case p.rev:
+		label = string(p.agent) + "  ⇄ reverse shell"
 	case p.summary:
 		label = "Summary"
 	case p.diagram:
@@ -3229,6 +3262,7 @@ func (m *model) renderLeaf(p *pane) string {
 func (m *model) renderRoster(w, h int) string {
 	m.rosterAgentRows = map[int]core.AgentID{}
 	m.rosterUserPaneRows = map[int]core.AgentID{}
+	m.rosterChannelRows = map[int]string{}
 	focused := m.focusedAgent()
 
 	// Build the full content as a list of lines, with parallel maps from content line
@@ -3254,8 +3288,16 @@ func (m *model) renderRoster(w, h int) string {
 		shellIdx[len(rows)] = id
 		rows = append(rows, s)
 	}
+	channelIdx := map[int]string{}
+	addChannel := func(s, name string) {
+		if revID(name) == focused {
+			focusedLine = len(rows)
+		}
+		channelIdx[len(rows)] = name
+		rows = append(rows, s)
+	}
 
-	add(styleAccent.Render("Options") + "   " + styleMuted.Render(fmt.Sprintf("spent $%.4f", m.totalCost)))
+	add(styleAccent.Render("Pane Options") + "   " + styleMuted.Render(fmt.Sprintf("spent $%.4f", m.totalCost)))
 	add(styleMuted.Render("agent · state · ⏱ · ctx%"))
 	if n := len(m.awaitingAnswer); n > 0 {
 		add(styleWarn.Render(fmt.Sprintf("❓ %d waiting for your answer", n)))
@@ -3317,11 +3359,16 @@ func (m *model) renderRoster(w, h int) string {
 		}
 	}
 
-	// User panes: the shells the user has opened (via Ctrl-b $). Shown ONLY when at
-	// least one shell is open. Each row is click-only (jumps to that shell's pane,
-	// switching tabs if needed); it is not part of the up/down view cycle.
-	if shells := m.shellIDsSorted(); len(shells) > 0 {
-		add(styleMuted.Render(fmt.Sprintf("user panes (%d)", len(shells))))
+	// Command panes: the shells the user has opened (via Ctrl-b $) and the
+	// reverse-shell channels the agents have set up (via the `revshell` tool). Shown
+	// ONLY when at least one exists. Each row is click-only — a shell row jumps to its
+	// pane; a channel row opens (or jumps to) a pane that streams that channel and
+	// sends what you type to its connected shell. These rows are not part of the
+	// up/down view cycle.
+	shells := m.shellIDsSorted()
+	chans := m.channelsSorted()
+	if len(shells)+len(chans) > 0 {
+		add(styleMuted.Render(fmt.Sprintf("command panes (%d)", len(shells)+len(chans))))
 		for _, sid := range shells {
 			cursor := "  "
 			if sid == focused {
@@ -3332,6 +3379,17 @@ func (m *model) renderRoster(w, h int) string {
 				label += "  " + styleWarn.Render("running…")
 			}
 			addShell(label, sid)
+		}
+		for _, c := range chans {
+			cursor := "  "
+			if revID(c.name) == focused {
+				cursor = styleAccent.Render("▸ ")
+			}
+			label := cursor + "⇄ " + c.name + styleMuted.Render(fmt.Sprintf(" :%d", c.port))
+			if _, open := m.revs[revID(c.name)]; !open {
+				label += "  " + styleMuted.Render("(click to open)")
+			}
+			addChannel(label, c.name)
 		}
 	}
 
@@ -3405,6 +3463,9 @@ func (m *model) renderRoster(w, h int) string {
 		}
 		if id, ok := shellIdx[ci]; ok {
 			m.rosterUserPaneRows[screenY] = id
+		}
+		if name, ok := channelIdx[ci]; ok {
+			m.rosterChannelRows[screenY] = name
 		}
 		b.WriteString(rows[ci] + "\n")
 	}

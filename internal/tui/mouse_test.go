@@ -10,8 +10,8 @@ import (
 	"github.com/nihaal-prasad/oline/internal/core"
 )
 
-// TestUserPanesListsShells checks opened shells appear under a "user panes" section
-// (above "info panes") and that clicking one focuses its pane.
+// TestUserPanesListsShells checks opened shells appear under a "command panes"
+// section (above "info panes") and that clicking one focuses its pane.
 func TestUserPanesListsShells(t *testing.T) {
 	m := testModel(t)
 	m.w, m.h = 120, 40
@@ -22,30 +22,30 @@ func TestUserPanesListsShells(t *testing.T) {
 	m.running = true
 	m.resize()
 
-	m.openShellPane() // opens shell#1 in the current window
-	m.openShellPane() // opens shell#2
+	m.openShellPane() // opens Shell#1 in the current window
+	m.openShellPane() // opens Shell#2
 
 	out := ansi.Strip(m.renderRoster(m.rightW, m.bodyH))
-	up, ip := strings.Index(out, "user panes"), strings.Index(out, "info panes")
+	up, ip := strings.Index(out, "command panes"), strings.Index(out, "info panes")
 	if up < 0 || ip < 0 || up > ip {
-		t.Fatalf("user panes must appear above info panes (up=%d ip=%d)\n%s", up, ip, out)
+		t.Fatalf("command panes must appear above info panes (up=%d ip=%d)\n%s", up, ip, out)
 	}
-	if !strings.Contains(out, "shell#1") || !strings.Contains(out, "shell#2") {
-		t.Errorf("user panes should list the opened shells:\n%s", out)
+	if !strings.Contains(out, "Shell#1") || !strings.Contains(out, "Shell#2") {
+		t.Errorf("command panes should list the opened shells:\n%s", out)
 	}
 	// Clicking a listed shell focuses that shell's pane.
 	var shellRow int
 	for y, id := range m.rosterUserPaneRows {
-		if id == core.AgentID("shell#1") {
+		if id == core.AgentID("Shell#1") {
 			shellRow = y
 		}
 	}
 	if shellRow == 0 {
-		t.Fatal("shell#1 has no clickable roster row")
+		t.Fatal("Shell#1 has no clickable roster row")
 	}
 	m.mousePress(m.rosterX+1, shellRow, true)
-	if m.focusShell() == nil || m.focusPane.agent != core.AgentID("shell#1") {
-		t.Errorf("clicking the user-pane row should focus shell#1, got %q", m.focusPane.agent)
+	if m.focusShell() == nil || m.focusPane.agent != core.AgentID("Shell#1") {
+		t.Errorf("clicking the user-pane row should focus Shell#1, got %q", m.focusPane.agent)
 	}
 }
 

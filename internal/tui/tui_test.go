@@ -361,13 +361,14 @@ func TestRosterActiveIdleSections(t *testing.T) {
 	if !strings.Contains(out, "Options") {
 		t.Error("roster missing the 'Options' label")
 	}
-	// With no shell open, there is no "user panes" section and no "Shell" row: a
-	// shell is opened only via Ctrl-b $ and then listed under user panes.
+	// With no shell or channel open, there is no "command panes" section and no
+	// "Shell" row: a shell is opened only via Ctrl-b $ and then listed under command
+	// panes (reverse-shell channels appear there too, once agents open them).
 	if strings.Contains(out, "Shell") {
 		t.Errorf("Shell must not appear when no shell is open:\n%s", out)
 	}
-	if strings.Contains(out, "user panes") {
-		t.Errorf("user panes section must not appear when no shell is open:\n%s", out)
+	if strings.Contains(out, "command panes") {
+		t.Errorf("command panes section must not appear when no shell or channel is open:\n%s", out)
 	}
 	// Info panes (Main + summary + diagram) come first, then active subagents, then
 	// idle. Main is under info panes, not counted as a subagent.

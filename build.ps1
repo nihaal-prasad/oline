@@ -1,12 +1,11 @@
 #!/usr/bin/env pwsh
-# Cross-compile oline for Linux and Windows into dist/.
+# Cross-compile oline for Linux and Windows into the project root.
 param([string]$Version = "")
 if (-not $Version) {
   try { $Version = (git describe --tags --always 2>$null) } catch {}
 }
 if (-not $Version) { $Version = "dev" }
 $ld = "-s -w -X main.version=$Version"
-New-Item -ItemType Directory -Force dist | Out-Null
 
 # Embed the Windows .exe icon from assets/oline.ico by generating a resource
 # object (cmd/oline/rsrc_windows_amd64.syso) that `go build` links in for Windows.
@@ -22,9 +21,9 @@ $targets = @(
 )
 foreach ($t in $targets) {
   $env:GOOS = $t.os; $env:GOARCH = $t.arch
-  $out = "dist/oline-$($t.os)-$($t.arch)$($t.ext)"
+  $out = "oline-$($t.os)-$($t.arch)$($t.ext)"
   Write-Host "building $out (version $Version)"
   go build -ldflags $ld -o $out ./cmd/oline
 }
 $env:GOOS = ""; $env:GOARCH = ""
-Write-Host "done — binaries in dist/"
+Write-Host "done - binaries in the project root"

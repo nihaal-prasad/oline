@@ -169,6 +169,13 @@ type Session struct {
 	router    *Router
 	baseCtx   context.Context  // engagement-lifetime context; subagents run under this, NOT a parent's per-turn context
 	fileLocks *tools.FileLocks // cross-agent file-write locks
+
+	// Reverse-shell channels opened via the `revshell` tool, keyed by name. Each is
+	// a netcat listener running as a persistent job on the engagement context, so it
+	// survives the opening agent's turns and lives until it is closed or the
+	// engagement ends. Guarded by chMu.
+	chMu     sync.Mutex
+	channels map[string]*revChannel
 }
 
 // AgentRecord is a persisted snapshot of one agent's conversation, used to save an
@@ -334,7 +341,7 @@ func (s *Session) emitAsync(ev event.Event) {
 // must not be dropped (as opposed to droppable streaming output).
 func mustDeliver(ev event.Event) bool {
 	switch ev.(type) {
-	case event.AgentState, event.Spawned, event.UserQuestion:
+	case event.AgentState, event.Spawned, event.UserQuestion, event.Channel:
 		return true
 	default:
 		return false
@@ -1327,6 +1334,14 @@ func (a *Agent) dispatch(ctx context.Context, tc llm.ToolCall) (content string, 
 			return fmt.Sprintf("tool %q is not available to %s", tc.Name, a.id), true
 		}
 		return a.doBashBg(tc)
+	case "revshell":
+		// revshell is a sandbox-exec primitive (it stands up a netcat listener and
+		// writes to it inside the sandbox), so gate it by the same per-agent
+		// allow-list as bash_bg; wire grants it only to agents that already have bash.
+		if !allowed(a.cfg.Tools, "revshell") {
+			return fmt.Sprintf("tool %q is not available to %s", tc.Name, a.id), true
+		}
+		return a.doRevshell(tc)
 	case "runtime":
 		return a.doRuntime(), false
 	case "heartbeat":
@@ -2087,6 +2102,11 @@ var primitiveSchemas = map[string]llm.FunctionDef{
 		Name:        "bash_bg",
 		Description: "Run a shell command inside the sandbox as a BACKGROUND job and return immediately with a job id, instead of blocking until it finishes (as `bash` does). Use it for long-running work — a scan, a fuzzing run, a build, a reverse-shell handler or any server/listener you need up. The job runs DETACHED: it, and every process it spawns (e.g. a server thread's subprocess), keeps running until it finishes on its own, you stop it, or the engagement ends — it is NOT killed when this call returns or when your turn ends. Start servers/listeners with bash_bg directly; do NOT background them yourself with a trailing `&` inside a `bash` command. You are notified when the job finishes, and you can also call `wait`. All execution stays confined to the sandbox.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"cmd":{"type":"string","description":"the shell command to run in the background"}},"required":["cmd"]}`),
+	},
+	"revshell": {
+		Name:        "revshell",
+		Description: "Set up and drive a reverse-shell channel inside the sandbox: a named netcat listener on a TCP port that catches a shell connecting back from the target, plus a way to send it commands and read what it prints. Unlike wiring up `nc` by hand with bash_bg, this keeps the listener's input open so you can send command after command to the same connected shell, and it surfaces the channel in the operator's UI as a dedicated pane the user can type into too. All of it stays inside the sandbox. Actions: `open` — start a listener (give `name` and `port`); `send` — write one command line to the channel's shell (give `name` and `data`) and return the output that follows; `read` — return the channel's recent output (give `name`, optional `bytes`); `list` — show every channel, its port, whether its listener is up, and how much output it has captured; `close` — stop the listener and remove the channel (give `name`). Open the listener BEFORE triggering the payload on the target that connects back to it.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","description":"open | send | read | list | close"},"name":{"type":"string","description":"channel name (a short label, e.g. \"foothold\"); required for open/send/read/close"},"port":{"type":"integer","description":"TCP port the listener binds (open only)"},"data":{"type":"string","description":"the command line to send to the connected shell (send only)"},"bytes":{"type":"integer","description":"max bytes of recent output to return (read only; default 4096)"}},"required":["action"]}`),
 	},
 	"runtime": {
 		Name:        "runtime",

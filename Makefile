@@ -16,9 +16,8 @@ vet:
 	go vet ./...
 
 dist: icon
-	mkdir -p dist
-	GOOS=linux   GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/oline-linux-amd64      ./cmd/oline
-	GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/oline-windows-amd64.exe ./cmd/oline
+	GOOS=linux   GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o oline-linux-amd64      ./cmd/oline
+	GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o oline-windows-amd64.exe ./cmd/oline
 
 # Embed the Windows .exe icon from assets/oline.ico (generates a committed .syso
 # the Go linker picks up for Windows builds). Needs the rsrc tool (fetched once).
@@ -27,4 +26,4 @@ cmd/oline/rsrc_windows_amd64.syso: assets/oline.ico
 	go run github.com/akavel/rsrc@latest -ico assets/oline.ico -arch amd64 -o $@
 
 clean:
-	rm -rf dist oline oline.exe
+	rm -f oline oline.exe oline-linux-amd64 oline-windows-amd64.exe
