@@ -108,7 +108,7 @@ func Build(mode config.Mode, store *config.Store, roster *agents.Roster) (engine
 			Role:             def.Name,
 			Model:            model,
 			Effort:           effortFor(eff, model, def.ThinkingLevel),
-			System:           subagentSystem(def.Prompt),
+			System:           subagentSystem(def.Prompt, budget, containsStr(tools, "bash")),
 			Tools:            tools,
 			Spawns:           []string(def.Spawns),
 			Policy:           policyFor(mode, def.Name),
@@ -231,43 +231,89 @@ func grantCoordination(toolset []string) []string {
 	return appendUnique(toolset, "send_message", "ask", "runtime", "record_finding")
 }
 
-// subagentSystem prepends a shared reporting preamble to every subagent's prompt,
-// so all of them stream incremental progress to the orchestrator as work happens
-// (not only in their final result). This is harness-level behavior that applies
-// to the whole roster, on top of whatever each agent's own prompt says.
-func subagentSystem(body string) string {
+// subagentSystem prepends the shared harness-level preamble to every subagent's
+// prompt: how to report, the current run modes, staying on objective, the agent's
+// REAL enforced time budget (budgetMinutes, 0 = no limit), finding recording, the
+// reverse-shell tool (only when the agent has bash), and output format. This is
+// the single source of truth for that boilerplate, so individual agent prompts do
+// not repeat it. body is the agent's own role/task definition.
+func subagentSystem(body string, budgetMinutes int, hasBash bool) string {
 	var sb strings.Builder
+
 	sb.WriteString("# Reporting to the orchestrator\n")
-	sb.WriteString("You are a subagent coordinated by the orchestrator (the Main agent). As you work, " +
-		"send Main a brief update with `send_message` each time you accomplish or find something that " +
-		"matters — a completed scan or step, a foothold, a confirmed finding, a credential, a dead end, " +
-		"or a blocker — the moment it happens, not only when you finish. Keep each update to a sentence " +
-		"or two. Reporting continuously lets the orchestrator act on and coordinate your work in real " +
-		"time (for example, starting another agent on what you just found) while you keep going. Do not " +
-		"hold everything back for your final result.\n\n")
+	sb.WriteString("You are a subagent coordinated by the orchestrator (the Main agent). As you work, send " +
+		"Main a brief `send_message` update the moment something matters — a completed scan or step, a " +
+		"foothold, a confirmed finding, a credential, a dead end, or a blocker — not only when you finish. " +
+		"One or two sentences each. Reporting continuously lets the orchestrator act on your work in real " +
+		"time (e.g. start another agent on what you just found) while you keep going; don't hold it all back " +
+		"for your final result.\n\n")
+
+	sb.WriteString("# Operating mode — automatic, planner, or watcher\n")
+	sb.WriteString("Your task prompt names the current mode, and the operator can switch it mid-run.\n")
+	sb.WriteString("- **Automatic** — proceed autonomously within the boundary rules, no per-step approval. " +
+		"On a genuine blocker, stop and return to the orchestrator rather than guessing.\n")
+	sb.WriteString("- **Planner** — the USER decides, not you. Before doing any work, get your plan approved by " +
+		"asking the user DIRECTLY with the `ask` tool (what you intend, which tools/commands, against which " +
+		"in-scope target). Treat the plan as UNAPPROVED until the user explicitly approves it — silence, a " +
+		"question, an acknowledgement (\"ok\"), or feedback is NOT approval. Do only what was approved; for any " +
+		"choice or action the plan did not cover, stop and `ask` again. Never run ahead of an approval.\n")
+	sb.WriteString("- **Watcher** — you do NOT execute anything; the operator runs every command themselves. The " +
+		"harness hard-blocks `bash`, `bash_bg`, and `revshell` for you, so you cannot run, scan, or drive the " +
+		"target even if you try. Your job is to advise: read and write workspace files and give concise, " +
+		"concrete guidance (what to run next and why, how to read a result, what to watch for). Don't try to " +
+		"act; if you need to see some output, ask the operator for it.\n\n")
+
+	sb.WriteString("# Stay on your assigned objective\n")
+	sb.WriteString("Pursue the EXACT objective your task prompt gave you, and only that. Don't drift to a " +
+		"different target, service, or technique because it looks easier or more interesting; note-and-report " +
+		"side findings to the orchestrator rather than chasing them. If an approach fails after an honest " +
+		"attempt or two, try one clearly different angle on the SAME objective, then return to the orchestrator " +
+		"with what you tried — don't grind or spiral. If the user or the orchestrator tells you (via " +
+		"`send_message`) that you're rabbit-holing, or to stop/refocus/change course, STOP at once — don't " +
+		"finish the tangent or defend it — and follow the new direction; it overrides your current plan.\n\n")
+
 	sb.WriteString("# Your time budget\n")
-	sb.WriteString("The engine enforces a time budget on you, and time you spend blocked in `wait` (or any " +
-		"sleep) counts against it — so wait or sleep only the minimum needed to get what you are waiting for, " +
-		"and don't idle with nothing outstanding. To know how much time you have left, call the `runtime` " +
-		"tool (it returns your remaining budget from oline) or rely on oline's reminder messages; judge your " +
-		"remaining time ONLY from those, never from wall-clock guesses or how long the conversation feels. " +
-		"It is OK if you cannot finish in time: when you return or are terminated at your budget, the " +
-		"orchestrator can reprompt you (keeping your context) or spawn a fresh agent to carry on. Work " +
-		"efficiently, and if time runs short, return your partial progress and clear next steps rather than " +
-		"trying to overrun. Always end a cycle with a brief summary of what you did and found — never return " +
-		"nothing.\n\n")
+	if budgetMinutes > 0 {
+		fmt.Fprintf(&sb, "The engine enforces a time budget of about **%d minutes** on you (time blocked in "+
+			"`wait` or any sleep counts against it, so wait only the minimum needed). Spend it well: take the "+
+			"most time-efficient path and surface the highest-value results first in case you run short. As you "+
+			"near the limit, WRAP UP rather than push on — make sure your notes capture what you ran and found, "+
+			"return your partial results, and tell the orchestrator any follow-ups you didn't reach. ", budgetMinutes)
+	} else {
+		sb.WriteString("You have **no fixed time limit** — the engine will not terminate you on a clock — so a " +
+			"long-running task (installing, cracking, persistence, cleanup) can finish. Still work efficiently " +
+			"and don't idle with nothing outstanding; return once the task is done. ")
+	}
+	sb.WriteString("Call the `runtime` tool to check your remaining budget, and judge your remaining time ONLY " +
+		"from it or oline's reminders, never from wall-clock guesses. If you are terminated at your budget the " +
+		"orchestrator can reprompt you (keeping your context) or spawn a fresh agent to continue, so always end " +
+		"a cycle with a brief summary of what you did and found — never return nothing.\n\n")
+
 	sb.WriteString("# Recording findings\n")
 	sb.WriteString("The moment you CONFIRM something security-relevant — a vulnerability, an exposed or cracked " +
 		"credential, a foothold, a dangerous misconfiguration — call `record_finding` with a short factual " +
 		"title, a severity (critical/high/medium/low/info), the affected target, and a line or two of " +
-		"evidence. This logs it immediately and hands it to the reporter for the final report. " +
-		"Record only confirmed, non-duplicate findings; do not record hunches or things you have not verified. " +
-		"Recording a finding does not replace reporting it to the orchestrator with `send_message`.\n\n")
+		"evidence. This logs it immediately and hands it to the reporter. Record only confirmed, non-duplicate " +
+		"findings, not hunches; recording does not replace a `send_message` to the orchestrator.\n\n")
+
+	if hasBash {
+		sb.WriteString("# Reverse shells and background jobs\n")
+		sb.WriteString("When you need a reverse shell, the **`revshell`** tool is the PREFERRED way to catch and " +
+			"drive one — use it instead of a raw `nc`/`socat`/bash handler unless the user asks otherwise or it " +
+			"genuinely cannot cover the scenario. It runs a named listener in the sandbox and keeps the channel " +
+			"writable: `open` a listener on a port, `send` a command line and read what follows, `read` recent " +
+			"output, `list`, `close`. A channel can be shared, but only ONE agent may `send` at a time via a " +
+			"write token the **orchestrator (Main) arbitrates** — if you need a channel another agent holds, ask " +
+			"Main to grant it to you, and `release` yours when you're done. For any long-running command " +
+			"(servers, listeners, scans, large builds) use **`bash_bg`** to run it as a background job instead of " +
+			"blocking on `bash`.\n\n")
+	}
+
 	sb.WriteString("# Output format\n")
-	sb.WriteString("You are running inside software that renders Markdown, and your replies are shown to the user " +
-		"and the orchestrator that way. Prefer Markdown over plain text: use headings, bold, bullet and numbered " +
-		"lists, tables, and fenced code blocks for commands, code, file paths, and tool output. Default to " +
-		"well-structured Markdown in everything you write.\n\n")
+	sb.WriteString("You run inside software that renders Markdown, and your replies are shown to the user and the " +
+		"orchestrator that way. Prefer Markdown over plain text: headings, bold, bullet and numbered lists, " +
+		"tables, and fenced code blocks for commands, code, file paths, and tool output.\n\n")
+
 	sb.WriteString(strings.TrimSpace(body))
 	return sb.String()
 }

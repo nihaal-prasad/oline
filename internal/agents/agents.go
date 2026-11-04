@@ -3,7 +3,6 @@
 package agents
 
 import (
-	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -94,11 +93,10 @@ type AgentDef struct {
 }
 
 // OrchDef is the orchestrator's prompt bundle. The orchestrator gets the full
-// toolset (no tools allow-list) and the mode's personality/methodology.
+// toolset (no tools allow-list) and the mode's personality.
 type OrchDef struct {
 	SystemTemplate string
 	Personality    string
-	Methodology    string // pentester only; "" for exploiter
 }
 
 // Roster is a fully-loaded mode: orchestrator + every subagent, with user
@@ -165,12 +163,6 @@ func LoadRoster(mode config.Mode, defaultsFS fs.FS, store *config.Store) (*Roste
 		return nil, fmt.Errorf("agents: PERSONALITY.md: %w", err)
 	} else {
 		orch.Personality = string(data)
-	}
-	// METHODOLOGY.md is pentester-only; tolerate absence.
-	if data, _, err := readResolved("METHODOLOGY.md"); err == nil {
-		orch.Methodology = string(data)
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("agents: METHODOLOGY.md: %w", err)
 	}
 
 	// Enumerate subagent files from the embedded roster, then read each resolved

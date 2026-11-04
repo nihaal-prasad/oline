@@ -222,3 +222,20 @@ func TestKillReverseShellPane(t *testing.T) {
 		t.Error("Ctrl-b K should have reaped the reverse-shell pane")
 	}
 }
+
+// TestSocatEnsureScript: the auto-install snippet short-circuits when socat is
+// present, tries a package manager otherwise, and ends with a status marker the
+// ensureSocat switch keys off.
+func TestSocatEnsureScript(t *testing.T) {
+	for _, want := range []string{
+		"command -v socat",
+		"apt-get install -y socat",
+		"socat: already present",
+		"socat: installed",
+		"socat: install failed",
+	} {
+		if !strings.Contains(socatEnsureScript, want) {
+			t.Errorf("socatEnsureScript missing %q", want)
+		}
+	}
+}

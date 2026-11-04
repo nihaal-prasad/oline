@@ -255,7 +255,7 @@ func HistoryDir() string {
 
 // WriteDefaults scaffolds the embedded defaults for a mode into its on-disk config
 // directory (<HostRoot>/config/<mode>/): config.yml, models.yml, and every prompt
-// file (SYSTEM_TEMPLATE.md, PERSONALITY.md, METHODOLOGY.md, agents/*.md). Those
+// file (SYSTEM_TEMPLATE.md, PERSONALITY.md, agents/*.md). Those
 // files override the embedded defaults at load time, so writing them out lets a
 // user edit any aspect — models, costs, token ceilings, time budgets, tools,
 // personalities, and every agent prompt — in plain files. Existing files are left

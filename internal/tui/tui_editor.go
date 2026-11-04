@@ -34,12 +34,9 @@ func (m *model) openEditor() {
 	// TUI settings: terminal-UI preferences (not engagement behavior).
 	m.eItems = append(m.eItems, eItem{kind: "tui", name: "customizable panes"})
 	// The orchestrator's prompt bundle, each editable like a subagent's prompt: its
-	// system prompt, its personality, and (pentester only) its methodology.
+	// system prompt and its personality.
 	m.eItems = append(m.eItems, eItem{kind: "orchestrator", name: "system prompt"})
 	m.eItems = append(m.eItems, eItem{kind: "orchestrator", name: "personality"})
-	if strings.TrimSpace(m.roster.Orchestrator.Methodology) != "" {
-		m.eItems = append(m.eItems, eItem{kind: "orchestrator", name: "methodology"})
-	}
 	// The three model tiers: every agent runs on one of these, and compaction uses
 	// small. Configuring them here is the same as the first-run setup.
 	m.eItems = append(m.eItems,
@@ -163,8 +160,6 @@ func orchFile(name string) string {
 	switch name {
 	case "personality":
 		return "PERSONALITY.md"
-	case "methodology":
-		return "METHODOLOGY.md"
 	default:
 		return "SYSTEM_TEMPLATE.md"
 	}
@@ -175,8 +170,6 @@ func (m *model) orchPromptValue(name string) string {
 	switch name {
 	case "personality":
 		return m.roster.Orchestrator.Personality
-	case "methodology":
-		return m.roster.Orchestrator.Methodology
 	default:
 		return m.roster.Orchestrator.SystemTemplate
 	}
@@ -432,8 +425,6 @@ func (m *model) saveItem() {
 		switch it.name {
 		case "personality":
 			m.roster.Orchestrator.Personality = prompt
-		case "methodology":
-			m.roster.Orchestrator.Methodology = prompt
 		default:
 			m.roster.Orchestrator.SystemTemplate = prompt
 		}
@@ -636,7 +627,7 @@ func (m *model) viewEditor() string {
 			}
 			boxLabel := "system prompt"
 			if it.kind == "orchestrator" {
-				boxLabel = it.name // "system prompt" | "personality" | "methodology"
+				boxLabel = it.name // "system prompt" | "personality"
 			}
 			right.WriteString(marker + boxLabel + "\n" + m.ePrompt.View() + "\n")
 		}

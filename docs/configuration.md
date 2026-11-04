@@ -15,7 +15,6 @@ Everything oline keeps on the host lives under one root directory: `~/oline`, or
       models.yml             #   optional per-mode provider/model overrides
       SYSTEM_TEMPLATE.md      #   orchestrator prompt
       PERSONALITY.md          #   orchestrator personality
-      METHODOLOGY.md          #   methodology (pentester)
       agents/<name>.md        #   each subagent's prompt and frontmatter
     exploiter/
       ...                     #   same layout
@@ -62,7 +61,7 @@ with the defaults. Edited files load on the next run.
 | Time limits | `config.yml` `budget.defaultMinutes`; per agent `agents.<name>.time-budget` or frontmatter (or `Ctrl-b b` live) |
 | An agent's allowed tools or which roles it may spawn | `config.yml` `agents.<name>.tools` / `.spawns`, or frontmatter |
 | An agent or the orchestrator's system prompt | `-edit`, or the `.md` file under `config/<mode>/` |
-| The orchestrator's personality / methodology | `PERSONALITY.md` / `METHODOLOGY.md` under `config/<mode>/` |
+| The orchestrator's personality | `PERSONALITY.md` under `config/<mode>/` |
 | Max concurrent agents (orchestrator included) | `config.yml` `maxConcurrency` |
 | Engagement spend cap (USD) | `config.yml` `budget.maxCostUSD` |
 | Compaction spend ceiling | `config.yml` `budget.maxSummaryCostUSD` |
@@ -155,8 +154,8 @@ a run.
 ## Prompts
 
 Every prompt is a Markdown file you can override: the orchestrator's
-`SYSTEM_TEMPLATE.md` and `PERSONALITY.md` (and `METHODOLOGY.md` for pentester), and
-one `agents/<name>.md` per subagent. A file under `config/<mode>/` replaces the
+`SYSTEM_TEMPLATE.md` and `PERSONALITY.md`, and one `agents/<name>.md` per subagent.
+A file under `config/<mode>/` replaces the
 default, so run `oline -init-config` and edit from there. Each `agents/<name>.md`
 has YAML frontmatter (`tier`, `thinking-level`, `tools`, `spawns`, `time-budget`,
 `max-context-tokens`) followed by the prompt body.
@@ -183,8 +182,7 @@ Open it with `oline -edit`, or `Ctrl-b e` while running. It edits:
 - per provider: the base URL and API key,
 - the live engagement scope,
 - the TUI settings (Customizable Panes),
-- each agent's system prompt, and the orchestrator's system prompt, personality,
-  and (pentester) methodology.
+- each agent's system prompt, and the orchestrator's system prompt and personality.
 
 A tier's prices are edited on that tier's `role` item, below its model selector. A
 blank price is 0. If you point a tier at a model id not in the provider's catalog,

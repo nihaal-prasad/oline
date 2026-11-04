@@ -10,9 +10,9 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// TestEditorSaveOrchestratorPrompt checks the orchestrator's three prompt items
-// (system prompt, personality, methodology) each expose a box and save to their own
-// .md override while updating the matching in-memory roster field.
+// TestEditorSaveOrchestratorPrompt checks the orchestrator's prompt items
+// (system prompt, personality) each expose a box and save to their own .md override
+// while updating the matching in-memory roster field.
 func TestEditorSaveOrchestratorPrompt(t *testing.T) {
 	cases := []struct {
 		item string // the editor sub-item name
@@ -21,11 +21,10 @@ func TestEditorSaveOrchestratorPrompt(t *testing.T) {
 	}{
 		{"system prompt", "SYSTEM_TEMPLATE.md", func(m *model) string { return m.roster.Orchestrator.SystemTemplate }},
 		{"personality", "PERSONALITY.md", func(m *model) string { return m.roster.Orchestrator.Personality }},
-		{"methodology", "METHODOLOGY.md", func(m *model) string { return m.roster.Orchestrator.Methodology }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.item, func(t *testing.T) {
-			m, home := tempHomeModel(t) // pentester → methodology is present
+			m, home := tempHomeModel(t)
 			m.openEditor()
 			i := findItem(m, "orchestrator", tc.item)
 			if i < 0 {
@@ -51,19 +50,6 @@ func TestEditorSaveOrchestratorPrompt(t *testing.T) {
 				t.Errorf("in-memory orchestrator %q not updated", tc.item)
 			}
 		})
-	}
-}
-
-// TestEditorExploiterHasNoMethodology checks the methodology item is hidden for a
-// mode that ships no METHODOLOGY.md (exploiter).
-func TestEditorExploiterHasNoMethodology(t *testing.T) {
-	m := exploiterModel(t)
-	m.openEditor()
-	if findItem(m, "orchestrator", "methodology") >= 0 {
-		t.Error("exploiter should not expose a methodology item")
-	}
-	if findItem(m, "orchestrator", "personality") < 0 {
-		t.Error("exploiter should still expose the personality item")
 	}
 }
 

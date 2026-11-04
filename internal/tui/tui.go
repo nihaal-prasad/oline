@@ -417,18 +417,39 @@ func (m *model) configureDirect(o Options) {
 // textinput's width for the prompt glyph and the cursor cell (see resize()).
 const inputPromptReserve = 6
 
+// Scope/goal placeholders differ by mode: pentester takes in-scope network
+// targets, exploiter takes the application to analyze (local path or an app to
+// fetch). applyModePlaceholders keeps them in step when the wizard's mode changes.
+const (
+	scopePlaceholderPentest = "in-scope only — e.g. 10.0.0.5, 10.0.0.0/24, app.example.com"
+	scopePlaceholderExploit = "application to analyze — a local path, or a name/URL for the installer to fetch (e.g. /opt/acme-server, or \"acmed 2.3.1\")"
+	goalPlaceholderPentest  = "goal — e.g. capture the flag at /root/flag.txt; prove RCE"
+	goalPlaceholderExploit  = "goal — e.g. find and prove an exploitable bug; build a working PoC"
+)
+
+// applyModePlaceholders sets the scope/goal input placeholders for the current mode.
+func (m *model) applyModePlaceholders() {
+	if m.mode == config.ModeExploiter {
+		m.scopeIn.Placeholder = scopePlaceholderExploit
+		m.goalIn.Placeholder = goalPlaceholderExploit
+	} else {
+		m.scopeIn.Placeholder = scopePlaceholderPentest
+		m.goalIn.Placeholder = goalPlaceholderPentest
+	}
+}
+
 func newModel(mode config.Mode, store *config.Store, roster *agents.Roster) *model {
 	si := textinput.New()
-	si.Placeholder = "in-scope only — e.g. 10.0.0.5, 10.0.0.0/24, app.example.com"
+	si.Placeholder = scopePlaceholderPentest
 	if mode == config.ModeExploiter {
-		si.Placeholder = "application to analyze — a local path, or a URL/name for the installer to fetch"
+		si.Placeholder = scopePlaceholderExploit
 	}
 	si.CharLimit = 1024
 	si.Width = 64
 	gi := textinput.New()
-	gi.Placeholder = "goal — e.g. capture the flag at /root/flag.txt; prove RCE"
+	gi.Placeholder = goalPlaceholderPentest
 	if mode == config.ModeExploiter {
-		gi.Placeholder = "goal — e.g. find and prove an exploitable bug; build a working PoC"
+		gi.Placeholder = goalPlaceholderExploit
 	}
 	gi.Width = 64
 	ci := textinput.New()
@@ -1480,6 +1501,8 @@ func (m *model) reloadForMode() {
 			m.roster = r
 		}
 	}
+	// The scope/goal fields are mode-specific; refresh them for the chosen mode.
+	m.applyModePlaceholders()
 }
 
 // startEngagement validates the choice and kicks off sandbox preparation
@@ -1711,6 +1734,13 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	m.refreshLayoutSnapshot() // seed the layout snapshot so even an early save persists it
 	go m.historyLoop(ctx)
 
+	// The operator's reverse-shell catcher pane (Ctrl-b L) needs socat in the
+	// sandbox. In pentester mode, best-effort install it if missing so the feature
+	// is ready; non-fatal (the catcher otherwise reports socat is needed).
+	if m.mode == config.ModePentester {
+		go m.ensureSocat(ctx)
+	}
+
 	prompt := m.composePrompt()
 	go func() { m.resultCh <- m.sess.Run(ctx, orch, prompt) }()
 
@@ -1755,6 +1785,46 @@ func (m *model) emitNotice(level, text string) {
 	select {
 	case m.events <- event.Notice{Level: level, Text: text}:
 	default:
+	}
+}
+
+// socatEnsureScript checks for socat and, if absent, installs it with whatever
+// package manager the sandbox has. Quiet; its last line is one of
+// "socat: already present" / "socat: installed" / "socat: install failed".
+const socatEnsureScript = `set +e
+if command -v socat >/dev/null 2>&1; then echo "socat: already present"; exit 0; fi
+if command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y socat >/dev/null 2>&1
+elif command -v dnf >/dev/null 2>&1; then dnf install -y socat >/dev/null 2>&1
+elif command -v apk >/dev/null 2>&1; then apk add --no-cache socat >/dev/null 2>&1
+elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm socat >/dev/null 2>&1
+elif command -v zypper >/dev/null 2>&1; then zypper --non-interactive install socat >/dev/null 2>&1
+fi
+if command -v socat >/dev/null 2>&1; then echo "socat: installed"; else echo "socat: install failed"; fi`
+
+// ensureSocat best-effort installs socat in the sandbox (as root) so the operator's
+// reverse-shell catcher pane (Ctrl-b L) works. Pentester mode only; non-fatal, and
+// stays quiet when socat is already present.
+func (m *model) ensureSocat(ctx context.Context) {
+	if m.sess == nil || m.sess.Sandbox == nil {
+		return
+	}
+	cctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	var out strings.Builder
+	_, err := m.sess.Sandbox.Exec(cctx, core.AgentID("setup"),
+		sandbox.Cmd{Argv: []string{"bash", "-lc", socatEnsureScript}, Policy: sandbox.Privileged}, &out)
+	s := out.String()
+	switch {
+	case strings.Contains(s, "socat: already present"):
+		// already installed; nothing to say
+	case strings.Contains(s, "socat: installed"):
+		m.emitNotice("info", "installed socat in the sandbox for the reverse-shell catcher (Ctrl-b L)")
+	default:
+		detail := ""
+		if err != nil {
+			detail = " (" + err.Error() + ")"
+		}
+		m.emitNotice("info", "could not auto-install socat"+detail+"; install it in the sandbox to use the reverse-shell catcher (Ctrl-b L)")
 	}
 }
 
@@ -1887,6 +1957,7 @@ func (m *model) composePrompt() string {
 	var b strings.Builder
 	b.WriteString("AUTHORIZED ENGAGEMENT. The user has confirmed written authorization to test the target.\n")
 	fmt.Fprintf(&b, "Mode: %s.\n", m.sess.Mode.String())
+	b.WriteString(m.sandboxBoundaryLine())
 	if m.sess.Mode == core.Watcher {
 		b.WriteString("WATCHER mode: the operator runs every command themselves in the terminal panes; you do NOT execute anything (the harness blocks bash, bash_bg and revshell). Your job is to WATCH and ADVISE: read and write files in the workspace, track the state of play, and give concise, concrete guidance. The operator shares terminal output with you when they want your read on it; ask (with `ask`) if you need more.\n")
 	}
@@ -1953,6 +2024,16 @@ func (m *model) networkPolicyLine() string {
 		return "Network: IPv6 egress is ENABLED for this engagement (the per-agent firewall enforces scope over IPv6 as well as IPv4).\n"
 	}
 	return "Network: outbound non-loopback IPv6 is DISABLED by default (the sandbox firewall drops it for agents; targets are reached over IPv4). If a target is reachable only over IPv6, tell the user to enable it in config (network.allowIPv6) — do not try to work around the block.\n"
+}
+
+// sandboxBoundaryLine states the concrete host boundary for this engagement's
+// backend, so the backend-neutral system prompt gets its WSL-vs-QEMU specifics at
+// runtime (the orchestrator is told to carry this into every delegation).
+func (m *model) sandboxBoundaryLine() string {
+	if m.prepCand.Backend == sandbox.BackendQEMU {
+		return "Sandbox: a disposable QEMU Linux VM (a separate kernel; the host's drives are NOT mounted in it). Everything runs inside this VM. NEVER attempt to escape the VM or reach the host machine or hypervisor. Keep all artifacts in the engagement workspace at " + sandbox.WSLWorkspace + "/<engagement>/.\n"
+	}
+	return "Sandbox: a Kali Linux distro inside WSL on a Windows host. Everything runs inside this Linux environment. NEVER escape WSL or touch the Windows host — no cmd.exe/powershell.exe/wsl.exe/explorer.exe, and never read or write under /mnt/ (the mounted Windows drives). Keep all artifacts in the engagement workspace at " + sandbox.WSLWorkspace + "/<engagement>/.\n"
 }
 
 // ---- running -------------------------------------------------------------

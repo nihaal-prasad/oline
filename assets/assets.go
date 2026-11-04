@@ -20,7 +20,7 @@ var Logo string
 var LogoPNG []byte
 
 // PentesterFS holds the full Pentester roster: SYSTEM_TEMPLATE.md, PERSONALITY.md,
-// METHODOLOGY.md, config.yml, models.yml, and agents/*.md (17 subagents).
+// config.yml, models.yml, and agents/*.md (17 subagents).
 //
 //go:embed pentester
 var PentesterFS embed.FS

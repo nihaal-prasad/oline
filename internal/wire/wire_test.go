@@ -163,11 +163,21 @@ func TestBuildPentester(t *testing.T) {
 		t.Error("recon system prompt lost its own body after prepending the preamble")
 	}
 
-	// Time budgets: recon inherits the config default; the installer is set to no
-	// limit in its frontmatter (installs can run long).
-	def := store.Effective().Budget.DefaultMinutes
-	if def > 0 && recon.BudgetMinutes != def {
-		t.Errorf("recon budget = %d, want config default %d", recon.BudgetMinutes, def)
+	// Time budgets come from each agent's frontmatter now (recon is 15), and the
+	// REAL number is injected into the agent's system prompt by the shared preamble.
+	if recon.BudgetMinutes != 15 {
+		t.Errorf("recon budget = %d, want 15 (from frontmatter)", recon.BudgetMinutes)
+	}
+	if !strings.Contains(recon.System, "15 minutes") {
+		t.Error("recon system prompt should state its real 15-minute budget")
+	}
+	// The shared preamble documents all three run modes (incl. Watcher) and, for a
+	// bash-capable agent, surfaces the reverse-shell tool.
+	if !strings.Contains(recon.System, "Watcher") {
+		t.Error("recon system prompt should document Watcher mode")
+	}
+	if !strings.Contains(recon.System, "revshell") {
+		t.Error("recon (has bash) system prompt should surface the revshell tool")
 	}
 
 	// installer is the ONLY root/privileged agent; it may reach the internet to pull tooling.

@@ -80,29 +80,3 @@ func TestPentesterToolScoping(t *testing.T) {
 		t.Errorf("researcher must have web_search (the internet role): %v", researcher.Tools)
 	}
 }
-
-func TestMethodologyPresence(t *testing.T) {
-	// Pentester has METHODOLOGY.md; Exploiter does not.
-	ps, err := config.Load(config.ModePentester, assets.PentesterFS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pr, err := agents.LoadRoster(config.ModePentester, assets.PentesterFS, ps)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if pr.Orchestrator.Methodology == "" {
-		t.Error("pentester should have METHODOLOGY.md")
-	}
-	es, err := config.Load(config.ModeExploiter, assets.ExploiterFS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	er, err := agents.LoadRoster(config.ModeExploiter, assets.ExploiterFS, es)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if er.Orchestrator.Methodology != "" {
-		t.Error("exploiter should not have METHODOLOGY.md")
-	}
-}

