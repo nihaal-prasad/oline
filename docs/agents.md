@@ -34,9 +34,9 @@ installer.
 
 ### Exploiter
 
-Develops proof-of-concept exploits for a target. It can start from a vulnerability
-report, or discover the vulnerabilities itself when there is none. The orchestrator
-coordinates 9 subagents.
+Develops proof-of-concept exploits for a target. It discovers the vulnerabilities
+itself (there is no pre-supplied report), then weaponizes them. The orchestrator
+coordinates 8 subagents.
 
 The "scope" here is the application to analyze: a local path, or a URL/name for the
 installer to fetch. The target runs locally, so agents are network-isolated and
@@ -45,7 +45,6 @@ never attack a remote host; only the installer (download) and judge/skeptic
 
 | subagent | role |
 |---|---|
-| intake | read and understand a vulnerability report, when one is provided |
 | installer | install the target and tooling (runs as root) |
 | analyst | analyze the target and the bug |
 | exploiter | build the exploit |
