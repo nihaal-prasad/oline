@@ -143,7 +143,6 @@ Press `Ctrl-b`, then one of these keys:
 | `t` | toggle agent thoughts |
 | `m` | cycle the operating mode (automatic / planner / watcher) |
 | `a` | share the focused pane's current content with the AI |
-| `A` | re-enable auto-layout for the focused tab |
 | `b` | change the focused agent's time budget |
 | `e` | open the model/provider editor |
 | `?` | show or hide the Options pane |
@@ -155,21 +154,34 @@ agent (or runs a command in a focused shell pane).
 
 ### Windows (tabs)
 
-`Ctrl-b c` opens a new window with its own panes, `Ctrl-b n` cycles to the next,
-`Ctrl-b 1` to `Ctrl-b 9` jump by number, and `Ctrl-b &` closes the current one (not
-the last). When more than one window exists, a tab strip appears in the header;
-click a tab to switch to it.
+`Ctrl-b c` opens a new window, `Ctrl-b n` cycles to the next, `Ctrl-b 1` to
+`Ctrl-b 9` jump by number, and `Ctrl-b &` closes the current one (not the last). When
+more than one window exists, a tab strip appears in the header; click a tab to switch
+to it.
 
-#### The auto-layout tab
+By default the tabs have fixed identities that constrain the kind of pane they hold,
+and the Options sidebar shows only the relevant choices for the active tab:
 
-The second tab starts empty and arranges spawned subagents on its own. The first
-subagent opens a single pane; the second splits it left/right; the third splits the
-left pane into top/bottom; the fourth splits the right pane into top/bottom. Once all
-four panes are full, the next subagent takes over a pane whose subagent has finished,
-or, if all are still running, the pane with the longest-running subagent. Any edit
-you make to that tab (splitting, closing, moving, or retargeting a pane) cancels the
-auto-layout for it. `Ctrl-b A` re-enables auto-layout for the focused tab, rebuilding
-it from the current subagents; only one tab is auto at a time.
+- **Info** (tab 1): the orchestrator plus the live Summary and Diagram. Its panes
+  only ever show those info views.
+- **Subagents** (tab 2): the subagent panes, arranged automatically (below). Its
+  panes only ever show subagents.
+- **Shell** (tab 3 and any you open with `Ctrl-b c`): command panes (shells,
+  terminals, reverse-shell channels). It starts with one shell pane.
+
+You can resize and split panes and switch a pane's view on any tab; you just can't
+bring a different category of pane onto a tab (for example a subagent onto the Info
+tab). To get the old free-form behavior back, turn on **Customizable Panes** in the
+settings editor (below).
+
+#### The Subagents auto-layout
+
+The Subagents tab arranges spawned subagents on its own. The first subagent opens a
+single pane; the second splits it left/right; the third splits the left pane into
+top/bottom; the fourth splits the right pane into top/bottom. Once all four panes
+exist, the next subagent takes over the pane showing the oldest subagent. You can
+resize the panes, split more, and switch a pane to a different subagent; the
+auto-layout keeps holding, so the next spawn still replaces the oldest.
 
 ### Command panes
 
@@ -245,6 +257,13 @@ run re-applies the firewall and tells the orchestrator the allowed scope changed
 and (pentester) `methodology`. Select one and press Enter to edit it in a box; `Tab`
 moves between fields and the box, `alt+up` / `alt+down` resize it, and `Ctrl+S`
 saves. See [configuration.md](configuration.md#the-in-app-editor).
+
+### TUI settings
+
+`Ctrl-b e` also lists a `tui` item, `customizable panes`. Set it to `true` to turn
+off the fixed Info / Subagents / Shell tabs and the Subagents auto-layout: every tab
+becomes free-form with numeric names, any pane can show anything, and nothing is
+enforced. It is `false` by default and applies to the next engagement.
 
 ### Change a time budget while running
 

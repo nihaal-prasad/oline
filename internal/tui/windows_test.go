@@ -76,8 +76,9 @@ func TestWindowsCreateSwitchKill(t *testing.T) {
 		t.Error("tab strip should be empty with a single window")
 	}
 	m.newWindow()
-	if !strings.Contains(ansi.Strip(m.renderTabs()), "2") {
-		t.Errorf("tab strip missing window 2: %q", ansi.Strip(m.renderTabs()))
+	out := ansi.Strip(m.renderTabs())
+	if !strings.Contains(out, m.windows[0].name) || !strings.Contains(out, m.windows[1].name) {
+		t.Errorf("tab strip missing a window: %q", out)
 	}
 }
 

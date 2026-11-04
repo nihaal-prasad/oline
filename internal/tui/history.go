@@ -155,14 +155,15 @@ func (m *model) refreshLayoutSnapshot() {
 	m.saveWindow() // mirror the active window's live root/focus/zoom into m.windows
 	wins := make([]savedWindow, 0, len(m.windows))
 	for _, w := range m.windows {
-		// Don't persist a lone shell tab: a shell can't be restored, so it would come
-		// back as a stray Main tab and the default shell tab would pile up on top of it
-		// each resume. (A fresh default shell tab is re-created on resume anyway.)
-		// The auto-layout tab is transient (re-created empty on next start) and holds
-		// live agent panes that shouldn't be restored as a frozen layout; skip it.
-		if w.auto {
+		// Enforced tabs (Subagents / Shell) are transient and rebuilt deterministically
+		// on resume, so they are not persisted as a frozen layout. (Enforced mode
+		// doesn't restore a saved layout at all; this keeps a stray save from leaking
+		// into a later customizable run.)
+		if w.kind == tabSubagents || w.kind == tabShell {
 			continue
 		}
+		// Don't persist a lone command/empty tab either: its content can't be restored
+		// and would come back as a stray Main tab.
 		if w.root != nil && w.root.leaf && (w.root.shell || w.root.rev || w.root.term || w.root.empty) {
 			continue
 		}

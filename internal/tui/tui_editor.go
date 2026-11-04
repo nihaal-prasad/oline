@@ -27,6 +27,8 @@ func (m *model) openEditor() {
 	// Scope first: it can be changed live while agents run (re-applies the firewall
 	// and tells the orchestrator).
 	m.eItems = append(m.eItems, eItem{kind: "scope", name: "in-scope targets"})
+	// TUI settings: terminal-UI preferences (not engagement behavior).
+	m.eItems = append(m.eItems, eItem{kind: "tui", name: "customizable panes"})
 	// The orchestrator's prompt bundle, each editable like a subagent's prompt: its
 	// system prompt, its personality, and (pentester only) its methodology.
 	m.eItems = append(m.eItems, eItem{kind: "orchestrator", name: "system prompt"})
@@ -84,6 +86,14 @@ func (m *model) buildFields() {
 	case "scope":
 		m.eFields = []textinput.Model{
 			mk("in-scope targets (IPs / CIDRs / domains)", m.scopeIn.Value(), false),
+		}
+	case "tui":
+		val := "false"
+		if m.store.Effective().TUI.CustomizablePanes {
+			val = "true"
+		}
+		m.eFields = []textinput.Model{
+			mk("customizable panes (true|false)", val, false),
 		}
 	case "role":
 		// A tier's model, plus that model's per-1M-token prices (which feed the live
@@ -420,6 +430,23 @@ func (m *model) saveItem() {
 			m.roster.Orchestrator.SystemTemplate = prompt
 		}
 		m.eStatus = styleGreenRender("saved orchestrator " + it.name + " (applies to the next engagement)")
+	case "tui":
+		v := strings.ToLower(strings.TrimSpace(m.eFields[0].Value()))
+		var on bool
+		switch v {
+		case "true", "1", "yes", "on":
+			on = true
+		case "false", "0", "no", "off":
+			on = false
+		default:
+			m.eStatus = styleErr.Render("enter true or false")
+			return
+		}
+		if err := m.store.SaveTUICustomizablePanes(on); err != nil {
+			m.eStatus = styleErr.Render("save: " + err.Error())
+			return
+		}
+		m.eStatus = styleGreenRender(fmt.Sprintf("saved customizable panes = %v (applies to the next engagement)", on))
 	case "scope":
 		raw := strings.TrimSpace(m.eFields[0].Value())
 		m.applyScopeLive(raw)
@@ -626,6 +653,8 @@ func (m *model) fieldLabels(kind string) []string {
 		return []string{"baseURL", "API key"}
 	case "scope":
 		return []string{"in-scope targets"}
+	case "tui":
+		return []string{"customizable panes (true|false)"}
 	case "role":
 		return []string{"model (provider/model-id)", "input $/1M", "output $/1M", "cache-read $/1M", "cache-write $/1M"}
 	case "orchestrator":

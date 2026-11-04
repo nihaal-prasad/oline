@@ -41,6 +41,16 @@ type Root struct {
 	Backup         Backup                   `yaml:"backup"`
 	Budget         Budget                   `yaml:"budget"`
 	Network        Network                  `yaml:"network"`
+	TUI            TUISettings              `yaml:"tui"`
+}
+
+// TUISettings holds terminal-UI preferences (not engagement behavior).
+type TUISettings struct {
+	// CustomizablePanes falls back to the fully customizable panes/tabs. Off by
+	// default: tabs have fixed identities (Info / Subagents / Shell) that enforce
+	// which pane types they hold, and the Subagents tab auto-arranges subagents. On,
+	// every tab is free-form with numeric names and no auto-layout.
+	CustomizablePanes bool `yaml:"customizablePanes"`
 }
 
 // Network controls the sandbox's per-agent network policy.
@@ -674,6 +684,34 @@ func (s *Store) SaveModelRole(tier, selector string) error {
 	}
 	roles[strings.ToLower(tier)] = selector
 	userRoot["modelRoles"] = roles
+	if err := os.MkdirAll(s.userDir, 0o700); err != nil {
+		return fmt.Errorf("config: creating %s: %w", s.userDir, err)
+	}
+	data, err := yaml.Marshal(userRoot)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(userCfgPath, data, 0o600)
+}
+
+// SaveTUICustomizablePanes persists the Customizable Panes TUI setting into the
+// user config layer (~/oline/config/<mode>/config.yml) and applies it in memory.
+func (s *Store) SaveTUICustomizablePanes(v bool) error {
+	s.eff.TUI.CustomizablePanes = v
+	userCfgPath := filepath.Join(s.userDir, "config.yml")
+	var userRoot map[string]any
+	if data, err := os.ReadFile(userCfgPath); err == nil {
+		_ = yaml.Unmarshal(data, &userRoot)
+	}
+	if userRoot == nil {
+		userRoot = map[string]any{}
+	}
+	tui, _ := userRoot["tui"].(map[string]any)
+	if tui == nil {
+		tui = map[string]any{}
+	}
+	tui["customizablePanes"] = v
+	userRoot["tui"] = tui
 	if err := os.MkdirAll(s.userDir, 0o700); err != nil {
 		return fmt.Errorf("config: creating %s: %w", s.userDir, err)
 	}

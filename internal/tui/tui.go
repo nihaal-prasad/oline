@@ -1530,7 +1530,19 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	mainLeaf.parent, center.parent = root, root
 	m.paneRoot = root
 	m.focusPane = mainLeaf
-	m.windows = []*windowState{{root: m.paneRoot, focus: m.focusPane, name: "1"}}
+	if m.customizablePanes() {
+		// Fully customizable: a single numeric tab with the default panes; the user
+		// adds tabs/panes themselves, with no enforcement or auto-layout.
+		m.windows = []*windowState{{root: root, focus: mainLeaf, name: "1", kind: tabFree}}
+	} else {
+		// Enforced: tab 1 "Info" holds the default info panes; tab 2 "Subagents"
+		// starts empty and auto-arranges spawned subagents.
+		sub := newEmptyLeaf()
+		m.windows = []*windowState{
+			{root: root, focus: mainLeaf, name: tabInfo.label(), kind: tabInfo},
+			{root: sub, focus: sub, name: tabSubagents.label(), kind: tabSubagents},
+		}
+	}
 	m.winIdx = 0
 	m.shellCh = make(chan shellMsg, 256)
 	m.shells = map[core.AgentID]*shellState{}
@@ -1572,20 +1584,22 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	if m.resume && m.loadHist {
 		if eh, err := loadHistory(m.engagement); err == nil {
 			m.restoreHistory(eh.Agents)
-			m.restoreLayout(eh.Windows, eh.WinIdx) // bring back the prior pane layout
+			// Only the fully-customizable mode restores a saved free-form layout; the
+			// enforced tabs (Info / Subagents) are deterministic, so they are kept as
+			// built above.
+			if m.customizablePanes() {
+				m.restoreLayout(eh.Windows, eh.WinIdx)
+			}
 			m.writeln(core.Main, styleMuted.Render("── restored previous conversation history ──"))
 		} else {
 			m.writeln(core.Main, styleWarn.Render("could not load saved conversation history: "+err.Error()))
 		}
 	}
 
-	// Ensure a second tab for subagent panes: when the layout has only the main tab,
-	// add an empty auto-layout tab. It starts blank; as the orchestrator spawns
-	// subagents, panes open there on their own (see autoPlaceSpawn). Done after the
-	// windows are finalized so a restore can't orphan it. Stay on the main tab.
-	if len(m.windows) == 1 {
-		auto := newEmptyLeaf()
-		m.windows = append(m.windows, &windowState{root: auto, focus: auto, name: strconv.Itoa(len(m.windows) + 1), auto: true})
+	// Enforced mode on resume: the subagents were restored (no spawn events fire for
+	// them), so populate the Subagents tab from the live subagents now.
+	if !m.customizablePanes() {
+		m.rebuildSubagentsTab()
 	}
 
 	start := "engagement starting"
@@ -2007,7 +2021,6 @@ func (m *model) mouseRelease(x, y int) {
 	m.dragPane = nil
 	if m.dragMoved {
 		if dest := paneAt(m.paneRoot, x, y); dest != nil && dest != src {
-			m.cancelAutoActive("you moved a pane")
 			m.swapPaneViews(src, dest)
 			m.focusPane = dest
 			m.relayout()
@@ -2248,8 +2261,6 @@ func (m *model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cycleMode()
 		case "a":
 			m.sharePaneToAI()
-		case "A":
-			m.enableAutoHere()
 		case "q":
 			m.shutdown()
 			return m, tea.Quit
@@ -2390,7 +2401,6 @@ func (m *model) doSplit(d paneDir) {
 	if m.paneRoot == nil || m.focusPane == nil {
 		return
 	}
-	m.cancelAutoActive("you split a pane")
 	m.zoom = false
 	m.paneRoot, m.focusPane = splitPane(m.paneRoot, m.focusPane, d, m.focusedAgent())
 	m.relayout()
@@ -2400,7 +2410,6 @@ func (m *model) closePaneCmd() {
 	if m.paneRoot == nil || m.focusPane == nil {
 		return
 	}
-	m.cancelAutoActive("you closed a pane")
 	m.reapShell(m.focusPane)
 	m.reapRev(m.focusPane)
 	m.reapTerm(m.focusPane)
@@ -2499,13 +2508,34 @@ func (m *model) activateWindow(i int) {
 	m.relayout()
 }
 
-// newWindow opens a fresh window (tab) showing the orchestrator and switches to it.
+// newWindow opens a fresh window (tab) and switches to it. In customizable mode it
+// is a numeric free tab showing the orchestrator; in enforced mode it is a "Shell"
+// tab that starts with one shell pane.
 func (m *model) newWindow() {
 	m.saveWindow()
-	root := newLeaf(core.Main)
-	m.windows = append(m.windows, &windowState{root: root, focus: root, name: strconv.Itoa(len(m.windows) + 1)})
+	var w *windowState
+	if m.customizablePanes() {
+		root := newLeaf(core.Main)
+		w = &windowState{root: root, focus: root, name: strconv.Itoa(len(m.windows) + 1), kind: tabFree}
+	} else {
+		leaf := m.createShellLeaf() // a Shell tab is usable immediately
+		w = &windowState{root: leaf, focus: leaf, name: tabShell.label(), kind: tabShell}
+	}
+	m.windows = append(m.windows, w)
 	m.activateWindow(len(m.windows) - 1)
 	m.status = "new window " + m.windows[m.winIdx].name
+}
+
+// renumberTabs refreshes tab names: numeric for free tabs, the kind label for
+// enforced tabs. Called after the window set changes.
+func (m *model) renumberTabs() {
+	for j, w := range m.windows {
+		if w.kind == tabFree {
+			w.name = strconv.Itoa(j + 1)
+		} else {
+			w.name = w.kind.label()
+		}
+	}
 }
 
 // nextWindow cycles to the next window.
@@ -2541,9 +2571,7 @@ func (m *model) killWindow() {
 	i := m.winIdx
 	m.reapShells(m.paneRoot) // cancel any shells living in the window being closed
 	m.windows = append(m.windows[:i], m.windows[i+1:]...)
-	for j, w := range m.windows {
-		w.name = strconv.Itoa(j + 1)
-	}
+	m.renumberTabs()
 	if i >= len(m.windows) {
 		i = len(m.windows) - 1
 	}
@@ -2678,9 +2706,11 @@ func (m *model) sendDiagram() {
 // reopened — just navigate a pane onto it). A live shell pane is never clobbered:
 // a different non-shell pane is retargeted instead.
 func (m *model) setFocus(id core.AgentID) {
-	// Retargeting a pane changes which subagent/view it shows — a user edit that
-	// cancels the auto-layout on this tab.
-	m.cancelAutoActive("you changed a pane's view")
+	// Enforced mode restricts which views a tab may show; ignore a retarget to a view
+	// that isn't allowed on the active tab (the roster won't offer those anyway).
+	if !m.viewAllowedHere(id) {
+		return
+	}
 	p := m.focusPane
 	if p != nil && (p.shell || p.rev || p.term) {
 		// A command pane (shell / reverse-shell) can't just be retargeted — its live
@@ -2727,11 +2757,11 @@ func (m *model) firstViewableLeaf() *pane {
 // The two info views use their synthetic ids so setFocus can switch a pane onto
 // them.
 func (m *model) navOrder() []core.AgentID {
-	order := []core.AgentID{core.Main, summaryPaneID, diagramPaneID}
+	info := []core.AgentID{core.Main, summaryPaneID, diagramPaneID}
 	var active, idle []core.AgentID
 	for _, id := range m.order {
 		if id == core.Main {
-			continue // listed under info panes above, not as a subagent
+			continue // listed under info panes, not as a subagent
 		}
 		if s := m.states[id]; s == core.Running || s == core.Paused {
 			active = append(active, id)
@@ -2739,8 +2769,18 @@ func (m *model) navOrder() []core.AgentID {
 			idle = append(idle, id)
 		}
 	}
-	order = append(order, active...)
-	return append(order, idle...)
+	subs := append(active, idle...)
+	// Enforced mode cycles only the active tab's category; customizable cycles all.
+	switch m.activeKind() {
+	case tabInfo:
+		return info
+	case tabSubagents:
+		return subs
+	case tabShell:
+		return nil // command panes aren't cycled here; open them with Ctrl-b $/T/L
+	default:
+		return append(info, subs...)
+	}
 }
 
 func indexOfAgent(list []core.AgentID, id core.AgentID) int {
@@ -3411,7 +3451,7 @@ func (m *model) renderLeaf(p *pane) string {
 	case p.term:
 		body = m.renderTerm(p, innerW, innerH-1, p == m.focusPane)
 	case p.empty:
-		hint := "No subagents yet.\n\nPanes open here automatically as the\norchestrator spawns subagents.\n\nAny edit to this tab cancels that;\nCtrl-b A re-enables it."
+		hint := "No subagents yet.\n\nPanes open here automatically as the\norchestrator spawns subagents."
 		body = lipgloss.NewStyle().Width(innerW).Height(innerH-1).
 			Align(lipgloss.Center, lipgloss.Center).Foreground(styleMuted.GetForeground()).Render(hint)
 	}
@@ -3533,10 +3573,22 @@ func (m *model) renderRoster(w, h int) string {
 	// pane; a channel row opens (or jumps to) a pane that streams that channel and
 	// sends what you type to its connected shell. These rows are not part of the
 	// up/down view cycle.
+	// The roster shows only the options for the active tab's kind; a free tab (and
+	// customizable mode, where every tab is free) shows everything.
+	kind := m.activeKind()
+	showInfo := kind == tabFree || kind == tabInfo
+	showSubs := kind == tabFree || kind == tabSubagents
+	showCmd := kind == tabFree || kind == tabShell
+
 	shells := m.shellIDsSorted()
 	chans := m.channelsSorted()
 	termsList := m.termIDsSorted()
-	if n := len(shells) + len(chans) + len(termsList); n > 0 {
+	n := len(shells) + len(chans) + len(termsList)
+	if showCmd && n == 0 && kind == tabShell {
+		add(styleMuted.Render("command panes (0)"))
+		add(styleMuted.Render("  open with Ctrl-b $ shell / T terminal / L revshell"))
+	}
+	if showCmd && n > 0 {
 		add(styleMuted.Render(fmt.Sprintf("command panes (%d)", n)))
 		for _, sid := range shells {
 			cursor := "  "
@@ -3576,13 +3628,17 @@ func (m *model) renderRoster(w, h int) string {
 	// Info panes: the orchestrator plus the two live views. Selecting any of these
 	// (click, or up/down) shows it in the focused pane — which is also how you reopen
 	// a Summary or Diagram pane you closed. (Open a shell with Ctrl-b $.)
-	add(styleMuted.Render("info panes"))
-	renderRow(core.Main)
-	renderInfoRow(summaryPaneID, "Summary")
-	renderInfoRow(diagramPaneID, "Diagram")
+	if showInfo {
+		add(styleMuted.Render("info panes"))
+		renderRow(core.Main)
+		renderInfoRow(summaryPaneID, "Summary")
+		renderInfoRow(diagramPaneID, "Diagram")
+	}
 
-	section("active subagents", active)
-	section("idle subagents", idle)
+	if showSubs {
+		section("active subagents", active)
+		section("idle subagents", idle)
+	}
 
 	add("")
 	add(styleAccent.Render("Ctrl-b Commands"))
@@ -3751,7 +3807,6 @@ func keyHelp() string {
  t   toggle thoughts
  m   cycle mode (auto/planner/watcher)
  a   share pane with the AI
- A   re-enable auto-layout here
  b   time budget
  e   editor
  ?   show/hide pane

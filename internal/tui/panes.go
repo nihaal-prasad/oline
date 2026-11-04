@@ -16,12 +16,38 @@ type windowState struct {
 	zoom  bool
 	name  string
 
-	// auto: this tab arranges spawned subagents on its own (see autoPlaceSpawn). It
-	// starts as the empty second tab; a user edit to the tab cancels it (auto=false),
-	// and Ctrl-b A re-enables it for the focused tab. autoSlots holds the agent ids in
-	// the 2x2 slot order (top-left, right/top-right, bottom-left, bottom-right).
-	auto      bool
-	autoSlots []core.AgentID
+	// kind is the tab's identity. In enforced mode (Customizable Panes off) it fixes
+	// the tab's name and restricts which views its panes may show; the Subagents tab
+	// also auto-arranges spawned subagents. In customizable mode every tab is tabFree.
+	kind tabKind
+	// autoLeaves tracks the Subagents tab's auto-placed panes in creation order (the
+	// 2x2 slots), so new spawns grow the layout or replace the oldest subagent's pane.
+	autoLeaves []*pane
+}
+
+// tabKind is a tab's enforced identity (see windowState.kind).
+type tabKind int
+
+const (
+	tabFree      tabKind = iota // customizable mode: any pane type, numeric name
+	tabInfo                     // the Info tab: only info views (Main / Summary / Diagram)
+	tabSubagents                // the Subagents tab: only subagent views; auto-arranged
+	tabShell                    // a Shell tab: only command panes (shell / terminal / reverse-shell)
+)
+
+// label is the fixed display name for a tab kind; tabFree uses a numeric name set
+// at creation instead.
+func (k tabKind) label() string {
+	switch k {
+	case tabInfo:
+		return "Info"
+	case tabSubagents:
+		return "Subagents"
+	case tabShell:
+		return "Shell"
+	default:
+		return ""
+	}
 }
 
 // pane is a node in the tmux-style split tree. A leaf shows one agent's

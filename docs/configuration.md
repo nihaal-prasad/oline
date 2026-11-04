@@ -62,6 +62,7 @@ with the defaults. Edited files load on the next run.
 | Allow outbound IPv6 for agents | `config.yml` `network.allowIPv6` |
 | Backup interval, host root | `config.yml` `backup.intervalMinutes`; `$OLINE_HOME` |
 | Blocked shell patterns | `config.yml` `bash.patterns` |
+| Fully customizable panes/tabs (off by default) | `config.yml` `tui.customizablePanes` (or `-edit` under the `tui` item) |
 
 ## config.yml
 

@@ -6,36 +6,36 @@ import (
 	"github.com/nihaal-prasad/oline/internal/core"
 )
 
-// Auto-layout tab.
+// The Subagents tab (enforced mode) auto-arranges spawned subagents, always on:
 //
-// The second tab starts empty and arranges spawned subagents on its own, in a fixed
-// 2x2 slot order:
+//	1st subagent  -> one pane
+//	2nd           -> split left/right (1st left, 2nd right)
+//	3rd           -> the left pane splits top/bottom (1st top, 3rd bottom)
+//	4th           -> the right pane splits top/bottom (2nd top, 4th bottom)
+//	5th+          -> the pane showing the OLDEST subagent is retargeted to the new one
 //
-//	slot 0 = top-left   slot 1 = right / top-right
-//	slot 2 = bottom-left slot 3 = bottom-right
-//
-//	1 subagent  -> one pane (slot 0)
-//	2 subagents -> split vertically: slot 0 left, slot 1 right
-//	3 subagents -> the left pane splits horizontally: slot 0 top, slot 2 bottom
-//	4 subagents -> the right pane splits horizontally: slot 1 top, slot 3 bottom
-//	5th+        -> reuse a pane whose subagent is no longer running, else the pane
-//	               with the longest-running subagent
-//
-// Any user edit to the tab (splitting, closing, moving, or retargeting a pane)
-// cancels the auto-layout for that tab; Ctrl-b A re-enables it for the focused tab.
-// Only one tab is auto at a time.
+// The user may still resize panes, split new ones, and retarget a pane to a
+// different subagent; none of that cancels the layout. It grows by splitting the
+// tracked slot panes in place (so resizes and other panes are preserved), and once
+// the four slots exist, new spawns reuse the oldest. In customizable mode there is
+// no Subagents tab, so this does nothing.
 
-// autoWindow returns the auto-layout window and its index, or (nil, -1).
-func (m *model) autoWindow() (*windowState, int) {
+// customizablePanes reports whether the fully-customizable TUI fallback is on.
+func (m *model) customizablePanes() bool {
+	return m.store != nil && m.store.Effective().TUI.CustomizablePanes
+}
+
+// subagentsWindow returns the Subagents tab and its index, or (nil, -1).
+func (m *model) subagentsWindow() (*windowState, int) {
 	for i, w := range m.windows {
-		if w.auto {
+		if w.kind == tabSubagents {
 			return w, i
 		}
 	}
 	return nil, -1
 }
 
-// recordSpawn stamps a subagent's spawn time for longest-running reuse.
+// recordSpawn stamps a subagent's spawn time (for oldest-pane reuse).
 func (m *model) recordSpawn(id core.AgentID) {
 	if m.spawnTime == nil {
 		m.spawnTime = map[core.AgentID]time.Time{}
@@ -45,146 +45,108 @@ func (m *model) recordSpawn(id core.AgentID) {
 	}
 }
 
-// autoPlaceSpawn places a newly spawned subagent into the auto tab (if any).
-func (m *model) autoPlaceSpawn(child core.AgentID) {
-	w, i := m.autoWindow()
-	if w == nil {
-		return
+// winRoot returns the live root of window i (the active window's mirrored root, or
+// the parked state).
+func (m *model) winRoot(i int) *pane {
+	if i == m.winIdx {
+		return m.paneRoot
 	}
-	m.recordSpawn(child)
-	m.placeInAuto(w, child)
-	m.applyAutoTree(i, child)
+	return m.windows[i].root
 }
 
-// placeInAuto updates a window's slot assignment for a newly arriving subagent:
-// fill the next empty slot (up to 4), otherwise reuse a finished pane, otherwise the
-// longest-running one.
-func (m *model) placeInAuto(w *windowState, child core.AgentID) {
-	if len(w.autoSlots) < 4 {
-		w.autoSlots = append(w.autoSlots, child)
-		return
-	}
-	idx := -1
-	for k, id := range w.autoSlots { // a pane whose subagent is no longer running
-		if s, ok := m.states[id]; !ok || s == core.Idle || s == core.Killed {
-			idx = k
-			break
-		}
-	}
-	if idx < 0 { // all still running: take the longest-running (earliest spawn)
-		idx = 0
-		for k := 1; k < len(w.autoSlots); k++ {
-			if m.spawnTime[w.autoSlots[k]].Before(m.spawnTime[w.autoSlots[idx]]) {
-				idx = k
-			}
-		}
-	}
-	w.autoSlots[idx] = child
-}
-
-// applyAutoTree rebuilds window i's pane tree from its slots and focuses the pane
-// showing focusOn, updating the live view when it is the active window.
-func (m *model) applyAutoTree(i int, focusOn core.AgentID) {
+// setWinRoot writes a window's root/focus back, updating the live view and relaying
+// when it is the active window.
+func (m *model) setWinRoot(i int, root, focus *pane) {
 	w := m.windows[i]
-	root, focus := buildAutoTree(w.autoSlots, focusOn)
-	w.root, w.focus = root, focus
-	w.zoom = false
+	w.root, w.focus, w.zoom = root, focus, false
 	if i == m.winIdx {
 		m.paneRoot, m.focusPane, m.zoom = root, focus, false
 		m.relayout()
 	}
 }
 
-// buildAutoTree constructs the 2x2 slot layout for the given slots (0..4 of them)
-// and returns the root plus the leaf showing focusOn (or the last leaf).
-func buildAutoTree(slots []core.AgentID, focusOn core.AgentID) (root, focus *pane) {
-	switch len(slots) {
-	case 0:
-		r := newEmptyLeaf()
-		return r, r
-	case 1:
-		r := newLeaf(slots[0])
-		return r, r
-	case 2:
-		a, b := newLeaf(slots[0]), newLeaf(slots[1])
-		return internalNode(splitH, a, b), b
-	case 3:
-		a, c, b := newLeaf(slots[0]), newLeaf(slots[2]), newLeaf(slots[1])
-		return internalNode(splitH, internalNode(splitV, a, c), b), c
-	default: // 4
-		a, c := newLeaf(slots[0]), newLeaf(slots[2])
-		b, d := newLeaf(slots[1]), newLeaf(slots[3])
-		r := internalNode(splitH, internalNode(splitV, a, c), internalNode(splitV, b, d))
-		f := r
-		for _, l := range leaves(r) {
-			if l.agent == focusOn {
-				f = l
-				break
+// autoPlaceSpawn places a newly spawned subagent into the Subagents tab.
+func (m *model) autoPlaceSpawn(child core.AgentID) {
+	if m.customizablePanes() {
+		return
+	}
+	w, i := m.subagentsWindow()
+	if w == nil {
+		return
+	}
+	m.recordSpawn(child)
+	root := m.winRoot(i)
+
+	// Drop tracked slot panes that are no longer in the tree (user closed them).
+	live := map[*pane]bool{}
+	for _, l := range leaves(root) {
+		live[l] = true
+	}
+	kept := w.autoLeaves[:0]
+	for _, l := range w.autoLeaves {
+		if live[l] {
+			kept = append(kept, l)
+		}
+	}
+	w.autoLeaves = kept
+
+	switch len(w.autoLeaves) {
+	case 0: // empty tab: a single pane
+		leaf := newLeaf(child)
+		w.autoLeaves = []*pane{leaf}
+		m.setWinRoot(i, leaf, leaf)
+	case 1: // split left/right: existing left, new right
+		nl := newLeaf(child)
+		nr, _ := splitPaneWith(root, w.autoLeaves[0], splitH, nl)
+		w.autoLeaves = append(w.autoLeaves, nl)
+		m.setWinRoot(i, nr, nl)
+	case 2: // split the left pane top/bottom
+		nl := newLeaf(child)
+		nr, _ := splitPaneWith(root, w.autoLeaves[0], splitV, nl)
+		w.autoLeaves = append(w.autoLeaves, nl)
+		m.setWinRoot(i, nr, nl)
+	case 3: // split the right pane top/bottom
+		nl := newLeaf(child)
+		nr, _ := splitPaneWith(root, w.autoLeaves[1], splitV, nl)
+		w.autoLeaves = append(w.autoLeaves, nl)
+		m.setWinRoot(i, nr, nl)
+	default: // 4 slots full: retarget the oldest subagent's pane
+		oldest := w.autoLeaves[0]
+		for _, l := range w.autoLeaves[1:] {
+			if m.spawnTime[l.agent].Before(m.spawnTime[oldest.agent]) {
+				oldest = l
 			}
 		}
-		return r, f
+		oldest.agent = child
+		oldest.shell, oldest.rev, oldest.term, oldest.empty = false, false, false, false
+		m.refreshLeaf(oldest)
+		m.setWinRoot(i, root, oldest)
 	}
 }
 
-// internalNode makes a split node wiring up parent pointers.
-func internalNode(dir paneDir, a, b *pane) *pane {
-	n := &pane{dir: dir, ratio: 0.5, a: a, b: b}
-	a.parent, b.parent = n, n
-	return n
-}
-
-// enableAutoHere turns the focused tab into THE auto-layout tab (Ctrl-b A): it
-// disables auto on every other tab and rebuilds this one from the live subagents in
-// spawn order. A user edit will cancel it again.
-func (m *model) enableAutoHere() {
-	m.ensureWindows()
-	for i, w := range m.windows {
-		if i != m.winIdx {
-			w.auto = false
-		}
+// rebuildSubagentsTab resets the Subagents tab and re-places every live subagent in
+// spawn order (used on resume, where restored subagents fire no spawn events).
+func (m *model) rebuildSubagentsTab() {
+	w, i := m.subagentsWindow()
+	if w == nil {
+		return
 	}
-	w := m.windows[m.winIdx]
-	w.auto = true
-	w.autoSlots = nil
+	w.autoLeaves = nil
+	empty := newEmptyLeaf()
+	m.setWinRoot(i, empty, empty)
 	for _, id := range m.subagentsBySpawn() {
-		m.placeInAuto(w, id)
+		m.autoPlaceSpawn(id)
 	}
-	focus := core.AgentID("")
-	if len(w.autoSlots) > 0 {
-		focus = w.autoSlots[len(w.autoSlots)-1]
-	}
-	m.applyAutoTree(m.winIdx, focus)
-	m.status = "auto-layout enabled for tab " + w.name + " — any edit to it cancels it"
 }
 
 // subagentsBySpawn lists the live (non-killed) subagents in spawn order.
 func (m *model) subagentsBySpawn() []core.AgentID {
 	var out []core.AgentID
 	for _, id := range m.order {
-		if id == core.Main {
-			continue
-		}
-		if m.states[id] == core.Killed {
+		if id == core.Main || m.states[id] == core.Killed {
 			continue
 		}
 		out = append(out, id)
 	}
 	return out
-}
-
-// cancelAutoActive turns off auto-layout for the active tab when the user edits it
-// (split, close, move, retarget, or open a pane). A no-op if the active tab isn't an
-// auto tab, so it is safe to call from every mutation handler.
-func (m *model) cancelAutoActive(reason string) {
-	m.ensureWindows()
-	if m.winIdx < 0 || m.winIdx >= len(m.windows) {
-		return
-	}
-	w := m.windows[m.winIdx]
-	if !w.auto {
-		return
-	}
-	w.auto = false
-	w.autoSlots = nil
-	m.status = "auto-layout canceled for tab " + w.name + " (" + reason + ") — Ctrl-b A re-enables it"
 }
