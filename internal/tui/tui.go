@@ -299,7 +299,10 @@ type model struct {
 	listenInput bool // the command line is entering a reverse-shell listener port
 	// spawnTime records when each subagent was spawned, so the auto-layout can pick
 	// the longest-running pane to reuse once all four slots are full.
-	spawnTime   map[core.AgentID]time.Time
+	spawnTime map[core.AgentID]time.Time
+	// saveReq coalesces event-driven history saves (a spawn, an agent finishing, a
+	// finding) so a crash loses at most the in-flight turn, not up to the full timer.
+	saveReq     chan struct{}
 	histMu      sync.Mutex    // serializes saveHistory across the UI and ticker goroutines
 	savedLayout []savedWindow // last UI-goroutine snapshot of the window/pane layout (under histMu)
 	savedWinIdx int           // active window index for that snapshot
@@ -1490,7 +1493,7 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	cand := m.prepCand
 	pol := scope.Parse(m.scopeIn.Value())
 
-	reg := buildRegistry(m.store)
+	reg := wire.BuildRegistry(m.store)
 	llmFor := wire.NewLLMResolver(m.store)
 	orch, resolver := wire.Build(m.mode, m.store, m.roster)
 
@@ -1499,7 +1502,13 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	m.sess.Mode = runModeFromSel(m.autoSel)
 	// Custom tools (config command tools + Go extension tools) execute, so watcher
 	// mode must block them along with bash/bash_bg/revshell.
-	m.sess.ExecTools = customToolNames(m.store)
+	m.sess.ExecTools = wire.CustomToolNames(m.store)
+	m.saveReq = make(chan struct{}, 1)
+	// Surface config mistakes (unknown tool grants, bad tiers, missing descriptions,
+	// bad spawns, malformed custom tools) rather than letting them fail silently.
+	for _, w := range wire.Lint(m.store, m.roster, reg) {
+		m.writeln(core.Main, styleWarn.Render("config lint: "+w))
+	}
 	m.sess.Interactive = true // keep Main alive between turns so the user can keep chatting
 	// Let update_diagram enforce the LIVE Diagram-pane width (read fresh each call, so
 	// a resize is reflected immediately).
@@ -2952,10 +2961,12 @@ func (m *model) mutate(ev event.Event) {
 		if e.State == core.Idle || e.State == core.Killed {
 			m.transcripts[e.Agent].finalizeOpen()
 			m.markDirty(e.Agent)
+			m.requestSave() // an agent finishing is a durable milestone
 		}
 	case event.Spawned:
 		m.addAgent(e.Child)
 		m.autoPlaceSpawn(e.Child) // open/arrange its pane on the auto-layout tab
+		m.requestSave()           // persist the new agent promptly
 		m.tr(core.Main).addRich(styleAccent.Render("→ spawned ") + string(e.Child) + styleMuted.Render(" ("+e.Role+")"))
 		m.markDirty(core.Main)
 		// Put the orchestrator's task prompt at the TOP of the new subagent's pane so
@@ -3020,6 +3031,7 @@ func (m *model) mutate(ev event.Event) {
 		}
 		m.tr(e.Agent).addStyled(line, severityStyle(e.Severity))
 		m.markDirty(e.Agent)
+		m.requestSave() // a confirmed finding is worth persisting immediately
 	case event.Summary:
 		m.summary = e.Text
 		m.markDirty(summaryPaneID) // refresh the live Summary pane

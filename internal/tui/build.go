@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"encoding/json"
 	"fmt"
 	"io/fs"
 	"strings"
@@ -11,8 +10,6 @@ import (
 	"github.com/nihaal-prasad/oline/assets"
 	"github.com/nihaal-prasad/oline/internal/agents"
 	"github.com/nihaal-prasad/oline/internal/config"
-	"github.com/nihaal-prasad/oline/internal/tools"
-	"github.com/nihaal-prasad/oline/internal/tools/custom"
 )
 
 // Options can skip the wizard and start an engagement directly (useful for a
@@ -63,67 +60,11 @@ func LaunchWith(mode config.Mode, opts Options) error {
 
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err = p.Run()
+	// Belt and suspenders: if the program returned on a panic or an unexpected error
+	// (so shutdown's save never ran), persist the conversation now. A no-op when no
+	// engagement started or it was already saved on quit.
+	m.saveHistory()
 	return err
-}
-
-// buildRegistry registers every tool oline implements, plus the user's custom tools:
-// the config-declared command tools (no recompile) and any Go tools added via the
-// tools/custom extension point. Per-agent scoping decides which of these each agent
-// actually sees (an agent uses a tool by listing its name in its `tools:` frontmatter).
-func buildRegistry(store *config.Store) *tools.Registry {
-	reg := tools.NewRegistry()
-	reg.Register(tools.Bash{})
-	reg.Register(tools.Read{})
-	reg.Register(tools.Write{})
-	reg.Register(tools.Edit{})
-	reg.Register(tools.Find{})
-	reg.Register(tools.Grep{})
-	reg.Register(tools.Glob{})
-	reg.Register(tools.WebSearch{})
-	reg.Register(tools.WebFetch{})
-	for _, t := range configCommandTools(store) {
-		reg.Register(t)
-	}
-	for _, t := range custom.All() { // Go extension tools (see internal/tools/custom)
-		reg.Register(t)
-	}
-	return reg
-}
-
-// configCommandTools turns the config's `tools:` command-tool specs into runnable
-// tools. A spec missing a name or command is skipped.
-func configCommandTools(store *config.Store) []tools.Tool {
-	var out []tools.Tool
-	for _, spec := range store.Effective().Tools {
-		if strings.TrimSpace(spec.Name) == "" || strings.TrimSpace(spec.Command) == "" {
-			continue
-		}
-		var params []byte
-		if len(spec.Parameters) > 0 {
-			params, _ = json.Marshal(spec.Parameters)
-		}
-		out = append(out, tools.CommandTool{
-			ToolName:    spec.Name,
-			Desc:        spec.Description,
-			Params:      params,
-			CommandTmpl: spec.Command,
-			Dir:         spec.Dir,
-		})
-	}
-	return out
-}
-
-// customToolNames lists every custom tool's name (config command tools + Go
-// extension tools), so watcher mode can block them as execution tools.
-func customToolNames(store *config.Store) map[string]bool {
-	names := map[string]bool{}
-	for _, t := range configCommandTools(store) {
-		names[t.Name()] = true
-	}
-	for _, t := range custom.All() {
-		names[t.Name()] = true
-	}
-	return names
 }
 
 // bashDenyGlobs extracts the glob patterns marked `approval: deny` from the

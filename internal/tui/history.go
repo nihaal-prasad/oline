@@ -127,7 +127,21 @@ func (m *model) historyLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			m.saveHistory()
+		case <-m.saveReq:
+			m.saveHistory()
 		}
+	}
+}
+
+// requestSave asks the history loop to persist now (coalesced): called on durable
+// milestones so a crash loses at most the in-flight turn. Non-blocking.
+func (m *model) requestSave() {
+	if m.saveReq == nil {
+		return
+	}
+	select {
+	case m.saveReq <- struct{}{}:
+	default: // a save is already queued
 	}
 }
 

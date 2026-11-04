@@ -7,6 +7,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"sync"
 
 	"github.com/nihaal-prasad/oline/internal/core"
@@ -102,6 +103,16 @@ func (r *Registry) Register(t Tool) { r.all[t.Name()] = t }
 func (r *Registry) Get(name string) (Tool, bool) {
 	t, ok := r.all[name]
 	return t, ok
+}
+
+// Names returns every registered tool name, sorted.
+func (r *Registry) Names() []string {
+	out := make([]string, 0, len(r.all))
+	for n := range r.all {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ViewFor returns the tools whose names appear in allow, in allow's order,

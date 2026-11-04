@@ -131,6 +131,12 @@ func printRoster(mode config.Mode) {
 		fmt.Printf("  %-18s tier=%-6s model=%-55s effort=%-6s web=%v tools=%d spawns=%v\n",
 			core.CanonRole(cfg.Role), tier, dash(cfg.Model), dash(cfg.Effort), web, len(cfg.Tools), cfg.Spawns)
 	}
+	if warns := wire.Lint(store, roster, wire.BuildRegistry(store)); len(warns) > 0 {
+		fmt.Printf("\nconfig lint (%d):\n", len(warns))
+		for _, w := range warns {
+			fmt.Printf("  ! %s\n", w)
+		}
+	}
 }
 
 func dash(s string) string {

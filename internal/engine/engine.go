@@ -2121,6 +2121,16 @@ func preview(s string) string {
 }
 
 // primitiveSchemas are the engine-level tools' function definitions.
+// PrimitiveNames returns the engine's built-in (non-registry) tool names, so the
+// config lint can recognize them as valid tool grants.
+func PrimitiveNames() []string {
+	out := make([]string, 0, len(primitiveSchemas))
+	for n := range primitiveSchemas {
+		out = append(out, n)
+	}
+	return out
+}
+
 var primitiveSchemas = map[string]llm.FunctionDef{
 	"task": {
 		Name:        "task",
