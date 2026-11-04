@@ -111,3 +111,26 @@ func TestViewEnforcement(t *testing.T) {
 		t.Error("Subagents tab should allow a subagent view")
 	}
 }
+
+func TestEnforcedTabsNotClosable(t *testing.T) {
+	m := autoModel(t) // Info (0) + Subagents (1), enforced
+	// Add a Shell tab so there are 3 and "last window" isn't the blocker.
+	shell := newEmptyLeaf()
+	m.windows = append(m.windows, &windowState{root: shell, focus: shell, name: "Shell", kind: tabShell})
+
+	m.winIdx = 0 // Info
+	m.killWindow()
+	if len(m.windows) != 3 {
+		t.Error("the Info tab must not be closable in enforced mode")
+	}
+	m.winIdx = 1 // Subagents
+	m.killWindow()
+	if len(m.windows) != 3 {
+		t.Error("the Subagents tab must not be closable in enforced mode")
+	}
+	m.winIdx = 2 // Shell
+	m.killWindow()
+	if len(m.windows) != 2 {
+		t.Error("a Shell tab should be closable in enforced mode")
+	}
+}

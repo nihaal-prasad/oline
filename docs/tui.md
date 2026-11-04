@@ -157,7 +157,8 @@ agent (or runs a command in a focused shell pane).
 `Ctrl-b c` opens a new window, `Ctrl-b n` cycles to the next, `Ctrl-b 1` to
 `Ctrl-b 9` jump by number, and `Ctrl-b &` closes the current one (not the last). When
 more than one window exists, a tab strip appears in the header; click a tab to switch
-to it.
+to it. In enforced mode the Info and Subagents tabs are fixtures and can't be closed
+(only Shell tabs can); Customizable Panes removes that restriction.
 
 By default the tabs have fixed identities that constrain the kind of pane they hold,
 and the Options sidebar shows only the relevant choices for the active tab:

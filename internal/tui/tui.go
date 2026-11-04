@@ -2568,6 +2568,12 @@ func (m *model) killWindow() {
 		m.status = "can't close the last window (Ctrl-b x closes a pane)"
 		return
 	}
+	// In enforced mode the Info and Subagents tabs are fixed fixtures and can't be
+	// closed (only Shell tabs can). Turn on Customizable Panes to close any tab.
+	if k := m.windows[m.winIdx].kind; k == tabInfo || k == tabSubagents {
+		m.status = "the " + k.label() + " tab can't be closed in enforced mode (Ctrl-b x closes a pane)"
+		return
+	}
 	i := m.winIdx
 	m.reapShells(m.paneRoot) // cancel any shells living in the window being closed
 	m.windows = append(m.windows[:i], m.windows[i+1:]...)
