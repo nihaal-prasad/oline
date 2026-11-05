@@ -590,22 +590,28 @@ func (m *model) saveItem() {
 			m.eStatus = styleErr.Render("save model: " + err.Error())
 			return
 		}
-		// If the model itself changed, the price fields still show the PREVIOUS
-		// model's prices — re-seed them for the newly chosen model rather than
-		// writing stale prices onto it. The user edits and saves again to change them.
-		if sel != prevSel {
-			m.buildFields()
-			m.setEFocus(0)
-			m.eStatus = styleGreenRender("saved " + it.name + " model → " + sel + note + " · prices shown below — edit and save again to change them")
+		c, perr := m.costFromFields(m.eFields[1:])
+		if perr != nil {
+			m.eStatus = styleErr.Render(perr.Error())
 			return
 		}
-		// Model unchanged: also persist any edited prices for that model.
-		if hasSlash {
-			c, perr := m.costFromFields(m.eFields[1:])
-			if perr != nil {
-				m.eStatus = styleErr.Render(perr.Error())
+		// When the model changed, the price fields were seeded from the PREVIOUS model.
+		// If the user LEFT them untouched (they still equal the previous model's prices),
+		// don't copy those stale prices onto the new model — re-seed and ask again. But
+		// if the user EDITED the prices in this same save, they intend them for the new
+		// model, so fall through and save them (the reported bug: edited prices were lost
+		// on a model change).
+		if sel != prevSel {
+			pprov, pid, _ := strings.Cut(prevSel, "/")
+			if c == m.modelCost(pprov, pid) {
+				m.buildFields()
+				m.setEFocus(0)
+				m.eStatus = styleGreenRender("saved " + it.name + " model → " + sel + note + " · prices shown below — edit and save again to change them")
 				return
 			}
+		}
+		// Persist the (possibly edited) prices for the current model.
+		if hasSlash {
 			if err := m.store.SaveModelCost(prov, id, c); err != nil {
 				// The tier saved fine; report only that the price part didn't.
 				m.eStatus = styleGreenRender("saved " + it.name + " model → " + sel + " (prices not saved: " + err.Error() + ")")

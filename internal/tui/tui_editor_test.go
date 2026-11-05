@@ -379,9 +379,10 @@ func TestEditorRoleNewModelAutoAdded(t *testing.T) {
 	}
 }
 
-// TestEditorRoleModelChangeReseedsPrices checks that changing a tier's model does
-// NOT write the previously-shown prices onto the newly chosen model: the save
-// switches the model and re-seeds the price fields from the new model instead.
+// TestEditorRoleModelChangeReseedsPrices checks that changing ONLY a tier's model
+// (leaving the price fields untouched) does NOT copy the previous model's prices onto
+// the newly chosen model: the save switches the model and re-seeds the price fields
+// from the new model instead.
 func TestEditorRoleModelChangeReseedsPrices(t *testing.T) {
 	m, _ := tempHomeModel(t)
 	withFireworks(m.store)
@@ -392,22 +393,48 @@ func TestEditorRoleModelChangeReseedsPrices(t *testing.T) {
 	m.openEditor()
 	m.eSel = findItem(m, "role", "big")
 	m.buildFields()
-	// Switch big from deepseek to glm, while the price fields still hold deepseek's.
+	// Switch big from deepseek to glm WITHOUT touching the (deepseek-seeded) prices.
 	m.eFields[0].SetValue("fireworks/" + glm)
-	m.eFields[1].SetValue("99") // deepseek-era value that must NOT land on glm
 	m.saveItem()
 
 	// The role switched...
 	if got := m.roleModel("big"); got != "fireworks/"+glm {
 		t.Errorf("big model = %q, want glm", got)
 	}
-	// ...and glm's price is still its catalog value (0.15), not the stale 99.
+	// ...and glm's price is still its catalog value (0.15), not deepseek's 0.30.
 	if in, _, _ := m.costFor(glm); in != 0.15 {
-		t.Errorf("glm input price = %v, want 0.15 (stale price must not be written on a model switch)", in)
+		t.Errorf("glm input price = %v, want 0.15 (untouched prices must not be copied on a model switch)", in)
 	}
 	// The price fields now show glm's prices, ready to edit.
 	if m.eFields[1].Value() != "0.15" {
 		t.Errorf("price field after model switch = %q, want glm's 0.15", m.eFields[1].Value())
+	}
+}
+
+// TestEditorRoleModelChangeWithEditedPricesSaves is the regression for the reported
+// bug: editing a model's prices AND switching the provider/model-id in the same save
+// must persist the edited prices onto the newly chosen model (previously they were
+// discarded because the save re-seeded and returned early).
+func TestEditorRoleModelChangeWithEditedPricesSaves(t *testing.T) {
+	m, _ := tempHomeModel(t)
+	withFireworks(m.store)
+	const deepseek = "accounts/fireworks/models/deepseek-v4p1-flash"
+	const glm = "accounts/fireworks/models/glm-5p3-flash"
+	m.store.SetModelRoles("fireworks/"+deepseek, "fireworks/"+glm, "fireworks/"+glm)
+
+	m.openEditor()
+	m.eSel = findItem(m, "role", "big")
+	m.buildFields()
+	// Switch the model AND edit the input price in one save.
+	m.eFields[0].SetValue("fireworks/" + glm)
+	m.eFields[1].SetValue("0.42")
+	m.saveItem()
+
+	if got := m.roleModel("big"); got != "fireworks/"+glm {
+		t.Errorf("big model = %q, want glm", got)
+	}
+	if in, _, _ := m.costFor(glm); in != 0.42 {
+		t.Errorf("glm input price = %v, want the edited 0.42 (prices edited alongside a model change must save)", in)
 	}
 }
 
