@@ -235,6 +235,13 @@ asks whether to load that history. Loading restores the orchestrator's context a
 every agent's transcript. In customizable mode it also restores the window/pane
 layout; the fixed Info / Subagents / Shell tabs and shell panes are rebuilt instead.
 
+You can resume onto a **brand-new sandbox** (a fresh WSL distro or QEMU VM), not just
+the original environment. When you do, oline also restores the prior engagement's
+workspace files into the new sandbox from its host backup bundle
+(`<root>/backups/<engagement>.tar.gz`), so the agents resume with the earlier
+artifacts and loot in place — as long as a backup exists (backups must have been
+enabled). Resuming onto a persisted QEMU VM instead keeps its own on-disk workspace.
+
 ## Activity log
 
 Each engagement writes a human-readable log at `<root>/logs/<engagement>.log`: every

@@ -193,6 +193,53 @@ func (m *model) buildExportBundle(engagement, dest string) error {
 	return os.Rename(tmpName, dest)
 }
 
+// extractWorkspaceTar pulls the nested workspace.tar.gz member out of an engagement's
+// host backup bundle (backups/<engagement>.tar.gz) to a temp file on the host,
+// returning its path (the caller removes it). It is the inverse of the workspace
+// capture in buildExportBundle, used to seed a brand-new sandbox with a resumed
+// engagement's prior workspace. Errors if the bundle or the workspace member is
+// missing (e.g. backups were disabled, or no backup ran before the engagement ended).
+func extractWorkspaceTar(bundlePath string) (string, error) {
+	f, err := os.Open(bundlePath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return "", err
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+		if hdr.Typeflag != tar.TypeReg || path.Base(path.Clean(hdr.Name)) != "workspace.tar.gz" {
+			continue
+		}
+		out, err := os.CreateTemp(filepath.Dir(bundlePath), ".oline-ws-restore-*.tgz")
+		if err != nil {
+			return "", err
+		}
+		if _, err := io.Copy(out, tr); err != nil {
+			_ = out.Close()
+			_ = os.Remove(out.Name())
+			return "", err
+		}
+		if err := out.Close(); err != nil {
+			_ = os.Remove(out.Name())
+			return "", err
+		}
+		return out.Name(), nil
+	}
+	return "", fmt.Errorf("no workspace captured in the backup bundle")
+}
+
 // renderFindingsMarkdown renders the findings as a severity-ordered report section
 // for the bundle (the start of the eventual full report).
 func renderFindingsMarkdown(engagement string, fs []engine.Finding) string {

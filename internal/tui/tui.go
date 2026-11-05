@@ -911,11 +911,13 @@ func (m *model) focusWizardStep(s wizStep) {
 	}
 }
 
-// afterNewVMConfig continues after sizing a freshly-created QEMU VM. If the user
-// chose to resume a previous engagement, it offers the engagements whose host-saved
-// conversation history can be loaded onto this new VM (the history lives on the host,
-// independent of the disposable disk); otherwise it proceeds to the scope step.
-func (m *model) afterNewVMConfig() {
+// afterFreshSandboxConfig continues after a brand-new sandbox has been configured (a
+// sized QEMU VM, or a named/rootfs WSL distro). If the user chose to resume a previous
+// engagement, it offers the engagements whose host-saved conversation history can be
+// loaded onto the fresh sandbox (the history — and the backed-up workspace — live on
+// the host, independent of the new disk/distro); otherwise it proceeds to the scope
+// step for a clean start.
+func (m *model) afterFreshSandboxConfig() {
 	if m.resume {
 		m.engagements = savedEngagements()
 		if len(m.engagements) > 0 {
@@ -1096,6 +1098,7 @@ func (m *model) wizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.selDistro = cand.ID
 			m.createWSL = false
+			m.reuseDisk = false // only a saved-QEMU-VM pick (below) reuses a disk
 			m.newEnvName = ""
 			m.wslRootfs = ""
 			// QEMU: an existing VM (a persisted engagement's disk) chosen from the list is
@@ -1123,19 +1126,20 @@ func (m *model) wizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, listEngagementsCmd(cand)
 			}
 			// Create a fresh oline-managed WSL distro. Generate its oline- name now;
-			// it appears in the reuse list on later runs and is a Destroy target. A new
-			// distro always starts a new engagement, so clear any Start-step "resume".
+			// it appears in the reuse list on later runs and is a Destroy target. The
+			// distro is fresh, but a Start-step "resume" still holds: its workspace
+			// isn't in this new distro, yet a previous engagement's host-saved history
+			// (and backed-up workspace) can be loaded onto it — afterFreshSandboxConfig
+			// offers the saved engagements, exactly as for a new QEMU VM.
 			if cand.Backend == sandbox.BackendWSL && cand.NeedsCreate {
-				m.resume = false
 				m.engagement = ""
 				m.createWSL = true
 				m.newEnvName = sandbox.Prefix + "debian-" + time.Now().Format("20060102-150405")
 				m.selDistro = m.newEnvName
 				// If this WSL can install under a custom name, no tarball is needed;
-				// otherwise collect a Debian rootfs tarball to import.
+				// otherwise collect a Debian rootfs tarball to import first.
 				if wc, ok := sandbox.NewWSL().(sandbox.WSLControl); ok && wc.InstallSupportsName(context.Background()) {
-					m.step = wScope
-					m.scopeIn.Focus()
+					m.afterFreshSandboxConfig()
 					return m, nil
 				}
 				m.step = wWSLRootfs
@@ -1145,14 +1149,14 @@ func (m *model) wizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// QEMU: create a new engagement on a fresh disposable overlay of the base
 			// image; size it here (default 25 GB) so tool installs don't fill a tiny
 			// base — otherwise the guest root is only the base image's ~2 GB. The disk is
-			// fresh, but a Start-step "resume" still holds: after sizing, afterNewVMConfig
-			// offers the prior engagement's host-saved history to load onto this new VM.
+			// fresh, but a Start-step "resume" still holds: after sizing,
+			// afterFreshSandboxConfig offers the prior engagement to load onto this VM.
 			if cand.Backend == sandbox.BackendQEMU {
 				// A fresh overlay off the base — not a saved disk. But keep the user's
 				// "resume a previous engagement" intent: creating a new VM should NOT
 				// cancel loading a previous engagement's host-saved history (the history
 				// lives on the host, independent of the disposable VM disk). After sizing
-				// the VM, afterNewVMConfig offers the saved engagements to load.
+				// the VM, afterFreshSandboxConfig offers the saved engagements to load.
 				m.reuseDisk = false
 				m.engagement = ""
 				m.step = wDisk
@@ -1214,7 +1218,7 @@ func (m *model) wizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.memGB = n
 			m.wizErr = ""
 			m.memIn.Blur()
-			m.afterNewVMConfig()
+			m.afterFreshSandboxConfig()
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -1231,8 +1235,7 @@ func (m *model) wizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.wslRootfs = p
 			m.wizErr = ""
 			m.wslRootfsIn.Blur()
-			m.step = wScope
-			m.scopeIn.Focus()
+			m.afterFreshSandboxConfig()
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -2123,12 +2126,23 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Resume: make sure the engagement's files are in the canonical workspace,
-	// whether they came from a host path, a path already in the environment, or
-	// an existing engagement picked from the list. A resumed QEMU VM already holds
-	// its workspace on the persisted disk, so there is nothing to place.
-	if m.resume && cand.Backend != sandbox.BackendQEMU {
-		m.placeResumeFiles(cand.ID)
+	// Resume: make sure the engagement's files are in the canonical workspace.
+	//   - A brand-new sandbox (fresh WSL distro or fresh QEMU VM) holds none of the
+	//     prior workspace, so when loading history, restore it from the host backup
+	//     bundle. An explicit host archive/in-env path (the WSL import option) wins.
+	//   - A reused WSL distro may already hold the files (or an import points at them).
+	//   - A resumed QEMU VM carries its workspace on the persisted disk — nothing to do.
+	if m.resume {
+		switch {
+		case m.freshSandbox(cand):
+			if cand.Backend == sandbox.BackendWSL && strings.TrimSpace(m.importIn.Value()) != "" {
+				m.placeResumeFiles(cand.ID)
+			} else if m.loadHist {
+				m.restoreWorkspaceFromBackup(m.engagement)
+			}
+		case cand.Backend != sandbox.BackendQEMU:
+			m.placeResumeFiles(cand.ID)
+		}
 	}
 
 	// VPN to reach the target, if requested.
@@ -2352,6 +2366,80 @@ func (m *model) placeResumeFiles(distro string) {
 			m.writeln(core.Main, styleMuted.Render("restored "+m.engagement+" from "+src+" → "+canonical))
 		}
 	}
+}
+
+// freshSandbox reports whether the chosen environment is being created new for this
+// engagement — a QEMU VM on a fresh overlay (not a resumed saved disk), or a newly
+// provisioned WSL distro (not a reused one). A fresh sandbox holds none of a resumed
+// engagement's prior workspace files, so they must be restored from the host backup.
+func (m *model) freshSandbox(cand sandbox.Candidate) bool {
+	switch cand.Backend {
+	case sandbox.BackendQEMU:
+		return !m.reuseDisk
+	case sandbox.BackendWSL:
+		return m.createWSL
+	}
+	return false
+}
+
+// restoreWorkspaceFromBackup brings a previous engagement's workspace files into a
+// brand-new sandbox from the host backup bundle (backups/<engagement>.tar.gz), so a
+// resume onto a freshly-created WSL distro or QEMU VM continues with the prior
+// artifacts and loot rather than an empty workspace. Best-effort: a missing bundle or
+// a copy/unpack failure is reported, and the engagement starts with whatever is there.
+func (m *model) restoreWorkspaceFromBackup(engagement string) {
+	if m.sess == nil || m.sess.Sandbox == nil || strings.TrimSpace(engagement) == "" {
+		return
+	}
+	bundle := filepath.Join(m.store.BackupDir(), engagement+".tar.gz")
+	wsTgz, err := extractWorkspaceTar(bundle)
+	if err != nil {
+		m.writeln(core.Main, styleWarn.Render("note: no saved workspace to restore for "+engagement+" ("+err.Error()+"); starting with an empty workspace"))
+		return
+	}
+	defer os.Remove(wsTgz)
+
+	ctx := context.Background()
+	const guestTgz = "/tmp/.oline-ws-restore.tgz"
+	if err := m.sess.Sandbox.CopyIn(ctx, wsTgz, guestTgz); err != nil {
+		m.writeln(core.Main, styleErr.Render("workspace restore: could not copy files into the sandbox: "+err.Error()))
+		return
+	}
+	ws := strings.TrimSpace(m.sess.Workspace)
+	if ws == "" {
+		ws = sandbox.WSLWorkspace + "/" + engagement
+	}
+	eng := sandbox.SafeEngagementName(engagement)
+	// Unpack into a staging dir, then merge its contents into the workspace. oline's
+	// WSL backups nest everything under <engagement>/ while QEMU backups are flat;
+	// descend into a lone engagement-named directory when present, so either layout
+	// lands as workspace-relative files. Runs as root (Privileged) and re-grants the
+	// oline group so the unprivileged agents can read/write the restored files.
+	script := fmt.Sprintf(`set -e
+stage="$(mktemp -d)"
+tar --no-same-owner --no-same-permissions -xzf %s -C "$stage"
+rm -f %s
+mkdir -p %s
+src="$stage"
+if [ -d "$stage"/%s ] && [ "$(ls -A "$stage" | wc -l)" -eq 1 ]; then src="$stage"/%s; fi
+cp -a "$src"/. %s/
+rm -rf "$stage"
+getent group oline >/dev/null 2>&1 && chown -R root:oline %s 2>/dev/null || true
+chmod -R g+rwX %s 2>/dev/null || true
+echo RESTORED`,
+		shQuote(guestTgz), shQuote(guestTgz), shQuote(ws), shQuote(eng), shQuote(eng), shQuote(ws), shQuote(ws), shQuote(ws))
+
+	var out strings.Builder
+	if _, err := m.sess.Sandbox.Exec(ctx, core.AgentID("setup"),
+		sandbox.Cmd{Argv: []string{"bash", "-lc", script}, Policy: sandbox.Privileged}, &out); err != nil || !strings.Contains(out.String(), "RESTORED") {
+		detail := strings.TrimSpace(out.String())
+		if err != nil {
+			detail = err.Error() + " " + detail
+		}
+		m.writeln(core.Main, styleErr.Render("workspace restore failed: "+strings.TrimSpace(detail)))
+		return
+	}
+	m.writeln(core.Main, styleMuted.Render("restored previous workspace files for "+engagement+" → "+ws))
 }
 
 // setupVPN brings up (or confirms) the OpenVPN tunnel per the wizard choice.

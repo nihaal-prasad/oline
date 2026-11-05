@@ -36,10 +36,13 @@ The wizard asks each setting in order, skipping steps that don't apply; Enter ad
      baked into the disk, so a resumed VM uses the defaults unless changed.
    - **Debian rootfs** (new WSL distro, older WSL only): if `wsl --install` cannot
      name a distro, point oline at a Debian rootfs tarball to import instead.
-6. **Resume / import** (WSL): pick a saved engagement inside the chosen distro, or
-   import one from a host archive, then choose whether to load its history. (A saved
-   QEMU VM is chosen directly in the Environment step above; it then jumps straight to
-   the history choice.)
+6. **Resume / import**: when you chose "resume" at the Start step, pick which saved
+   engagement to continue, then choose whether to load its history. This appears for a
+   reused WSL distro and also for a **freshly created** WSL distro or QEMU VM — you can
+   resume a previous engagement onto a brand-new sandbox, and oline restores its
+   workspace files from the host backup bundle so the agents pick up where they left
+   off (for WSL you may also import an engagement from a host archive). A saved QEMU VM
+   picked in the Environment step above jumps straight to the history choice.
 7. **Scope**: pentester, the in-scope targets as free text (IPs, CIDRs, and domains
    parsed out; IPs and CIDRs drive the firewall, domains feed tool checks and
    reporting). Exploiter, the application to analyze (a local path, or a URL/name for
