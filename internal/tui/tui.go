@@ -284,6 +284,7 @@ type model struct {
 	// wizard
 	running     bool
 	step        wizStep
+	wizHistory  []wizStep // setup steps visited, for Esc = go back to the previous one
 	modeSel     int
 	startSel    int // 0 = new engagement, 1 = resume previous
 	resume      bool
@@ -851,9 +852,62 @@ func (m *model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.preparing {
 			return m, nil // ignore input while the sandbox is being prepared
 		}
-		return m.wizardKey(msg)
+		// Esc goes back to the previous setup question (no-op on the first one).
+		if msg.String() == "esc" {
+			return m.wizardBack()
+		}
+		// Record a forward step transition so Esc can return to where we came from.
+		prev := m.step
+		res, cmd := m.wizardKey(msg)
+		if m.step != prev && !m.running {
+			m.wizHistory = append(m.wizHistory, prev)
+		}
+		return res, cmd
 	}
 	return m, nil
+}
+
+// wizardBack returns to the previous setup step (restoring its input focus),
+// popping the step history. It is a no-op on the first question.
+func (m *model) wizardBack() (tea.Model, tea.Cmd) {
+	if len(m.wizHistory) == 0 {
+		return m, nil
+	}
+	m.step = m.wizHistory[len(m.wizHistory)-1]
+	m.wizHistory = m.wizHistory[:len(m.wizHistory)-1]
+	m.wizErr = ""
+	m.focusWizardStep(m.step)
+	return m, nil
+}
+
+// focusWizardStep focuses the text input (or form) a setup step edits, so returning
+// to it with Esc lands the cursor in the right field.
+func (m *model) focusWizardStep(s wizStep) {
+	for _, ti := range []*textinput.Model{&m.scopeIn, &m.goalIn, &m.diskIn, &m.cpusIn, &m.memIn, &m.wslRootfsIn, &m.importIn, &m.vpnIn, &m.keyIn} {
+		ti.Blur()
+	}
+	switch s {
+	case wScope:
+		m.scopeIn.Focus()
+	case wGoal:
+		m.goalIn.Focus()
+	case wDisk:
+		m.diskIn.Focus()
+	case wCPUs:
+		m.cpusIn.Focus()
+	case wMem:
+		m.memIn.Focus()
+	case wWSLRootfs:
+		m.wslRootfsIn.Focus()
+	case wImport:
+		m.importIn.Focus()
+	case wVPNInput:
+		m.vpnIn.Focus()
+	case wKey:
+		m.keyIn.Focus()
+	case wSetup:
+		m.syncSetupFocus()
+	}
 }
 
 func (m *model) wizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1705,7 +1759,7 @@ func (m *model) setupBodyView() string {
 	if end < len(vis) {
 		b.WriteString(styleMuted.Render("    ↓ more below") + "\n")
 	}
-	b.WriteString("\n    " + styleMuted.Render("↑/↓ or Tab move · ←/→ or Space toggle · type to edit · Enter saves & continues"))
+	b.WriteString("\n    " + styleMuted.Render("↑/↓ or Tab move · ←/→ or Space toggle · type to edit · Enter saves & continues · Esc back"))
 	return b.String()
 }
 
@@ -3868,7 +3922,11 @@ func (m *model) viewWizard() string {
 	if m.status != "" {
 		b.WriteString(styleAccent.Render("  "+m.status) + "\n")
 	}
-	b.WriteString(styleMuted.Render("\n  ↑/↓ choose · type to edit · Enter next · Ctrl-c twice to quit"))
+	back := ""
+	if len(m.wizHistory) > 0 {
+		back = " · Esc back"
+	}
+	b.WriteString(styleMuted.Render("\n  ↑/↓ choose · type to edit · Enter next" + back + " · Ctrl-c twice to quit"))
 	// The logo is rendered outside the padded body so its own centering (and raw
 	// truecolor cells) aren't shifted or reflowed by lipgloss padding.
 	body := lipgloss.NewStyle().Padding(1, 2).Render(b.String())
@@ -3901,7 +3959,7 @@ func (m *model) modelsBodyView() string {
 		sb.WriteString(cur + lipgloss.NewStyle().Bold(i == m.roleFocus).Render(labels[i]) + "  " + sel + "\n")
 		sb.WriteString("        " + styleMuted.Render(hints[i]) + "\n")
 	}
-	sb.WriteString(styleMuted.Render("    ↑/↓ choose tier · ←/→ change model · Enter confirms all three"))
+	sb.WriteString(styleMuted.Render("    ↑/↓ choose tier · ←/→ change model · Enter confirms all three · Esc back"))
 	return sb.String()
 }
 
