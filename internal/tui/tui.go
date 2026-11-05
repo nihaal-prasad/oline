@@ -2875,6 +2875,13 @@ func (m *model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) doSplit(d paneDir) {
+	// In enforced mode the Info and Subagents tabs are auto-managed and can't be split
+	// by hand (activeKind returns tabFree in customizable mode, so splits stay allowed
+	// there and on Shell/free tabs). Open panes on a Shell tab instead (Ctrl-b c).
+	if k := m.activeKind(); k == tabInfo || k == tabSubagents {
+		m.status = "can't split panes on the " + k.label() + " tab in enforced mode (open a Shell tab with Ctrl-b c, or turn on Customizable Panes)"
+		return
+	}
 	if m.paneRoot == nil || m.focusPane == nil {
 		return
 	}
@@ -3443,6 +3450,7 @@ func (m *model) mutate(ev event.Event) {
 		m.markDirty(e.Agent)
 	case event.AgentState:
 		m.tr(e.Agent)
+		prev := m.states[e.Agent] // capture before the overwrite, to detect transitions
 		m.states[e.Agent] = e.State
 		if e.State == core.Killed {
 			delete(m.awaitingAnswer, e.Agent) // a terminated agent is no longer waiting on the user
@@ -3455,6 +3463,17 @@ func (m *model) mutate(ev event.Event) {
 			m.transcripts[e.Agent].finalizeOpen()
 			m.markDirty(e.Agent)
 			m.requestSave() // an agent finishing is a durable milestone
+		}
+		// Drive the Subagents-tab auto-layout on a subagent's live<->not-live
+		// transitions: open a pane when it (re)starts running, close it when it goes
+		// idle/killed (close gated by the config toggle). Main has no auto pane.
+		if e.Agent != core.Main {
+			switch {
+			case e.State == core.Running && prev != core.Running && prev != core.Paused:
+				m.autoAdmitSubagent(e.Agent) // first run / reprompt: open a pane if < 4
+			case (e.State == core.Idle || e.State == core.Killed) && m.closeIdleSubagentPanes():
+				m.autoRemoveSubagent(e.Agent) // free the slot
+			}
 		}
 	case event.Spawned:
 		m.addAgent(e.Child)

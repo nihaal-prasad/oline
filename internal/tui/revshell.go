@@ -133,8 +133,17 @@ func (m *model) openRevPane(name string) {
 	t := m.shellTranscript(id)
 	t.addStyled(fmt.Sprintf("reverse-shell channel %q (port %d). Live output below; type a command and Enter to send it to the connected shell.", name, c.port), styleMuted)
 
-	m.zoom = false
 	leaf := newRevLeaf(id)
+	// A reverse-shell pane is a command pane. On the Info/Subagents tabs (enforced
+	// mode, which can't hold command panes) open it in a fresh Shell tab instead of
+	// splitting the auto-managed tab — same divert as openShellPane.
+	if m.needNewCommandTab() {
+		m.openLeafInNewShellTab(leaf)
+		m.startRevTail(rs)
+		m.status = "opened a new " + tabShell.label() + " tab with reverse-shell " + name
+		return
+	}
+	m.zoom = false
 	m.paneRoot, m.focusPane = splitPaneWith(m.paneRoot, m.focusPane, splitV, leaf)
 	m.startRevTail(rs)
 	m.relayout()

@@ -33,6 +33,7 @@ func (m *model) openEditor() {
 	m.eItems = append(m.eItems, eItem{kind: "scope", name: scopeName})
 	// TUI settings: terminal-UI preferences (not engagement behavior).
 	m.eItems = append(m.eItems, eItem{kind: "tui", name: "customizable panes"})
+	m.eItems = append(m.eItems, eItem{kind: "tui", name: "close idle subagent panes"})
 	// The orchestrator's prompt bundle, each editable like a subagent's prompt: its
 	// system prompt and its personality.
 	m.eItems = append(m.eItems, eItem{kind: "orchestrator", name: "system prompt"})
@@ -93,12 +94,16 @@ func (m *model) buildFields() {
 			mk(label, m.scopeIn.Value(), false),
 		}
 	case "tui":
+		cur := m.store.Effective().TUI.CustomizablePanes
+		if it.name == "close idle subagent panes" {
+			cur = m.store.Effective().TUI.CloseIdleSubagentPanes
+		}
 		val := "false"
-		if m.store.Effective().TUI.CustomizablePanes {
+		if cur {
 			val = "true"
 		}
 		m.eFields = []textinput.Model{
-			mk("customizable panes (true|false)", val, false),
+			mk(it.name+" (true|false)", val, false),
 		}
 	case "role":
 		// A tier's model, plus that model's per-1M-token prices (which feed the live
@@ -441,11 +446,15 @@ func (m *model) saveItem() {
 			m.eStatus = styleErr.Render("enter true or false")
 			return
 		}
-		if err := m.store.SaveTUICustomizablePanes(on); err != nil {
+		save := m.store.SaveTUICustomizablePanes
+		if it.name == "close idle subagent panes" {
+			save = m.store.SaveTUICloseIdleSubagentPanes
+		}
+		if err := save(on); err != nil {
 			m.eStatus = styleErr.Render("save: " + err.Error())
 			return
 		}
-		m.eStatus = styleGreenRender(fmt.Sprintf("saved customizable panes = %v (applies to the next engagement)", on))
+		m.eStatus = styleGreenRender(fmt.Sprintf("saved %s = %v (applies to the next engagement)", it.name, on))
 	case "scope":
 		raw := strings.TrimSpace(m.eFields[0].Value())
 		m.applyScopeLive(raw)
@@ -605,7 +614,7 @@ func (m *model) viewEditor() string {
 	if m.eSel >= 0 && m.eSel < len(m.eItems) && m.eFocus >= 0 {
 		it := m.eItems[m.eSel]
 		right.WriteString(styleMuted.Render("editing "+it.kind+" "+it.name) + "\n\n")
-		labels := m.fieldLabels(it.kind)
+		labels := m.fieldLabels(it)
 		for i, f := range m.eFields {
 			marker := "  "
 			if i == m.eFocus {
@@ -651,14 +660,14 @@ func (m *model) viewEditor() string {
 	return lipgloss.JoinVertical(lipgloss.Left, header, "", body)
 }
 
-func (m *model) fieldLabels(kind string) []string {
-	switch kind {
+func (m *model) fieldLabels(it eItem) []string {
+	switch it.kind {
 	case "provider":
 		return []string{"baseURL", "API key"}
 	case "scope":
 		return []string{"in-scope targets"}
 	case "tui":
-		return []string{"customizable panes (true|false)"}
+		return []string{it.name + " (true|false)"}
 	case "role":
 		return []string{"model (provider/model-id)", "input $/1M", "output $/1M", "cache-read $/1M", "cache-write $/1M"}
 	case "orchestrator":

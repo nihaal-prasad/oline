@@ -1,8 +1,8 @@
 package tui
 
 import (
+	"strings"
 	"testing"
-	"time"
 
 	"github.com/nihaal-prasad/oline/internal/core"
 	"github.com/nihaal-prasad/oline/internal/event"
@@ -54,42 +54,110 @@ func TestAutoPlaceScheme(t *testing.T) {
 	}
 }
 
-func TestAutoReuseOldest(t *testing.T) {
+// TestAutoNoOverflowBeyondFour: with four panes open, a further spawn opens no pane
+// and evicts none (overflow only happens if maxConcurrency is raised above 5).
+func TestAutoNoOverflowBeyondFour(t *testing.T) {
 	m := autoModel(t)
-	base := time.Now()
-	for i, id := range []string{"a1", "a2", "a3", "a4", "a5"} {
-		m.spawnTime[core.AgentID(id)] = base.Add(time.Duration(i) * time.Second)
-	}
-	for _, id := range []string{"a1", "a2", "a3", "a4"} {
+	for _, id := range []string{"a1", "a2", "a3", "a4", "a5"} {
 		m.spawn(id)
 	}
-	// 5th spawn replaces the oldest subagent's pane (a1, top-left slot).
-	m.spawn("a5")
-	if leafAgent(m.windows[1].root.a.a) != "a5" {
-		t.Fatalf("5th spawn should replace the oldest (a1 top-left) with a5, got %q", leafAgent(m.windows[1].root.a.a))
+	w := m.windows[1]
+	if len(w.autoLeaves) != 4 {
+		t.Fatalf("want 4 slots after 5 spawns, got %d", len(w.autoLeaves))
+	}
+	if autoLeafFor(w.autoLeaves, "a5") != nil {
+		t.Error("the 5th spawn must not open a pane (slots full)")
+	}
+	if autoLeafFor(w.autoLeaves, "a1") == nil {
+		t.Error("the oldest shown pane (a1) must not be evicted")
+	}
+	// Still the canonical 2x2.
+	r := w.root
+	if leafAgent(r.a.a) != "a1" || leafAgent(r.a.b) != "a3" || leafAgent(r.b.a) != "a2" || leafAgent(r.b.b) != "a4" {
+		t.Errorf("want the 2x2 V(a1,a3)|V(a2,a4), got %+v", r)
 	}
 }
 
-func TestAutoNoCancelOnEdit(t *testing.T) {
+// TestNoSplitOnEnforcedTabs: in enforced mode the user can't split the Info or
+// Subagents tabs; a Shell tab still splits.
+func TestNoSplitOnEnforcedTabs(t *testing.T) {
+	m := autoModel(t)
+
+	// Info tab (active): split refused, tree unchanged, status explains.
+	m.doSplit(splitV)
+	if n := len(leaves(m.windows[0].root)); n != 1 {
+		t.Errorf("Info tab must not split, got %d leaves", n)
+	}
+	if !strings.Contains(m.status, "can't split") {
+		t.Errorf("expected a refusal status, got %q", m.status)
+	}
+
+	// Subagents tab: two panes, then a split is refused.
+	m.spawn("a1")
+	m.spawn("a2")
+	m.activateWindow(1)
+	m.doSplit(splitV)
+	if n := len(leaves(m.windows[1].root)); n != 2 {
+		t.Errorf("Subagents tab must not split, got %d leaves", n)
+	}
+
+	// A Shell tab still splits.
+	shell := newLeaf(core.Main)
+	m.windows = append(m.windows, &windowState{root: shell, focus: shell, name: "Shell", kind: tabShell})
+	m.activateWindow(len(m.windows) - 1)
+	m.doSplit(splitH)
+	// doSplit mutates the live mirror (m.paneRoot) for the active window.
+	if n := len(leaves(m.paneRoot)); n != 2 {
+		t.Errorf("a Shell tab should split, got %d leaves", n)
+	}
+}
+
+// TestCloseIdleFreesSlot: a subagent going idle closes its pane and the rest
+// re-arrange canonically (default config has close-on-idle on).
+func TestCloseIdleFreesSlot(t *testing.T) {
 	m := autoModel(t)
 	m.spawn("a1")
 	m.spawn("a2")
-	// The user switches to the Subagents tab and splits a pane: auto still holds.
-	m.activateWindow(1)
-	m.doSplit(splitV)
-	if m.windows[1].kind != tabSubagents {
-		t.Fatal("splitting must not change the tab's kind")
-	}
-	// A further spawn still auto-places (grows the left slot).
 	m.spawn("a3")
-	found := false
-	for _, l := range leaves(m.windows[1].root) {
-		if l.agent == "a3" {
-			found = true
-		}
+	m.apply(event.AgentState{Agent: "a2", State: core.Idle})
+	w := m.windows[1]
+	if len(w.autoLeaves) != 2 {
+		t.Fatalf("idle should free a slot: want 2 panes, got %d", len(w.autoLeaves))
 	}
-	if !found {
-		t.Error("auto-layout should still place a3 after a user split")
+	if autoLeafFor(w.autoLeaves, "a2") != nil {
+		t.Error("the idle subagent's pane should be closed")
+	}
+	if leafAgent(w.root.a) != "a1" || leafAgent(w.root.b) != "a3" || w.root.dir != splitH {
+		t.Errorf("want canonical H(a1,a3) after close, got %+v", w.root)
+	}
+}
+
+// TestReopenOnReprompt: a reprompted (idle->running) subagent gets a pane again.
+func TestReopenOnReprompt(t *testing.T) {
+	m := autoModel(t)
+	m.spawn("a1")
+	m.spawn("a2")
+	m.spawn("a3")
+	m.apply(event.AgentState{Agent: "a2", State: core.Idle})    // closes a2's pane
+	m.apply(event.AgentState{Agent: "a2", State: core.Running}) // reprompt
+	w := m.windows[1]
+	if len(w.autoLeaves) != 3 {
+		t.Fatalf("reprompt should reopen a pane: want 3, got %d", len(w.autoLeaves))
+	}
+	if autoLeafFor(w.autoLeaves, "a2") == nil {
+		t.Error("the reprompted subagent should have a pane again")
+	}
+}
+
+// TestCloseIdleGatedByConfig: with the setting off, an idle subagent keeps its pane.
+func TestCloseIdleGatedByConfig(t *testing.T) {
+	m := autoModel(t)
+	m.store.SetTUICloseIdleSubagentPanes(false)
+	m.spawn("a1")
+	m.spawn("a2")
+	m.apply(event.AgentState{Agent: "a1", State: core.Idle})
+	if n := len(m.windows[1].autoLeaves); n != 2 {
+		t.Errorf("with close-on-idle off, the idle pane should persist: want 2, got %d", n)
 	}
 }
 

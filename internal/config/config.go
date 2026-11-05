@@ -114,6 +114,11 @@ type TUISettings struct {
 	// which pane types they hold, and the Subagents tab auto-arranges subagents. On,
 	// every tab is free-form with numeric names and no auto-layout.
 	CustomizablePanes bool `yaml:"customizablePanes"`
+	// CloseIdleSubagentPanes auto-closes a subagent's pane on the Subagents tab when
+	// the subagent goes idle or is killed, freeing a slot; a pane reopens when a
+	// subagent (re)starts and fewer than four are open. On by default (set in the
+	// embedded config.yml); turn it off to keep finished subagents' panes.
+	CloseIdleSubagentPanes bool `yaml:"closeIdleSubagentPanes"`
 }
 
 // Network controls the sandbox's per-agent network policy.
@@ -860,6 +865,39 @@ func (s *Store) SaveTUICustomizablePanes(v bool) error {
 		tui = map[string]any{}
 	}
 	tui["customizablePanes"] = v
+	userRoot["tui"] = tui
+	if err := os.MkdirAll(s.userDir, 0o700); err != nil {
+		return fmt.Errorf("config: creating %s: %w", s.userDir, err)
+	}
+	data, err := yaml.Marshal(userRoot)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(userCfgPath, data, 0o600)
+}
+
+// SetTUICloseIdleSubagentPanes applies the close-idle-panes setting in memory only
+// (no disk write), for callers/tests that just need the effective value changed.
+func (s *Store) SetTUICloseIdleSubagentPanes(v bool) { s.eff.TUI.CloseIdleSubagentPanes = v }
+
+// SaveTUICloseIdleSubagentPanes persists the close-idle-subagent-panes TUI setting
+// into the user config layer (~/oline/config/<mode>/config.yml) and applies it in
+// memory. Mirrors SaveTUICustomizablePanes.
+func (s *Store) SaveTUICloseIdleSubagentPanes(v bool) error {
+	s.eff.TUI.CloseIdleSubagentPanes = v
+	userCfgPath := filepath.Join(s.userDir, "config.yml")
+	var userRoot map[string]any
+	if data, err := os.ReadFile(userCfgPath); err == nil {
+		_ = yaml.Unmarshal(data, &userRoot)
+	}
+	if userRoot == nil {
+		userRoot = map[string]any{}
+	}
+	tui, _ := userRoot["tui"].(map[string]any)
+	if tui == nil {
+		tui = map[string]any{}
+	}
+	tui["closeIdleSubagentPanes"] = v
 	userRoot["tui"] = tui
 	if err := os.MkdirAll(s.userDir, 0o700); err != nil {
 		return fmt.Errorf("config: creating %s: %w", s.userDir, err)

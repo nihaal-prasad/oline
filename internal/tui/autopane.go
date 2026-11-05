@@ -6,23 +6,37 @@ import (
 	"github.com/nihaal-prasad/oline/internal/core"
 )
 
-// The Subagents tab (enforced mode) auto-arranges spawned subagents, always on:
+// The Subagents tab (enforced mode) auto-arranges the CURRENTLY LIVE subagents into
+// a canonical grid, up to four panes:
 //
-//	1st subagent  -> one pane
-//	2nd           -> split left/right (1st left, 2nd right)
-//	3rd           -> the left pane splits top/bottom (1st top, 3rd bottom)
-//	4th           -> the right pane splits top/bottom (2nd top, 4th bottom)
-//	5th+          -> the pane showing the OLDEST subagent is retargeted to the new one
+//	1 pane  -> one pane, full tab
+//	2 panes -> left | right
+//	3 panes -> left column split top/bottom, right full
+//	4 panes -> 2x2 (one full-width horizontal divider, one full-height vertical)
 //
-// The user may still resize panes, split new ones, and retarget a pane to a
-// different subagent; none of that cancels the layout. It grows by splitting the
-// tracked slot panes in place (so resizes and other panes are preserved), and once
-// the four slots exist, new spawns reuse the oldest. In customizable mode there is
-// no Subagents tab, so this does nothing.
+// `autoLeaves` is the source of truth: an ordered list (admission order = slot order)
+// of the subagent leaf-panes holding a slot. A spawn or a reprompt (idle/paused ->
+// running) ADMITS a subagent — a new pane opens only when fewer than four are open
+// (never evicting a shown pane). When a subagent goes idle or is killed its pane is
+// CLOSED, freeing a slot — this is gated by the `tui.closeIdleSubagentPanes` setting
+// (on by default). After any change the whole tree is rebuilt canonically from
+// `autoLeaves` (reconcileSubagentPanes), reusing the surviving leaf panes so their
+// viewports/scroll are preserved; split ratios reset to 0.5. In customizable mode
+// there is no Subagents tab, so all of this does nothing.
+//
+// Note: with more than four live subagents (only possible when maxConcurrency is
+// raised above its default of 5) the extra ones run without a pane and a freed slot
+// is not auto-refilled from a waiting runner until a fresh spawn/reprompt.
 
 // customizablePanes reports whether the fully-customizable TUI fallback is on.
 func (m *model) customizablePanes() bool {
 	return m.store != nil && m.store.Effective().TUI.CustomizablePanes
+}
+
+// closeIdleSubagentPanes reports whether a subagent's auto pane is closed when it
+// goes idle/killed (on by default; see the embedded config.yml).
+func (m *model) closeIdleSubagentPanes() bool {
+	return m.store != nil && m.store.Effective().TUI.CloseIdleSubagentPanes
 }
 
 // subagentsWindow returns the Subagents tab and its index, or (nil, -1).
@@ -65,21 +79,62 @@ func (m *model) setWinRoot(i int, root, focus *pane) {
 	}
 }
 
-// autoPlaceSpawn places a newly spawned subagent into the Subagents tab.
-func (m *model) autoPlaceSpawn(child core.AgentID) {
-	if m.customizablePanes() {
-		return
-	}
-	w, i := m.subagentsWindow()
-	if w == nil {
-		return
-	}
-	m.recordSpawn(child)
-	root := m.winRoot(i)
+// hNode / vNode build an internal split node over two children, wiring parents.
+func hNode(a, b *pane) *pane { return linkSplit(&pane{dir: splitH, ratio: 0.5, a: a, b: b}) }
+func vNode(a, b *pane) *pane { return linkSplit(&pane{dir: splitV, ratio: 0.5, a: a, b: b}) }
+func linkSplit(p *pane) *pane {
+	p.a.parent, p.b.parent = p, p
+	return p
+}
 
-	// Drop tracked slot panes that are no longer in the tree (user closed them).
+// autoLeafFor returns the slot leaf showing id, or nil.
+func autoLeafFor(leaves []*pane, id core.AgentID) *pane {
+	for _, l := range leaves {
+		if l.agent == id {
+			return l
+		}
+	}
+	return nil
+}
+
+// removeLeaf returns leaves with p filtered out (order preserved).
+func removeLeaf(leaves []*pane, p *pane) []*pane {
+	out := leaves[:0]
+	for _, l := range leaves {
+		if l != p {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// arrangeAutoLeaves builds the canonical Subagents layout over 1..4 slot leaves,
+// reusing the given leaf panes as cells:
+//
+//	1 -> s0
+//	2 -> H(s0, s1)
+//	3 -> H(V(s0, s2), s1)
+//	4 -> H(V(s0, s2), V(s1, s3))
+//
+// (0 leaves is handled by the caller with an empty placeholder.)
+func arrangeAutoLeaves(s []*pane) *pane {
+	switch len(s) {
+	case 1:
+		s[0].parent = nil
+		return s[0]
+	case 2:
+		return hNode(s[0], s[1])
+	case 3:
+		return hNode(vNode(s[0], s[2]), s[1])
+	default: // 4 (callers cap autoLeaves at 4)
+		return hNode(vNode(s[0], s[2]), vNode(s[1], s[3]))
+	}
+}
+
+// pruneAutoLeaves drops tracked slot panes no longer present in the live tree.
+func (m *model) pruneAutoLeaves(w *windowState, i int) {
 	live := map[*pane]bool{}
-	for _, l := range leaves(root) {
+	for _, l := range leaves(m.winRoot(i)) {
 		live[l] = true
 	}
 	kept := w.autoLeaves[:0]
@@ -89,54 +144,98 @@ func (m *model) autoPlaceSpawn(child core.AgentID) {
 		}
 	}
 	w.autoLeaves = kept
-
-	switch len(w.autoLeaves) {
-	case 0: // empty tab: a single pane
-		leaf := newLeaf(child)
-		w.autoLeaves = []*pane{leaf}
-		m.setWinRoot(i, leaf, leaf)
-	case 1: // split left/right: existing left, new right
-		nl := newLeaf(child)
-		nr, _ := splitPaneWith(root, w.autoLeaves[0], splitH, nl)
-		w.autoLeaves = append(w.autoLeaves, nl)
-		m.setWinRoot(i, nr, nl)
-	case 2: // split the left pane top/bottom
-		nl := newLeaf(child)
-		nr, _ := splitPaneWith(root, w.autoLeaves[0], splitV, nl)
-		w.autoLeaves = append(w.autoLeaves, nl)
-		m.setWinRoot(i, nr, nl)
-	case 3: // split the right pane top/bottom
-		nl := newLeaf(child)
-		nr, _ := splitPaneWith(root, w.autoLeaves[1], splitV, nl)
-		w.autoLeaves = append(w.autoLeaves, nl)
-		m.setWinRoot(i, nr, nl)
-	default: // 4 slots full: retarget the oldest subagent's pane
-		oldest := w.autoLeaves[0]
-		for _, l := range w.autoLeaves[1:] {
-			if m.spawnTime[l.agent].Before(m.spawnTime[oldest.agent]) {
-				oldest = l
-			}
-		}
-		oldest.agent = child
-		oldest.shell, oldest.rev, oldest.term, oldest.empty = false, false, false, false
-		m.refreshLeaf(oldest)
-		m.setWinRoot(i, root, oldest)
-	}
 }
 
-// rebuildSubagentsTab resets the Subagents tab and re-places every live subagent in
-// spawn order (used on resume, where restored subagents fire no spawn events).
+// reconcileSubagentPanes rebuilds window i's tree canonically from w.autoLeaves,
+// reusing the surviving leaf panes (viewports preserved). Focus is kept on the
+// focused leaf when it survives, otherwise the newest slot.
+func (m *model) reconcileSubagentPanes(w *windowState, i int) {
+	if len(w.autoLeaves) == 0 {
+		empty := newEmptyLeaf()
+		m.setWinRoot(i, empty, empty)
+		return
+	}
+	root := arrangeAutoLeaves(w.autoLeaves)
+	focus := w.focus
+	if i == m.winIdx {
+		focus = m.focusPane
+	}
+	if autoLeafFor(w.autoLeaves, focusAgentOf(focus)) != focus {
+		focus = w.autoLeaves[len(w.autoLeaves)-1]
+	}
+	m.setWinRoot(i, root, focus)
+}
+
+// focusAgentOf returns a pane's agent id (empty for nil/non-leaf).
+func focusAgentOf(p *pane) core.AgentID {
+	if p == nil || !p.leaf {
+		return ""
+	}
+	return p.agent
+}
+
+// autoAdmitSubagent opens a Subagents-tab pane for id (spawn or reprompt): only when
+// fewer than four are open and id has no slot yet. Never evicts a shown pane.
+func (m *model) autoAdmitSubagent(id core.AgentID) {
+	if m.customizablePanes() {
+		return
+	}
+	w, i := m.subagentsWindow()
+	if w == nil {
+		return
+	}
+	m.recordSpawn(id)
+	m.pruneAutoLeaves(w, i)
+	if autoLeafFor(w.autoLeaves, id) != nil {
+		return // already shown
+	}
+	if len(w.autoLeaves) >= 4 {
+		return // slots full (req: open a pane only when fewer than four are open)
+	}
+	w.autoLeaves = append(w.autoLeaves, newLeaf(id))
+	m.reconcileSubagentPanes(w, i)
+}
+
+// autoRemoveSubagent closes id's Subagents-tab pane (idle/killed) and re-arranges the
+// remaining panes canonically. The caller gates this on closeIdleSubagentPanes.
+func (m *model) autoRemoveSubagent(id core.AgentID) {
+	if m.customizablePanes() {
+		return
+	}
+	w, i := m.subagentsWindow()
+	if w == nil {
+		return
+	}
+	m.pruneAutoLeaves(w, i)
+	leaf := autoLeafFor(w.autoLeaves, id)
+	if leaf == nil {
+		return
+	}
+	w.autoLeaves = removeLeaf(w.autoLeaves, leaf)
+	m.reconcileSubagentPanes(w, i)
+}
+
+// autoPlaceSpawn admits a newly spawned subagent into the Subagents tab (kept as the
+// name the event.Spawned handler calls).
+func (m *model) autoPlaceSpawn(child core.AgentID) { m.autoAdmitSubagent(child) }
+
+// rebuildSubagentsTab repopulates the Subagents tab from the live subagents in spawn
+// order (used on resume, where restored subagents fire no spawn/state events). It
+// shows a snapshot, so a restored IDLE subagent still gets a pane (unlike a live
+// idle transition, which closes one).
 func (m *model) rebuildSubagentsTab() {
 	w, i := m.subagentsWindow()
 	if w == nil {
 		return
 	}
 	w.autoLeaves = nil
-	empty := newEmptyLeaf()
-	m.setWinRoot(i, empty, empty)
 	for _, id := range m.subagentsBySpawn() {
-		m.autoPlaceSpawn(id)
+		if len(w.autoLeaves) >= 4 {
+			break
+		}
+		w.autoLeaves = append(w.autoLeaves, newLeaf(id))
 	}
+	m.reconcileSubagentPanes(w, i)
 }
 
 // subagentsBySpawn lists the live (non-killed) subagents in spawn order.
