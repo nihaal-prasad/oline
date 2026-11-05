@@ -1,7 +1,7 @@
 # Offensive Line
 
 <p align="center">
-  <img src="docs/logo.png" alt="O-Line" width="560">
+  <img src="docs/logo.png" alt="O-Line" width="560" />
 </p>
 
 **Offensive Line** runs a coordinated team of AI agents inside an isolated sandbox
@@ -23,6 +23,16 @@ Two modes:
 - [Configuration](docs/configuration.md): config files, models, secrets, backups, and logs.
 - [Extending oline](docs/extending.md): add your own subagents and tools via config (or Go).
 - [Sandbox and egress](docs/sandbox.md): the WSL and QEMU backends and the network boundary.
+
+## Images
+
+<p align="center">
+  <img src="docs/ExploiterInfo.png" alt="(Exploiter Info)" width="560" />
+  <img src="docs/ExploiterSubagents.png" alt="(Exploiter Info)" width="560" />
+</p>
+
+Note: Target specific data (names, variables, versions, addresses, etc.) have been censored
+from the images.
 
 ## Build
 
