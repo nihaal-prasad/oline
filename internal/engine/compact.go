@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/nihaal-prasad/oline/internal/event"
 	"github.com/nihaal-prasad/oline/internal/llm"
@@ -108,9 +109,12 @@ func (a *Agent) compactIfNeeded(ctx context.Context) {
 
 	// Try the cheap summarizer model first, then fall back to the agent's own model
 	// (which already handles this agent's context) if the summarizer one errors or
-	// returns nothing — for example when the summarizer model's context window is
-	// smaller than the transcript. Each attempt caps the transcript to what that
-	// model's window can hold, so the model is never handed more than it accepts.
+	// returns nothing. A transcript larger than the summarizer's context window is
+	// NOT a reason to fall back: summarize() covers the whole history by summarizing
+	// it in window-sized chunks and then reducing the chunk summaries, so the oldest
+	// turns are preserved instead of being truncated away (the point of using a
+	// smaller, cheaper model to compact a larger model's context). Each attempt is
+	// told its model's window via inChars, so no single request overflows it.
 	type attempt struct {
 		client  LLM
 		model   string
@@ -171,10 +175,13 @@ func inputBudgetChars(ctxTokens, outTokens int) int {
 	return budget
 }
 
-// summarize produces a dense brief of older messages via the given model, capping
-// the flattened transcript to inChars characters and the output to maxTok tokens.
-// The transcript is flattened to plain text, so tool-call/result pairing never
-// matters for the summarization request.
+// compactSystemPrompt steers every summarization request: the per-chunk map pass,
+// the reduce pass, and the single-shot common case all share it.
+const compactSystemPrompt = "You compact an AI agent's working transcript so it can keep going within a limited context window. Produce a concise but COMPLETE brief that preserves everything needed to continue: the goal, the current state, key facts and findings, decisions made, hosts/credentials/artifacts discovered, what was tried and what worked or failed, and the open threads and next steps. Be factual and dense; add no commentary."
+
+// summarize produces a dense brief of older messages via the given model. The
+// messages are flattened to plain text (so tool-call/result pairing never matters
+// here) and handed to summarizeText, which keeps every request within inChars.
 func (a *Agent) summarize(ctx context.Context, client LLM, model string, older []llm.Message, inChars, maxTok int) (string, error) {
 	var sb strings.Builder
 	for _, m := range older {
@@ -192,19 +199,109 @@ func (a *Agent) summarize(ctx context.Context, client LLM, model string, older [
 			sb.WriteString("TOOL RESULT: " + m.Content + "\n")
 		}
 	}
-	text := sb.String()
-	if inChars > 0 && len(text) > inChars { // keep the most recent part if too long
-		text = text[len(text)-inChars:]
+	return a.summarizeText(ctx, client, model, sb.String(), inChars, maxTok)
+}
+
+// summarizeText condenses transcript text to at most maxTok tokens using a model
+// whose input window holds about inChars characters (inChars <= 0 means unbounded).
+// When the text fits, it is summarized in a single call. When it does not, it is
+// summarized hierarchically (map/reduce): the text is split into window-sized
+// chunks, each chunk is summarized on its own, and the chunk summaries are joined
+// and reduced — repeating until one brief remains. This covers the ENTIRE history
+// even when the summarizer's window is far smaller than the transcript, instead of
+// dropping the oldest turns, which is exactly the case when a large model's context
+// is compacted by a smaller, cheaper summarizer model.
+func (a *Agent) summarizeText(ctx context.Context, client LLM, model, text string, inChars, maxTok int) (string, error) {
+	// maxReduceRounds bounds the reduce recursion so a pathological config can never
+	// loop forever; each round roughly halves the text, so this covers ~2^N windows.
+	const maxReduceRounds = 6
+	lead := "Summarize this transcript:\n\n"
+	for round := 0; ; round++ {
+		if inChars <= 0 || len(text) <= inChars {
+			return a.summarizeOnce(ctx, client, model, lead+text, maxTok)
+		}
+		// Cap each chunk's summary to half the window's token budget so the combined
+		// output is strictly smaller than the input — this is what guarantees the loop
+		// makes progress and terminates.
+		chunkTok := (inChars / charsPerToken) / 2
+		if chunkTok > maxTok {
+			chunkTok = maxTok
+		}
+		if chunkTok < 256 {
+			chunkTok = 256
+		}
+		chunks := chunkString(text, inChars)
+		parts := make([]string, 0, len(chunks))
+		for _, ch := range chunks {
+			s, err := a.summarizeOnce(ctx, client, model, "Summarize this part of a longer transcript:\n\n"+ch, chunkTok)
+			if err != nil {
+				return "", err // let the caller fall back to the next model
+			}
+			if strings.TrimSpace(s) != "" {
+				parts = append(parts, s)
+			}
+		}
+		combined := strings.Join(parts, "\n\n")
+		if strings.TrimSpace(combined) == "" {
+			return "", nil
+		}
+		// Last-resort guard: if we have reduced too many times, or a round failed to
+		// shrink the text, keep the most recent window and do one final pass rather
+		// than loop. This should not trigger for realistic transcripts.
+		if round >= maxReduceRounds || len(combined) >= len(text) {
+			if inChars > 0 && len(combined) > inChars {
+				combined = combined[len(combined)-inChars:]
+			}
+			return a.summarizeOnce(ctx, client, model, "Combine these transcript summaries into one dense brief:\n\n"+combined, maxTok)
+		}
+		// Reduce: summarize the joined chunk summaries (another round if still large).
+		text = combined
+		lead = "These are ordered summaries of consecutive parts of one transcript; combine them into one dense brief:\n\n"
 	}
+}
+
+// summarizeOnce runs a single summarization request (the shared system prompt plus
+// one user message) and returns the assembled text.
+func (a *Agent) summarizeOnce(ctx context.Context, client LLM, model, userMsg string, maxTok int) (string, error) {
 	req := llm.ChatReq{
 		Model: model,
 		Messages: []llm.Message{
-			{Role: llm.RoleSystem, Content: "You compact an AI agent's working transcript so it can keep going within a limited context window. Produce a concise but COMPLETE brief that preserves everything needed to continue: the goal, the current state, key facts and findings, decisions made, hosts/credentials/artifacts discovered, what was tried and what worked or failed, and the open threads and next steps. Be factual and dense; add no commentary."},
-			{Role: llm.RoleUser, Content: "Summarize this transcript:\n\n" + text},
+			{Role: llm.RoleSystem, Content: compactSystemPrompt},
+			{Role: llm.RoleUser, Content: userMsg},
 		},
 		MaxTokens: maxTok,
 	}
 	return a.runLLMText(ctx, client, req)
+}
+
+// chunkString splits s into pieces of at most max bytes, cutting at the last
+// newline within the window when there is one (and otherwise backing off to a
+// UTF-8 rune boundary) so a split never lands in the middle of a line or rune.
+func chunkString(s string, max int) []string {
+	if max <= 0 || len(s) <= max {
+		return []string{s}
+	}
+	var out []string
+	for len(s) > max {
+		cut := strings.LastIndexByte(s[:max], '\n')
+		if cut <= 0 { // no newline in the window: cut at a rune boundary
+			cut = max
+			for cut > 0 && !utf8.RuneStart(s[cut]) {
+				cut--
+			}
+			if cut == 0 {
+				cut = max
+			}
+		} else {
+			cut++ // keep the newline with the chunk before it
+		}
+		out = append(out, s[:cut])
+		s = s[cut:]
+	}
+	if len(s) > 0 {
+		out = append(out, s)
+	}
+	return out
 }
 
 // runLLMText runs one non-tool LLM request and returns the assembled text.

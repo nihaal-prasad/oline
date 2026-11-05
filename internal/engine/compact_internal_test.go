@@ -59,6 +59,30 @@ func noticeCollector(events chan event.Event) func() []event.Notice {
 	}
 }
 
+// countMock records how many summarization calls it received, so a test can tell a
+// single-shot summary from a chunked (map/reduce) one.
+type countMock struct {
+	mu    sync.Mutex
+	calls int
+	text  string
+}
+
+func (m *countMock) Stream(ctx context.Context, _ llm.ChatReq, ch chan<- llm.Delta) error {
+	defer close(ch)
+	m.mu.Lock()
+	m.calls++
+	m.mu.Unlock()
+	select {
+	case ch <- llm.Delta{TextDelta: m.text}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	ch <- llm.Delta{Finish: "stop"}
+	return nil
+}
+
+func (m *countMock) count() int { m.mu.Lock(); defer m.mu.Unlock(); return m.calls }
+
 func bigHistory(a *Agent, pairs int) {
 	big := strings.Repeat("x", 2000)
 	for i := 0; i < pairs; i++ {
@@ -153,6 +177,40 @@ func TestCompactFailureReportsReason(t *testing.T) {
 	}
 	if !strings.Contains(warn, "context length exceeded") && !strings.Contains(warn, "500") {
 		t.Errorf("warning should name the underlying reason, got %q", warn)
+	}
+}
+
+// TestCompactChunksLargeHistory checks that when the whole older transcript is far
+// larger than the summarizer model's context window, compaction summarizes it in
+// multiple chunks (map/reduce) rather than truncating to the most recent window —
+// so the oldest turns are still represented in the final summary.
+func TestCompactChunksLargeHistory(t *testing.T) {
+	events := make(chan event.Event, 256)
+	go func() {
+		for range events {
+		}
+	}()
+	s := NewSession(tools.NewRegistry(), nil, nil, func(string) (AgentConfig, bool) { return AgentConfig{}, false }, events, 5)
+	mock := &countMock{text: "S"}
+	s.SummarizerLLM = mock
+	s.SummarizerModel = "small"
+	s.SummarizerContextTokens = 6000 // a small window relative to the transcript
+
+	// Large ceiling with far more history than the summarizer window can hold at once.
+	a := newAgent("recon#1", AgentConfig{Role: "recon", MaxContextTokens: 8000}, sumMock{text: "OWN"}, "m", s, "", "")
+	bigHistory(a, 20)
+	before := len(a.history)
+
+	a.compactIfNeeded(context.Background())
+
+	if len(a.history) >= before {
+		t.Fatalf("history was not compacted: %d -> %d", before, len(a.history))
+	}
+	if n := mock.count(); n <= 1 {
+		t.Errorf("expected multiple summarizer calls (chunked map/reduce), got %d", n)
+	}
+	if !strings.Contains(a.history[0].Content, "S") {
+		t.Errorf("summary should come from the chunked summarizer, got %q", a.history[0].Content)
 	}
 }
 
