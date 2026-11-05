@@ -127,14 +127,17 @@ func (a *Agent) doRevshell(tc llm.ToolCall) (string, bool) {
 
 	switch action {
 	case "open":
+		a.s.auditCmd(string(a.id), "revshell.open", name, fmt.Sprintf("port %d", args.Port))
 		return reply(a.revOpen(name, args.Port))
 	case "send":
+		a.s.auditCmd(string(a.id), "revshell.send", name, args.Data)
 		return reply(a.revSend(name, args.Data))
 	case "read":
 		return reply(a.revRead(name, args.Bytes))
 	case "list":
 		return reply(a.revList())
 	case "close":
+		a.s.auditCmd(string(a.id), "revshell.close", name, "")
 		return reply(a.revClose(name))
 	case "acquire":
 		return reply(a.revAcquire(name))

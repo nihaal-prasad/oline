@@ -184,6 +184,7 @@ func (m *model) runShell(sh *shellState, cmd string) {
 	if m.sess != nil {
 		m.sess.RecordOperatorLine(string(sh.id), "$ "+cmd) // mirror to agents (terminal tool)
 	}
+	m.auditUser("user.shell", string(sh.id), cmd) // record the operator's command (host audit log)
 
 	sh.busy = true
 	sh.bytes = 0

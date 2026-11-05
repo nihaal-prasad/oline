@@ -235,6 +235,7 @@ func (m *model) openTermWith(id core.AgentID, argv []string, policy sandbox.Egre
 	}
 	ts := &termState{id: id, emu: emu, sess: sess, cols: cols, rows: rows, cancel: cancel, title: title}
 	m.terms[id] = ts
+	m.auditUser("user.terminal.open", string(id), strings.Join(argv, " ")) // record the operator opening a PTY (host audit log)
 
 	// Pipe the emulator's own replies (cursor-position reports, device attributes,
 	// in-band resize) back to the child's stdin. Ends when either side closes.

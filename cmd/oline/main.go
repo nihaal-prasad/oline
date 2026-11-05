@@ -14,6 +14,7 @@ import (
 
 	"github.com/nihaal-prasad/oline/assets"
 	"github.com/nihaal-prasad/oline/internal/agents"
+	"github.com/nihaal-prasad/oline/internal/audit"
 	"github.com/nihaal-prasad/oline/internal/config"
 	"github.com/nihaal-prasad/oline/internal/core"
 	"github.com/nihaal-prasad/oline/internal/tui"
@@ -35,11 +36,20 @@ func main() {
 	destroyFlag := flag.Bool("destroy", false, "interactively destroy an oline-managed WSL/QEMU environment and exit (only oline-created envs; never touches anything else; asks for confirmation)")
 	initFlag := flag.Bool("init-config", false, "write the mode's default config.yml, models.yml and prompt files to ~/oline/config/<mode>/ for editing, then exit")
 	forceFlag := flag.Bool("force", false, "with -init-config: overwrite existing config files instead of keeping them")
+	auditVerifyFlag := flag.String("audit-verify", "", "verify the tamper-evident audit log for an engagement (by name) and exit")
 	versionFlag := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
+	// Make the build version available to the TUI (recorded in export-bundle metadata).
+	tui.Version = version
+
 	if *versionFlag {
 		fmt.Printf("oline %s\n", version)
+		return
+	}
+
+	if *auditVerifyFlag != "" {
+		runAuditVerify(*auditVerifyFlag)
 		return
 	}
 
@@ -143,6 +153,32 @@ func printRoster(mode config.Mode) {
 			fmt.Printf("  ! %s\n", w)
 		}
 	}
+}
+
+// runAuditVerify re-verifies an engagement's tamper-evident audit log and exits
+// non-zero if the hash chain is broken (evidence of tampering or corruption).
+func runAuditVerify(engagement string) {
+	path := tui.AuditPath(engagement)
+	res, err := audit.Verify(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "oline: audit-verify: cannot read the audit log for %q at %s: %v\n", engagement, path, err)
+		os.Exit(1)
+	}
+	if res.OK {
+		fmt.Printf("oline: audit log for %q is INTACT — %d entr%s verified\n  %s\n",
+			engagement, res.Entries, plural(res.Entries), path)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "oline: AUDIT LOG TAMPERING DETECTED for %q — %s (at entry %d; %d verified before it)\n  %s\n",
+		engagement, res.Reason, res.BrokenAt, res.Entries, path)
+	os.Exit(1)
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return "y"
+	}
+	return "ies"
 }
 
 func dash(s string) string {

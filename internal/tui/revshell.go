@@ -193,6 +193,7 @@ func (m *model) startRevTail(rs *revState) {
 func (m *model) sendRev(rs *revState, cmd string) {
 	t := m.shellTranscript(rs.id)
 	t.addStyled("$ "+cmd, styleAccent)
+	m.auditUser("user.revshell.send", rs.name, cmd) // record the operator's command (host audit log)
 	if m.sess == nil || m.sess.Sandbox == nil {
 		t.addStyled("[no sandbox attached]", styleErr)
 		m.refreshFor(rs.id)

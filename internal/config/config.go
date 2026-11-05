@@ -253,6 +253,12 @@ func HistoryDir() string {
 	return filepath.Join(HostRoot(), "history")
 }
 
+// AuditDir returns the host directory that holds per-engagement tamper-evident
+// audit logs (<HostRoot>/audit). The program writes these; agents never do.
+func AuditDir() string {
+	return filepath.Join(HostRoot(), "audit")
+}
+
 // WriteDefaults scaffolds the embedded defaults for a mode into its on-disk config
 // directory (<HostRoot>/config/<mode>/): config.yml, models.yml, and every prompt
 // file (SYSTEM_TEMPLATE.md, PERSONALITY.md, agents/*.md). Those

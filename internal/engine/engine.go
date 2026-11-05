@@ -16,6 +16,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/nihaal-prasad/oline/internal/audit"
 	"github.com/nihaal-prasad/oline/internal/core"
 	"github.com/nihaal-prasad/oline/internal/event"
 	"github.com/nihaal-prasad/oline/internal/llm"
@@ -188,6 +189,28 @@ type Session struct {
 	opTermMu  sync.Mutex
 	opTerms   map[string]*operatorTerminal
 	opTermOrd []string
+
+	// audit is the tamper-evident, host-side command log for this engagement (set by
+	// the TUI via SetAudit). Agent and operator command executions are appended to it.
+	audit *audit.Log
+
+	// Retained engagement results for the export bundle (and future reporter): the
+	// confirmed findings and the latest summary, kept here (guarded by resMu) so a
+	// backup goroutine can read them without racing the UI goroutine.
+	resMu    sync.Mutex
+	findings []Finding
+	summary  string
+}
+
+// Finding is one confirmed security finding (recorded via the record_finding tool),
+// retained for the engagement export bundle and the final report.
+type Finding struct {
+	Time     time.Time `json:"time,omitempty"`
+	Agent    string    `json:"agent,omitempty"`
+	Severity string    `json:"severity"`
+	Title    string    `json:"title"`
+	Target   string    `json:"target,omitempty"`
+	Detail   string    `json:"detail,omitempty"`
 }
 
 // backupGate pauses agent file writes (the write/edit tools) while a workspace
@@ -206,6 +229,63 @@ func (g *backupGate) Leave()         { g.mu.RUnlock() }
 // these so the archive is never captured mid-write. Calls must be balanced.
 func (s *Session) FreezeWrites()   { s.backupGate.mu.Lock() }
 func (s *Session) UnfreezeWrites() { s.backupGate.mu.Unlock() }
+
+// SetAudit attaches the tamper-evident command audit log for this engagement. The
+// TUI creates it (host-side) and sets it here so agent command executions are
+// recorded alongside the operator's own.
+func (s *Session) SetAudit(a *audit.Log) { s.audit = a }
+
+// auditCmd records one command execution to the audit log, if one is attached.
+func (s *Session) auditCmd(actor, action, target, detail string) {
+	s.audit.Command(actor, action, target, detail)
+}
+
+// addFinding / setSummary retain engagement results for the export bundle.
+func (s *Session) addFinding(f Finding) {
+	s.resMu.Lock()
+	s.findings = append(s.findings, f)
+	s.resMu.Unlock()
+}
+func (s *Session) setSummary(text string) {
+	s.resMu.Lock()
+	s.summary = text
+	s.resMu.Unlock()
+}
+
+// Findings returns a copy of the confirmed findings retained this session.
+func (s *Session) Findings() []Finding {
+	s.resMu.Lock()
+	defer s.resMu.Unlock()
+	return append([]Finding(nil), s.findings...)
+}
+
+// Summary returns the latest engagement summary retained this session.
+func (s *Session) Summary() string {
+	s.resMu.Lock()
+	defer s.resMu.Unlock()
+	return s.summary
+}
+
+// SeedFindings prepends findings recovered from saved history on resume, so the
+// export bundle still lists findings confirmed in earlier sessions.
+func (s *Session) SeedFindings(fs []Finding) {
+	if len(fs) == 0 {
+		return
+	}
+	s.resMu.Lock()
+	s.findings = append(append([]Finding(nil), fs...), s.findings...)
+	s.resMu.Unlock()
+}
+
+// SeedSummary sets the summary recovered from saved history on resume, unless a new
+// one has already been set this session.
+func (s *Session) SeedSummary(text string) {
+	s.resMu.Lock()
+	if s.summary == "" {
+		s.summary = text
+	}
+	s.resMu.Unlock()
+}
 
 // AgentRecord is a persisted snapshot of one agent's conversation, used to save an
 // engagement to the host and reload it on resume.
@@ -1581,6 +1661,7 @@ func (a *Agent) doBash(tc llm.ToolCall) (string, bool) {
 	a.mu.Unlock()
 
 	a.s.emit(event.ToolStarted{Agent: a.id, Tool: "bash", ArgsPreview: preview(tc.Arguments), Args: tc.Arguments})
+	a.s.auditCmd(string(a.id), "bash", "", args.Cmd)
 
 	// Run the command as one streaming Exec on the ENGAGEMENT context, so it (and any
 	// children) survive this agent turn and are stopped only by StopCommands/pause or
@@ -1692,6 +1773,7 @@ func (a *Agent) doBashBg(tc llm.ToolCall) (string, bool) {
 	jobID := fmt.Sprintf("job-%d", id)
 	a.mu.Unlock()
 	cmd := args.Cmd
+	a.s.auditCmd(string(a.id), "bash_bg", "", cmd)
 
 	a.s.emit(event.ToolStarted{Agent: a.id, Tool: "bash_bg", ArgsPreview: preview(tc.Arguments), Args: tc.Arguments})
 
@@ -1815,9 +1897,10 @@ func (a *Agent) doRecordFinding(tc llm.ToolCall) (string, bool) {
 		return reply("record_finding: 'title' is required", true)
 	}
 	sev := normalizeSeverity(args.Severity)
-	a.s.emit(event.Finding{Agent: a.id, Severity: sev, Title: strings.TrimSpace(args.Title),
-		Target: strings.TrimSpace(args.Target), Detail: strings.TrimSpace(args.Detail)})
-	return reply(fmt.Sprintf("recorded %s finding %q (logged for the report). Keep it; the reporter will include it.", sev, strings.TrimSpace(args.Title)), false)
+	title, target, detail := strings.TrimSpace(args.Title), strings.TrimSpace(args.Target), strings.TrimSpace(args.Detail)
+	a.s.emit(event.Finding{Agent: a.id, Severity: sev, Title: title, Target: target, Detail: detail})
+	a.s.addFinding(Finding{Time: time.Now().UTC(), Agent: string(a.id), Severity: sev, Title: title, Target: target, Detail: detail})
+	return reply(fmt.Sprintf("recorded %s finding %q (logged for the report). Keep it; the reporter will include it.", sev, title), false)
 }
 
 // doUpdateSummary sets the orchestrator's live engagement summary (replaces the
@@ -1837,7 +1920,9 @@ func (a *Agent) doUpdateSummary(tc llm.ToolCall) (string, bool) {
 	if strings.TrimSpace(args.Summary) == "" {
 		return reply("update_summary: 'summary' is required", true)
 	}
-	a.s.emit(event.Summary{Text: strings.TrimSpace(args.Summary)})
+	summary := strings.TrimSpace(args.Summary)
+	a.s.emit(event.Summary{Text: summary})
+	a.s.setSummary(summary)
 	return reply("summary panel updated.", false)
 }
 

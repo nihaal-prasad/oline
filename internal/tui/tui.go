@@ -24,6 +24,7 @@ import (
 
 	"github.com/nihaal-prasad/oline/assets"
 	"github.com/nihaal-prasad/oline/internal/agents"
+	"github.com/nihaal-prasad/oline/internal/audit"
 	"github.com/nihaal-prasad/oline/internal/config"
 	"github.com/nihaal-prasad/oline/internal/core"
 	"github.com/nihaal-prasad/oline/internal/engine"
@@ -391,6 +392,7 @@ type model struct {
 	hideLogo    bool          // a Sixel splash already showed the banner; skip the block-art logo
 	quitArmedAt time.Time     // first Ctrl-c; a second within 3s confirms quit
 	log         *englog       // per-engagement host activity log
+	audit       *audit.Log    // per-engagement tamper-evident command audit log (host-side)
 
 	budgetInput   bool         // the command line is entering a time budget
 	budgetTarget  core.AgentID // which agent the budget entry applies to
@@ -1885,6 +1887,10 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	// Per-engagement activity log on the host (what every agent does/thinks/runs).
 	m.log = openEngLog(m.engagement)
 	m.log.setRedact(m.store.KnownSecrets()) // scrub any API keys an agent echoes
+	// Per-engagement tamper-evident command audit log on the host (agent + operator
+	// command executions, hash-chained). Agents never touch it.
+	m.audit = openAuditLog(m.engagement)
+	m.sess.SetAudit(m.audit)
 	m.log.banner(fmt.Sprintf("%s · %s · env=%s · scope=%q · goal=%q", m.engagement,
 		m.sess.Mode.String(), cand.ID, strings.TrimSpace(m.scopeIn.Value()), strings.TrimSpace(m.goalIn.Value())))
 	// Resume with history: restore the prior conversation (seed Main live, rebuild
@@ -1893,6 +1899,12 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	if m.resume && m.loadHist {
 		if eh, err := loadHistory(m.engagement); err == nil {
 			m.restoreHistory(eh.Agents)
+			// Recover prior findings + summary from the saved history so a resumed
+			// engagement's export bundle still reflects what earlier sessions found.
+			if fs, sum := findingsFromHistory(eh.Agents); len(fs) > 0 || sum != "" {
+				m.sess.SeedFindings(fs)
+				m.sess.SeedSummary(sum)
+			}
 			// Only the fully-customizable mode restores a saved free-form layout; the
 			// enforced tabs (Info / Subagents) are deterministic, so they are kept as
 			// built above.
@@ -1918,6 +1930,9 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	m.writeln(core.Main, styleMuted.Render(start+" in "+cand.ID+" — "+m.sess.Mode.String()))
 	if p := m.log.Path(); p != "" {
 		m.writeln(core.Main, styleMuted.Render("activity log → "+p))
+	}
+	if p := m.audit.Path(); p != "" {
+		m.writeln(core.Main, styleMuted.Render("audit log (tamper-evident) → "+p+"  (verify with: oline -audit-verify "+m.engagement+")"))
 	}
 
 	// Resume: make sure the engagement's files are in the canonical workspace,
@@ -1947,7 +1962,7 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 
 	// Host-side backups (done by the program, not the agents). 0 disables.
 	if min := m.store.Effective().Backup.IntervalMinutes; min > 0 {
-		m.writeln(core.Main, styleMuted.Render(fmt.Sprintf("host backups: every %d min + at end → %s (one file, overwritten)",
+		m.writeln(core.Main, styleMuted.Render(fmt.Sprintf("host backups: every %d min + at end → %s (full engagement export bundle: workspace, transcripts, findings, logs, report when produced; overwritten)",
 			min, filepath.Join(m.store.BackupDir(), m.engagement+".tar.gz"))))
 		go m.backupLoop(ctx, m.engagement, min)
 	} else {
@@ -1995,20 +2010,23 @@ func (m *model) runBackup(engagement string) {
 	if m.sess == nil {
 		return
 	}
+	// Flush the latest conversation to history.json first, so the bundle captures the
+	// most recent transcript (saveHistory is serialized by histMu, safe from here).
+	m.saveHistory()
 	dest := filepath.Join(m.store.BackupDir(), engagement+".tar.gz")
-	// Pause agent file writes for the duration of the backup so the archive is never
+	// Pause agent file writes for the duration of the backup so the workspace is never
 	// captured mid-write (agents get a "backup in progress, retry" error meanwhile);
-	// the closure guarantees writes resume even if Backup panics.
+	// the closure guarantees writes resume even if the build panics.
 	err := func() error {
 		m.sess.FreezeWrites()
 		defer m.sess.UnfreezeWrites()
-		return m.sess.Sandbox.Backup(context.Background(), engagement, dest)
+		return m.buildExportBundle(engagement, dest)
 	}()
 	if err != nil {
 		m.emitNotice("warn", "backup skipped: "+err.Error())
 		return
 	}
-	m.emitNotice("info", "backed up engagement → "+dest)
+	m.emitNotice("info", "backed up engagement bundle → "+dest)
 }
 
 // emitNotice sends a notice to the TUI from any goroutine (non-blocking).
@@ -3320,6 +3338,10 @@ func (m *model) shutdown() {
 		m.log.banner("engagement session ended")
 		m.log.close()
 		m.log = nil
+	}
+	if m.audit != nil {
+		_ = m.audit.Close()
+		m.audit = nil
 	}
 }
 
