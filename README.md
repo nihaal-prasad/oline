@@ -24,7 +24,7 @@ Two modes:
 - [Extending oline](docs/extending.md): add your own subagents and tools via config (or Go).
 - [Sandbox and egress](docs/sandbox.md): the WSL and QEMU backends and the network boundary.
 
-## Images
+## Screenshots
 
 (Target specific names, variables, versions, addresses, etc. have been censored
 from the images.)
