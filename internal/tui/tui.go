@@ -262,6 +262,8 @@ const (
 	wStart
 	wEnv
 	wDisk      // new QEMU engagement: how much disk to allocate to the VM
+	wCPUs      // new QEMU engagement: how many vCPUs to give the VM
+	wMem       // new QEMU engagement: how much RAM (GB) to give the VM
 	wWSLRootfs // new WSL distro, older WSL only: path to a Debian rootfs tarball to import
 	wResume
 	wImport
@@ -293,6 +295,10 @@ type model struct {
 	goalIn      textinput.Model
 	diskIn      textinput.Model // GB to allocate when creating a new VM (wDisk step)
 	diskGB      int             // parsed result of diskIn, applied to the created VM's disk
+	cpusIn      textinput.Model // vCPUs to allocate when creating a new VM (wCPUs step)
+	cpus        int             // parsed result of cpusIn, applied to the created VM
+	memIn       textinput.Model // RAM in GB when creating a new VM (wMem step)
+	memGB       int             // parsed result of memIn, applied to the created VM
 	wslRootfsIn textinput.Model // Debian rootfs tarball path (wWSLRootfs fallback step)
 	newEnvName  string          // generated oline- name for a newly created environment
 	createWSL   bool            // the chosen env is a NEW WSL distro to provision
@@ -495,9 +501,14 @@ func (m *model) applyModePlaceholders() {
 	}
 }
 
-// defaultDiskGB is the suggested disk size for a newly created VM (the wDisk step).
-// Installing offensive tooling fills a small disk fast, so the default is generous.
-const defaultDiskGB = 25
+// Default VM sizing suggested in the wizard's disk/CPU/RAM steps for a new QEMU VM.
+// Installing offensive tooling fills a small disk fast, so the disk default is
+// generous; the CPU/RAM defaults match sandbox.Default{CPUs,MemMB}.
+const (
+	defaultDiskGB = 25
+	defaultCPUs   = 4
+	defaultMemGB  = 8
+)
 
 func newModel(mode config.Mode, store *config.Store, roster *agents.Roster) *model {
 	si := textinput.New()
@@ -518,6 +529,16 @@ func newModel(mode config.Mode, store *config.Store, roster *agents.Roster) *mod
 	di.SetValue(strconv.Itoa(defaultDiskGB))
 	di.CharLimit = 5
 	di.Width = 24
+	cp := textinput.New()
+	cp.Placeholder = "vCPUs for the new VM (e.g. 4)"
+	cp.SetValue(strconv.Itoa(defaultCPUs))
+	cp.CharLimit = 3
+	cp.Width = 24
+	mi := textinput.New()
+	mi.Placeholder = "GB of RAM for the new VM (e.g. 8)"
+	mi.SetValue(strconv.Itoa(defaultMemGB))
+	mi.CharLimit = 5
+	mi.Width = 24
 	ri := textinput.New()
 	ri.Placeholder = "path to a Debian rootfs .tar / .tar.gz / .tar.xz"
 	ri.CharLimit = 1024
@@ -546,6 +567,8 @@ func newModel(mode config.Mode, store *config.Store, roster *agents.Roster) *mod
 		scopeIn:        si,
 		goalIn:         gi,
 		diskIn:         di,
+		cpusIn:         cp,
+		memIn:          mi,
 		wslRootfsIn:    ri,
 		input:          ci,
 		importIn:       ii,
@@ -1034,12 +1057,50 @@ func (m *model) wizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.diskGB = n
 			m.wizErr = ""
 			m.diskIn.Blur()
+			m.step = wCPUs
+			m.cpusIn.Focus()
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.diskIn, cmd = m.diskIn.Update(msg)
+		return m, cmd
+
+	case wCPUs:
+		if k == "enter" {
+			v := strings.TrimSpace(m.cpusIn.Value())
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 || n > 128 {
+				m.wizErr = "enter a whole number of vCPUs (1-128), e.g. 4"
+				return m, nil
+			}
+			m.cpus = n
+			m.wizErr = ""
+			m.cpusIn.Blur()
+			m.step = wMem
+			m.memIn.Focus()
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.cpusIn, cmd = m.cpusIn.Update(msg)
+		return m, cmd
+
+	case wMem:
+		if k == "enter" {
+			v := strings.TrimSpace(m.memIn.Value())
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 || n > 1024 {
+				m.wizErr = "enter a whole number of GB of RAM (1-1024), e.g. 8"
+				return m, nil
+			}
+			m.memGB = n
+			m.wizErr = ""
+			m.memIn.Blur()
 			m.step = wScope
 			m.scopeIn.Focus()
 			return m, nil
 		}
 		var cmd tea.Cmd
-		m.diskIn, cmd = m.diskIn.Update(msg)
+		m.memIn, cmd = m.memIn.Update(msg)
 		return m, cmd
 
 	case wWSLRootfs:
@@ -1698,7 +1759,9 @@ func (m *model) startEngagement() (tea.Model, tea.Cmd) {
 		Persist:       eff.QEMU.Persist,
 		HostFirewall:  eff.QEMU.HostFirewall && runtime.GOOS == "linux",
 		AllowInternet: wire.RosterAllowsInternet(m.mode, m.roster),
-		DiskGB:        m.diskGB, // 0 unless the wDisk step set it (new VM only)
+		DiskGB:        m.diskGB,       // 0 unless the wDisk step set it (new VM only)
+		MemMB:         m.memGB * 1024, // 0 unless the wMem step set it; then backend default (8 GB)
+		CPUs:          m.cpus,         // 0 unless the wCPUs step set it; then backend default (4)
 	}
 	return m, prepareSandboxCmd(sandboxPrep{
 		cand:       cand,
@@ -3578,6 +3641,14 @@ func (m *model) viewWizard() string {
 	if m.step == wDisk {
 		step(true, "   Disk size for the new VM (GB)",
 			"    "+m.diskIn.View()+"\n    "+styleMuted.Render("how much disk the VM may use; installing tools fills a small disk fast (default 25 GB)"))
+	}
+	if m.step == wCPUs {
+		step(true, "   Virtual CPUs for the new VM",
+			"    "+m.cpusIn.View()+"\n    "+styleMuted.Render("how many vCPUs the VM gets (default 4)"))
+	}
+	if m.step == wMem {
+		step(true, "   RAM for the new VM (GB)",
+			"    "+m.memIn.View()+"\n    "+styleMuted.Render("how much memory the VM gets (default 8 GB)"))
 	}
 	if m.step == wWSLRootfs {
 		step(true, "   Debian rootfs tarball for the new WSL distro",

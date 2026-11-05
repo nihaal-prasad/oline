@@ -439,7 +439,8 @@ func (q *qemuSandbox) boot(ctx context.Context, base, id string, opts BootOpts) 
 		return nil, err
 	}
 
-	cmd := exec.Command(qemuBinary(), BuildQemuArgs(overlay, seed, 2048, 2, port, tap)...)
+	memMB, cpus := qemuResources(opts)
+	cmd := exec.Command(qemuBinary(), BuildQemuArgs(overlay, seed, memMB, cpus, port, tap)...)
 	if err := cmd.Start(); err != nil {
 		cleanupBoot(hn, seed, overlay)
 		return nil, fmt.Errorf("sandbox/qemu: launch: %w", err)
@@ -506,7 +507,8 @@ func (q *qemuSandbox) bootResume(ctx context.Context, engagement string, opts Bo
 		cleanupBoot(hn, "", "")
 		return nil, err
 	}
-	cmd := exec.Command(qemuBinary(), BuildQemuArgs(disk, "", 2048, 2, port, tap)...)
+	memMB, cpus := qemuResources(opts)
+	cmd := exec.Command(qemuBinary(), BuildQemuArgs(disk, "", memMB, cpus, port, tap)...)
 	if err := cmd.Start(); err != nil {
 		cleanupBoot(hn, "", "")
 		return nil, fmt.Errorf("sandbox/qemu: launch: %w", err)

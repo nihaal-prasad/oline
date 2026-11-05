@@ -71,11 +71,13 @@ offers, besides any WSL distros:
   then). Every new engagement boots a fresh disposable overlay on this one pristine
   base, so selecting it always creates a brand-new instance — engagements never share
   state, the base is never written to, and a prior disk is never reused or
-  overwritten (to reuse one, persist it and use Resume). The wizard asks
-  how many GB of disk to give the VM (default 25); the overlay is grown to that size
-  (the base stays untouched) and the guest grows its root filesystem to use it on
-  first boot. Sizing applies to every new engagement, so the guest is not stuck at
-  the base image's few GB.
+  overwritten (to reuse one, persist it and use Resume). The wizard asks how many GB
+  of disk to give the VM (default 25), how many virtual CPUs (default 4), and how much
+  RAM in GB (default 8). The overlay is grown to the disk size (the base stays
+  untouched) and the guest grows its root filesystem to use it on first boot; CPUs and
+  RAM size the VM at boot (not baked into the disk, so a resumed VM uses the defaults
+  unless changed). Sizing applies to every new engagement, so the guest is not stuck
+  at the base image's few GB.
 - **A qcow2 you supply**: drop a cloud image (with cloud-init) at
   `<root>/images/<name>.qcow2` and it appears as an environment.
 

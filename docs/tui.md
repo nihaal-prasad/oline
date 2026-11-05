@@ -31,6 +31,9 @@ The wizard asks each setting in order, skipping steps that don't apply; Enter ad
    - **Disk size** (every new QEMU engagement): how many GB the VM's disk may use.
      Installing offensive tooling fills a small image fast, so the default is 25 GB;
      the guest grows its root filesystem to the chosen size on first boot.
+   - **Virtual CPUs** and **RAM** (every new QEMU engagement): the VM's vCPU count
+     (default 4) and memory in GB (default 8). These size the VM at boot and are not
+     baked into the disk, so a resumed VM uses the defaults unless changed.
    - **Debian rootfs** (new WSL distro, older WSL only): if `wsl --install` cannot
      name a distro, point oline at a Debian rootfs tarball to import instead.
 6. **Resume / import** (WSL): pick a saved engagement inside the chosen distro, or

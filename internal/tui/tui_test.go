@@ -156,8 +156,8 @@ func TestWizardNewFlow(t *testing.T) {
 	}
 }
 
-// TestWizardDiskStep: the new-VM disk-size step parses a valid GB value into
-// diskGB and advances to Scope, and rejects a non-numeric entry (staying put).
+// TestWizardDiskStep: the new-VM sizing steps parse valid values into
+// diskGB/cpus/memGB and chain disk -> CPUs -> RAM -> Scope, rejecting bad entries.
 func TestWizardDiskStep(t *testing.T) {
 	m, _ := tempHomeModel(t)
 	var tm tea.Model = m
@@ -168,19 +168,51 @@ func TestWizardDiskStep(t *testing.T) {
 	mm.diskIn.SetValue("50")
 	mm.diskIn.Focus()
 	tm, _ = tm.Update(enter())
-	if mm = tm.(*model); mm.step != wScope {
-		t.Fatalf("after disk entry: step=%v, want wScope", mm.step)
+	if mm = tm.(*model); mm.step != wCPUs {
+		t.Fatalf("after disk entry: step=%v, want wCPUs", mm.step)
 	}
 	if mm.diskGB != 50 {
 		t.Errorf("diskGB = %d, want 50", mm.diskGB)
 	}
 
-	// A non-numeric entry is rejected and the wizard stays on the disk step.
+	// CPUs -> RAM
+	mm.cpusIn.SetValue("6")
+	tm, _ = tm.Update(enter())
+	if mm = tm.(*model); mm.step != wMem {
+		t.Fatalf("after cpu entry: step=%v, want wMem", mm.step)
+	}
+	if mm.cpus != 6 {
+		t.Errorf("cpus = %d, want 6", mm.cpus)
+	}
+
+	// RAM -> Scope
+	mm.memIn.SetValue("16")
+	tm, _ = tm.Update(enter())
+	if mm = tm.(*model); mm.step != wScope {
+		t.Fatalf("after ram entry: step=%v, want wScope", mm.step)
+	}
+	if mm.memGB != 16 {
+		t.Errorf("memGB = %d, want 16", mm.memGB)
+	}
+
+	// Non-numeric entries are rejected and the wizard stays on each step.
 	mm.step = wDisk
 	mm.diskIn.SetValue("abc")
 	tm, _ = tm.Update(enter())
 	if tm.(*model).step != wDisk {
 		t.Errorf("invalid disk size should stay on wDisk, got step=%v", tm.(*model).step)
+	}
+	mm.step = wCPUs
+	mm.cpusIn.SetValue("lots")
+	tm, _ = tm.Update(enter())
+	if tm.(*model).step != wCPUs {
+		t.Errorf("invalid vCPU count should stay on wCPUs, got step=%v", tm.(*model).step)
+	}
+	mm.step = wMem
+	mm.memIn.SetValue("8gb")
+	tm, _ = tm.Update(enter())
+	if tm.(*model).step != wMem {
+		t.Errorf("invalid RAM should stay on wMem, got step=%v", tm.(*model).step)
 	}
 }
 

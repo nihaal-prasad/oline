@@ -112,6 +112,32 @@ type BootOpts struct {
 	// gigabytes so tool installs don't fill a small image. The guest's cloud-init
 	// grows the root filesystem to use it on first boot. 0 keeps the base image size.
 	DiskGB int
+	// MemMB and CPUs size the VM at boot. Each <= 0 uses the backend default
+	// (DefaultMemMB / DefaultCPUs). They are not baked into the disk, so they apply to
+	// a fresh boot and to a resume alike (a resumed VM can be given more/less).
+	MemMB int
+	CPUs  int
+}
+
+// Default VM sizing when BootOpts leaves MemMB/CPUs unset (0). The setup wizard
+// seeds these same values, but they also cover the direct-start (-env) path and a
+// resume, which skip the sizing steps.
+const (
+	DefaultMemMB = 8192 // 8 GB
+	DefaultCPUs  = 4
+)
+
+// qemuResources resolves the VM's memory (MB) and vCPU count from opts, falling
+// back to the package defaults when a field is unset.
+func qemuResources(opts BootOpts) (memMB, cpus int) {
+	memMB, cpus = opts.MemMB, opts.CPUs
+	if memMB <= 0 {
+		memMB = DefaultMemMB
+	}
+	if cpus <= 0 {
+		cpus = DefaultCPUs
+	}
+	return memMB, cpus
 }
 
 // Create downloads (if needed) and boots the managed Debian base image. A
