@@ -39,6 +39,11 @@ from the images.)
   <img src="docs/ExploiterSubagents.png" alt="(Exploiter Info)" />
 </p>
 
+### Terminal Window
+<p align="center">
+  <img src="docs/Terminal.png" alt="(Exploiter Info)" />
+</p>
+
 ## Build
 
 Requires Go 1.27 or newer.
