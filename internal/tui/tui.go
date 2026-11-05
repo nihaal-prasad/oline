@@ -3486,7 +3486,10 @@ func (m *model) mutate(ev event.Event) {
 		if strings.TrimSpace(e.Prompt) != "" {
 			t := m.tr(e.Child)
 			t.addStyled("task from the orchestrator:", styleAccent)
-			t.addRich(e.Prompt)
+			// Render the prompt body as markdown (segText → glamour), like assistant
+			// text, so an orchestrator's markdown instructions aren't shown as raw text.
+			t.appendText(e.Prompt)
+			t.finalizeOpen()
 			m.markDirty(e.Child)
 		}
 	case event.UserQuestion:

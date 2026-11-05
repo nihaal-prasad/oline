@@ -161,6 +161,27 @@ func TestCloseIdleGatedByConfig(t *testing.T) {
 	}
 }
 
+// TestSpawnPromptRendersAsMarkdown checks the orchestrator's task prompt shown at
+// the top of a subagent pane is a markdown (segText) segment, not a plain line, so
+// markdown in the prompt is rendered through glamour like assistant text.
+func TestSpawnPromptRendersAsMarkdown(t *testing.T) {
+	m := runningModel(t)
+	m.apply(event.Spawned{Parent: core.Main, Child: core.AgentID("recon#1"), Role: "recon", Prompt: "# Recon plan\n\n- scan ports\n- enumerate services"})
+	tr := m.tr(core.AgentID("recon#1"))
+	var seg *segment
+	for _, s := range tr.segs {
+		if s.kind == segText && strings.Contains(s.raw.String(), "Recon plan") {
+			seg = s
+		}
+	}
+	if seg == nil {
+		t.Fatal("the task prompt should be a markdown (segText) segment, not a plain line")
+	}
+	if !seg.done {
+		t.Error("the prompt segment should be finalized so it renders as markdown")
+	}
+}
+
 func TestViewEnforcement(t *testing.T) {
 	m := autoModel(t)
 	// Info tab active: only info views allowed.
