@@ -286,8 +286,9 @@ type model struct {
 	step        wizStep
 	wizHistory  []wizStep // setup steps visited, for Esc = go back to the previous one
 	modeSel     int
-	startSel    int // 0 = new engagement, 1 = resume previous
-	resume      bool
+	startSel    int  // 0 = new engagement, 1 = resume previous
+	resume      bool // continuing a previous engagement (offer its saved history to load)
+	reuseDisk   bool // reuse an existing QEMU VM disk (vs a fresh overlay); distinct from resume
 	histSel     int  // wHistory: 0 = load previous conversation, 1 = clean slate
 	loadHist    bool // resume with the saved conversation history (vs a clean slate)
 	autoSel     int
@@ -910,6 +911,45 @@ func (m *model) focusWizardStep(s wizStep) {
 	}
 }
 
+// afterNewVMConfig continues after sizing a freshly-created QEMU VM. If the user
+// chose to resume a previous engagement, it offers the engagements whose host-saved
+// conversation history can be loaded onto this new VM (the history lives on the host,
+// independent of the disposable disk); otherwise it proceeds to the scope step.
+func (m *model) afterNewVMConfig() {
+	if m.resume {
+		m.engagements = savedEngagements()
+		if len(m.engagements) > 0 {
+			m.engSel = 0
+			m.step = wResume
+			return
+		}
+		m.resume = false // nothing saved to load — this is just a new engagement
+	}
+	m.step = wScope
+	m.scopeIn.Focus()
+}
+
+// savedEngagements lists engagements that have a non-empty saved conversation history
+// on the host (so they can be loaded/continued), newest names sorted.
+func savedEngagements() []string {
+	entries, err := os.ReadDir(config.HistoryDir())
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		if info, ierr := e.Info(); ierr != nil || info.Size() == 0 {
+			continue
+		}
+		out = append(out, strings.TrimSuffix(e.Name(), ".json"))
+	}
+	sort.Strings(out)
+	return out
+}
+
 func (m *model) wizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	k := msg.String()
 	switch m.step {
@@ -1064,6 +1104,7 @@ func (m *model) wizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// choice (picking a saved VM always resumes it).
 			if cand.Backend == sandbox.BackendQEMU && cand.Engagement != "" {
 				m.resume = true
+				m.reuseDisk = true // reuse this saved VM's disk
 				m.engagement = cand.Engagement
 				if historyExists(m.engagement) {
 					m.histSel = 0
@@ -1103,10 +1144,16 @@ func (m *model) wizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			// QEMU: create a new engagement on a fresh disposable overlay of the base
 			// image; size it here (default 25 GB) so tool installs don't fill a tiny
-			// base — otherwise the guest root is only the base image's ~2 GB. Selecting a
-			// base always starts a new engagement, overriding a Start-step "resume".
+			// base — otherwise the guest root is only the base image's ~2 GB. The disk is
+			// fresh, but a Start-step "resume" still holds: after sizing, afterNewVMConfig
+			// offers the prior engagement's host-saved history to load onto this new VM.
 			if cand.Backend == sandbox.BackendQEMU {
-				m.resume = false
+				// A fresh overlay off the base — not a saved disk. But keep the user's
+				// "resume a previous engagement" intent: creating a new VM should NOT
+				// cancel loading a previous engagement's host-saved history (the history
+				// lives on the host, independent of the disposable VM disk). After sizing
+				// the VM, afterNewVMConfig offers the saved engagements to load.
+				m.reuseDisk = false
 				m.engagement = ""
 				m.step = wDisk
 				m.diskIn.Focus()
@@ -1167,8 +1214,7 @@ func (m *model) wizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.memGB = n
 			m.wizErr = ""
 			m.memIn.Blur()
-			m.step = wScope
-			m.scopeIn.Focus()
+			m.afterNewVMConfig()
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -1840,7 +1886,7 @@ func (m *model) startEngagement() (tea.Model, tea.Cmd) {
 		scopeStr:   m.egressScope(),
 		allowIPv6:  eff.Network.AllowIPv6,
 		qemu:       qopts,
-		resume:     m.resume && cand.Backend == sandbox.BackendQEMU,
+		resume:     m.reuseDisk && cand.Backend == sandbox.BackendQEMU, // reuse the saved disk; a fresh VM with loaded history is not a disk-resume
 		engagement: m.engagement,
 		createWSL:  m.createWSL,
 		newName:    m.newEnvName,
@@ -3977,6 +4023,7 @@ func (m *model) envBodyView() string {
 		return styleWarn.Render("    no WSL/QEMU environments found — press r to rescan")
 	}
 	var sb strings.Builder
+	anyResumable := false
 	for i, c := range m.cands {
 		cur := "  ○ "
 		if i == m.envSel {
@@ -3994,7 +4041,18 @@ func (m *model) envBodyView() string {
 		if c.Engagement != "" {
 			extra = styleMuted.Render("  (saved VM — resumes its disk & tooling)")
 		}
+		// A reusable existing environment (a saved QEMU VM or an existing WSL distro)
+		// is something the user can resume into; a "create new …" entry is not.
+		if c.Engagement != "" || (c.Backend == sandbox.BackendWSL && !c.NeedsCreate) {
+			anyResumable = true
+		}
 		sb.WriteString(fmt.Sprintf("%s%s  %s%s%s\n", cur, name, styleMuted.Render(string(c.Backend)), tag, extra))
+	}
+	// When the user asked to resume but nothing here can be resumed, say so plainly
+	// rather than leaving an empty "previous engagement" selection.
+	if m.resume && !anyResumable {
+		sb.WriteString(styleWarn.Render("    No previous engagement is available to resume — every entry above starts a NEW one.\n"))
+		sb.WriteString(styleMuted.Render("    A QEMU engagement is resumable only if its disk was persisted; a VM from before persistence became the default was discarded when it stopped and cannot be recovered.\n"))
 	}
 	sb.WriteString(styleMuted.Render("    (r to rescan · pick a saved QEMU VM to resume it, or \"Create a new … QEMU VM\" for a fresh disk from the base; QEMU engagements persist by default, so a cleanly-stopped VM shows up here)"))
 	return sb.String()
