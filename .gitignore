@@ -14,4 +14,4 @@ secrets.yml
 .vscode/
 
 # Old binaries
-/oline.exe~
+/*.exe~

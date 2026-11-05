@@ -181,6 +181,13 @@ type Session struct {
 	// engagement ends. Guarded by chMu.
 	chMu     sync.Mutex
 	channels map[string]*revChannel
+
+	// Operator terminals: the mirror of the user's own interactive shell/terminal
+	// panes, pushed by the TUI, so agents can read what the operator is doing via the
+	// read-only `terminal` tool (see terminals.go). Guarded by opTermMu.
+	opTermMu  sync.Mutex
+	opTerms   map[string]*operatorTerminal
+	opTermOrd []string
 }
 
 // backupGate pauses agent file writes (the write/edit tools) while a workspace
@@ -1399,6 +1406,10 @@ func (a *Agent) dispatch(ctx context.Context, tc llm.ToolCall) (content string, 
 			return fmt.Sprintf("tool %q is not available to %s", tc.Name, a.id), true
 		}
 		return a.doRevshell(tc)
+	case "terminal":
+		// Read-only observation of the operator's own terminals: harmless and granted
+		// to every agent (wire adds it as a coordination tool), so no allow-list gate.
+		return a.doTerminal(tc)
 	case "runtime":
 		return a.doRuntime(), false
 	case "heartbeat":
@@ -2210,6 +2221,11 @@ var primitiveSchemas = map[string]llm.FunctionDef{
 		Name:        "revshell",
 		Description: "Set up and drive a reverse-shell channel inside the sandbox: a named netcat listener on a TCP port that catches a shell connecting back from the target, plus a way to send it commands and read what it prints. This is ALWAYS the preferred way to create and use a reverse shell — use it rather than wiring up `nc`/`socat` by hand with bash or bash_bg. Only fall back to doing it by hand if the user explicitly asks you to, or if this tool genuinely does not work for the scenario at hand (then say briefly why). Unlike wiring up `nc` by hand with bash_bg, this keeps the listener's input open so you can send command after command to the same connected shell, and it surfaces the channel in the operator's UI as a dedicated pane the user can type into too. All of it stays inside the sandbox. WRITE ACCESS IS EXCLUSIVE: a channel may be shared by several subagents, but only ONE holds the write token and may `send` at a time (two agents driving one shell would clobber each other). The opener holds it first; an unheld channel is auto-claimed by the first sender. The ORCHESTRATOR (Main) is the arbiter — it alone can `grant` the token to a chosen subagent, so a subagent that needs a channel another agent holds must ask Main; meanwhile it can still `read`. Actions: `open` — start a listener (give `name` and `port`); `send` — write one command line to the channel's shell (give `name` and `data`), allowed only for the current writer, and return the output that follows; `read` — return the channel's recent output (give `name`, optional `bytes`), always allowed; `list` — show every channel, its port, output captured, and who holds write access; `acquire` — claim the write token if the channel is free; `release` — give up your write token; `grant` — (Main only) hand the write token to another subagent (give `name` and `agent`); `close` — stop the listener and remove the channel (writer or Main, give `name`). Open the listener BEFORE triggering the payload on the target that connects back to it.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","description":"open | send | read | list | close | acquire | release | grant"},"name":{"type":"string","description":"channel name (a short label, e.g. \"foothold\"); required for every action except list"},"port":{"type":"integer","description":"TCP port the listener binds (open only)"},"data":{"type":"string","description":"the command line to send to the connected shell (send only)"},"bytes":{"type":"integer","description":"max bytes of recent output to return (read only; default 4096)"},"agent":{"type":"string","description":"the subagent id to hand the write token to (grant only; orchestrator only)"}},"required":["action"]}`),
+	},
+	"terminal": {
+		Name:        "terminal",
+		Description: "Read what the OPERATOR (the human user) is doing in their own interactive terminals in the oline UI: the line-oriented shell panes (opened with Ctrl-b $) and the full-screen terminal panes (Ctrl-b T, including a reverse-shell catcher). Both run as root and are driven by the user, not by you — this is the user's side of the engagement. Use it to see what they have run and what is on their screen, so you can coordinate, pick up where they left off, or avoid repeating their work. It is READ-ONLY: you observe, you cannot type into the operator's terminals (to run commands yourself use `bash`; to drive a reverse shell use `revshell`). It mirrors how `revshell read` lets you read a reverse-shell channel. Actions: `list` — show every open operator terminal with its kind, retained size, and last activity; `read` — return a terminal's recent contents (give `name`, an id from `list` such as Shell#1 or Term#1; optional `bytes` caps how much recent output to return). For a line shell the contents are its command/output history; for a full terminal they are its current screen.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","description":"list | read"},"name":{"type":"string","description":"operator terminal id from list (e.g. Shell#1 or Term#1); required for read"},"bytes":{"type":"integer","description":"max bytes of recent content to return (read only; default: all retained)"}},"required":["action"]}`),
 	},
 	"runtime": {
 		Name:        "runtime",

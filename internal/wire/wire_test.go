@@ -179,6 +179,14 @@ func TestBuildPentester(t *testing.T) {
 	if !strings.Contains(recon.System, "revshell") {
 		t.Error("recon (has bash) system prompt should surface the revshell tool")
 	}
+	// Every subagent is granted the read-only `terminal` tool AND told it exists, so
+	// agents actually know they can read the operator's own terminals.
+	if !has(recon.Tools, "terminal") {
+		t.Error("recon should be granted the terminal tool (so it is advertised in the function schema)")
+	}
+	if !strings.Contains(recon.System, "terminal") {
+		t.Error("recon system prompt should surface the terminal tool")
+	}
 
 	// installer is the ONLY root/privileged agent; it may reach the internet to pull tooling.
 	inst, ok := resolver("installer")

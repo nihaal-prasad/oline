@@ -2879,6 +2879,9 @@ func (m *model) reapShell(p *pane) {
 		sh.stop()
 		delete(m.shells, p.agent)
 	}
+	if m.sess != nil {
+		m.sess.ForgetOperator(string(p.agent)) // drop it from the agent-facing `terminal` list
+	}
 	// Also forget the shell's transcript and bookkeeping — a closed shell never
 	// reopens under the same synthetic id, so keeping these would leak memory and
 	// leave a stale "agent" in m.order for the engagement's lifetime.

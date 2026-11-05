@@ -77,9 +77,46 @@ func listenTerm(ch chan core.AgentID) tea.Cmd {
 	return func() tea.Msg { return termRepaintMsg(<-ch) }
 }
 
-// applyTermRepaint exists so the Update loop has something to call; the actual
-// repaint is the View pass that follows every Update.
-func (m *model) applyTermRepaint(core.AgentID) {}
+// applyTermRepaint mirrors the terminal's current screen to the engine (so agents
+// can read it via the `terminal` tool). The actual on-screen repaint is the View
+// pass that follows every Update.
+func (m *model) applyTermRepaint(id core.AgentID) {
+	if m.sess == nil {
+		return
+	}
+	if ts := m.terms[id]; ts != nil {
+		m.sess.SetOperatorScreen(string(id), termPlainScreen(ts))
+	}
+}
+
+// termPlainScreen renders the terminal emulator's current screen as plain text (no
+// styles), one row per line with trailing blanks trimmed — the snapshot agents read
+// as "what's on the operator's terminal right now".
+func termPlainScreen(ts *termState) string {
+	if ts == nil || ts.emu == nil || ts.cols < 1 || ts.rows < 1 {
+		return ""
+	}
+	var b strings.Builder
+	for y := 0; y < ts.rows; y++ {
+		var line strings.Builder
+		for x := 0; x < ts.cols; {
+			content, w := " ", 1
+			if cell := ts.emu.CellAt(x, y); cell != nil {
+				if cell.Content != "" {
+					content = cell.Content
+				}
+				if cell.Width > 0 {
+					w = cell.Width
+				}
+			}
+			line.WriteString(content)
+			x += w
+		}
+		b.WriteString(strings.TrimRight(line.String(), " "))
+		b.WriteByte('\n')
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
 
 // focusTerm returns the terminal state of the focused pane, or nil.
 func (m *model) focusTerm() *termState {
@@ -285,6 +322,9 @@ func (m *model) reapTerm(p *pane) {
 		}
 		delete(m.terms, p.agent)
 	}
+	if m.sess != nil {
+		m.sess.ForgetOperator(string(p.agent)) // drop it from the agent-facing `terminal` list
+	}
 	delete(m.transcripts, p.agent)
 	delete(m.states, p.agent)
 	delete(m.dirty, p.agent)
@@ -381,6 +421,14 @@ func keyToBytes(msg tea.KeyMsg) []byte {
 		b = []byte("\x1b[C")
 	case tea.KeyLeft:
 		b = []byte("\x1b[D")
+	case tea.KeyCtrlUp: // word/line shortcuts: xterm "CSI 1;5 X" modifier encoding
+		b = []byte("\x1b[1;5A")
+	case tea.KeyCtrlDown:
+		b = []byte("\x1b[1;5B")
+	case tea.KeyCtrlRight: // Ctrl+Right: jump forward one word (readline forward-word)
+		b = []byte("\x1b[1;5C")
+	case tea.KeyCtrlLeft: // Ctrl+Left: jump back one word (readline backward-word)
+		b = []byte("\x1b[1;5D")
 	case tea.KeyHome:
 		b = []byte("\x1b[H")
 	case tea.KeyEnd:

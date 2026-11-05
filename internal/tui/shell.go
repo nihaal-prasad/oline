@@ -181,6 +181,9 @@ func (m *model) runShell(sh *shellState, cmd string) {
 		return
 	}
 	t.addStyled("$ "+cmd, styleAccent)
+	if m.sess != nil {
+		m.sess.RecordOperatorLine(string(sh.id), "$ "+cmd) // mirror to agents (terminal tool)
+	}
 
 	sh.busy = true
 	sh.bytes = 0
@@ -284,6 +287,9 @@ func (m *model) addShellLine(sh *shellState, t *transcript, line string) {
 		return
 	}
 	t.addRich(line)
+	if m.sess != nil {
+		m.sess.RecordOperatorLine(string(sh.id), line) // mirror to agents (terminal tool)
+	}
 }
 
 // shQuote single-quotes s for safe interpolation into a bash script.

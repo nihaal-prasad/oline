@@ -136,7 +136,7 @@ func Build(mode config.Mode, store *config.Store, roster *agents.Roster) (engine
 	// The orchestrator is instantiated once, at engagement start, so it is built
 	// from the config as it stands now.
 	eff := store.Effective()
-	orchTools := []string{"task", "wait", "reprompt", "inspect", "read", "write", "find", "grep", "glob", "send_message", "ask", "update_summary", "update_diagram", "record_finding", "resources"}
+	orchTools := []string{"task", "wait", "reprompt", "inspect", "read", "write", "find", "grep", "glob", "send_message", "ask", "update_summary", "update_diagram", "record_finding", "resources", "terminal"}
 	if mode == config.ModeExploiter {
 		orchTools = append(orchTools, "runtime", "heartbeat")
 	}
@@ -232,7 +232,7 @@ func firstLine(s string) string {
 // user a question directly, check its remaining time via `runtime`, and record a
 // confirmed security finding to the live findings panel / report via record_finding.
 func grantCoordination(toolset []string) []string {
-	return appendUnique(toolset, "send_message", "ask", "runtime", "record_finding")
+	return appendUnique(toolset, "send_message", "ask", "runtime", "record_finding", "terminal")
 }
 
 // subagentSystem prepends the shared harness-level preamble to every subagent's
@@ -299,6 +299,14 @@ func subagentSystem(body string, budgetMinutes int, hasBash bool) string {
 		"title, a severity (critical/high/medium/low/info), the affected target, and a line or two of " +
 		"evidence. This logs it immediately and hands it to the reporter. Record only confirmed, non-duplicate " +
 		"findings, not hunches; recording does not replace a `send_message` to the orchestrator.\n\n")
+
+	sb.WriteString("# Reading the operator's terminals\n")
+	sb.WriteString("The human operator has their own interactive terminals in the UI — line shells and full-screen " +
+		"terminals — separate from yours. Use the read-only **`terminal`** tool to see what they are doing: " +
+		"`terminal list` shows every open operator terminal (e.g. `Shell#1`, `Term#1`) and `terminal read <id>` " +
+		"returns its recent output or current screen. Check it to coordinate with the operator, build on what " +
+		"they have already run, and avoid repeating their work. It is READ-ONLY — you cannot type into their " +
+		"terminals; run your own commands with `bash` and drive a reverse shell with `revshell`.\n\n")
 
 	if hasBash {
 		sb.WriteString("# Reverse shells and background jobs\n")
