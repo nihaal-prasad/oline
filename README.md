@@ -26,13 +26,18 @@ Two modes:
 
 ## Images
 
+(Target specific names, variables, versions, addresses, etc. have been censored
+from the images.)
+
+### Main Window (Exploiter Mode)
 <p align="center">
-  <img src="docs/ExploiterInfo.png" alt="(Exploiter Info)" width="560" />
-  <img src="docs/ExploiterSubagents.png" alt="(Exploiter Info)" width="560" />
+  <img src="docs/ExploiterInfo.png" alt="(Exploiter Info)" />
 </p>
 
-Note: Target specific data (names, variables, versions, addresses, etc.) have been censored
-from the images.
+### Subagent Window (Exploiter Mode)
+<p align="center">
+  <img src="docs/ExploiterSubagents.png" alt="(Exploiter Info)" />
+</p>
 
 ## Build
 
