@@ -4143,6 +4143,15 @@ func (m *model) renderRoster(w, h int) string {
 	}
 
 	add(styleAccent.Render("Pane Options") + "   " + styleMuted.Render(fmt.Sprintf("spent $%.4f", m.totalCost)))
+	// Decision-model cue: whether this engagement is using the optional System-1
+	// decision model (finding triage, judge pre-screen, progress checks, routing).
+	if m.sess != nil {
+		if m.sess.Decider != nil {
+			add(styleGreenRender("● decision model: on"))
+		} else {
+			add(styleMuted.Render("○ decision model: off"))
+		}
+	}
 	add(styleMuted.Render("agent · state · ⏱ · ctx%"))
 	if n := len(m.awaitingAnswer); n > 0 {
 		add(styleWarn.Render(fmt.Sprintf("❓ %d waiting for your answer", n)))
