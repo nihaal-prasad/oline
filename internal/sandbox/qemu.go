@@ -207,8 +207,9 @@ type QEMUControl interface {
 	DestroyEngagement(ctx context.Context, engagement string) error
 }
 
-// Destroy removes a managed (oline-) base image and its on-disk state. It never
-// touches a non-oline image the user supplied.
+// Destroy removes a managed (oline-) base image file. It never touches a non-oline
+// image the user supplied. Persisted engagement disks under .state are separate
+// destroy targets (see DestroyEngagement / the -destroy menu) and are left intact.
 func (q *qemuSandbox) Destroy(ctx context.Context, id string) error {
 	if !strings.HasPrefix(id, Prefix) {
 		return fmt.Errorf("sandbox/qemu: refusing to destroy %q — not an oline-managed image", id)

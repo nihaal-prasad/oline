@@ -50,8 +50,7 @@ func (k tabKind) label() string {
 	}
 }
 
-// pane is a node in the tmux-style split tree. A leaf shows one agent's
-// transcript; an internal node splits its area between two children.
+// paneDir is the orientation of an internal node's split.
 type paneDir int
 
 const (
@@ -67,6 +66,8 @@ const (
 	emptyPaneID   = core.AgentID("\x00empty")
 )
 
+// pane is a node in the tmux-style split tree. A leaf shows one agent's
+// transcript; an internal node splits its area between two children.
 type pane struct {
 	agent   core.AgentID
 	vp      viewport.Model

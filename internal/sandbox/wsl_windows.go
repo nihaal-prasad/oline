@@ -48,13 +48,13 @@ func (w *wslSandbox) Scan(ctx context.Context) ([]Candidate, error) {
 	}
 	var cands []Candidate
 	lines := strings.Split(strings.ReplaceAll(string(out), "\r\n", "\n"), "\n")
-	for i, line := range lines {
+	for _, line := range lines {
 		line = strings.TrimSpace(strings.ReplaceAll(line, "\x00", ""))
 		if line == "" {
 			continue
 		}
-		if i == 0 && strings.HasPrefix(strings.ToUpper(line), "NAME") {
-			continue // header
+		if up := strings.ToUpper(line); strings.HasPrefix(up, "NAME") && strings.Contains(up, "STATE") {
+			continue // header row ("NAME  STATE  VERSION") — not necessarily the first line
 		}
 		line = strings.TrimPrefix(line, "*")
 		fields := strings.Fields(line)
@@ -454,13 +454,24 @@ func (h *wslHandle) CopyOut(ctx context.Context, guestPath, localPath string) er
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 	args := append(h.baseArgs("~", h.execUser("", InScopeOnly)), "--", "bash", "-lc", "cat "+shellQuote(guestPath))
 	c := exec.CommandContext(ctx, "wsl.exe", args...)
 	c.Env = wslEnv()
 	c.Stdout = f
-	if err := c.Run(); err != nil {
-		return fmt.Errorf("sandbox/wsl: CopyOut: %w", err)
+	var stderr strings.Builder
+	c.Stderr = &stderr
+	runErr := c.Run()
+	if cerr := f.Close(); cerr != nil && runErr == nil {
+		runErr = cerr
+	}
+	if runErr != nil {
+		// Don't leave an empty/partial local file behind when the guest read failed,
+		// and surface the guest's stderr (e.g. "No such file") in the error.
+		os.Remove(localPath)
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return fmt.Errorf("sandbox/wsl: CopyOut: %w: %s", runErr, msg)
+		}
+		return fmt.Errorf("sandbox/wsl: CopyOut: %w", runErr)
 	}
 	return nil
 }

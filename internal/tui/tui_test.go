@@ -500,6 +500,7 @@ func TestBatchedApplyRenders(t *testing.T) {
 
 func TestApplyEvents(t *testing.T) {
 	m := testModel(t)
+	withFireworks(m.store) // define the cost fixture in-memory so the cost assertion is hermetic
 	m.w, m.h = 120, 40
 	m.addAgent(core.Main)
 	m.paneRoot = newLeaf(core.Main)

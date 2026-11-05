@@ -40,6 +40,36 @@ func TestParseMixed(t *testing.T) {
 	}
 }
 
+func TestParseIPv6(t *testing.T) {
+	p := scope.Parse("targets: 2001:db8::/32 and the host 2001:db8:1::5, plus 10.0.0.0/24")
+	cidrs := p.CIDRs()
+	if !contains(cidrs, "2001:db8::/32") {
+		t.Errorf("IPv6 prefix not parsed: %v", cidrs)
+	}
+	if !contains(cidrs, "2001:db8:1::5/128") {
+		t.Errorf("IPv6 host not parsed as /128: %v", cidrs)
+	}
+	if !contains(cidrs, "10.0.0.0/24") {
+		t.Errorf("IPv4 prefix lost: %v", cidrs)
+	}
+	if !p.ContainsIP(netip.MustParseAddr("2001:db8::dead")) {
+		t.Error("2001:db8::dead should be in scope")
+	}
+	if p.ContainsIP(netip.MustParseAddr("2001:dead::1")) {
+		t.Error("2001:dead::1 should be out of scope")
+	}
+	if !p.ContainsHost("2001:db8:1::5") {
+		t.Error("the v6 host should be in scope")
+	}
+}
+
+func TestParseDedupesCIDRs(t *testing.T) {
+	p := scope.Parse("10.0.0.5 10.0.0.5 10.0.0.5")
+	if cidrs := p.CIDRs(); len(cidrs) != 1 {
+		t.Errorf("duplicate IPs not de-duplicated: %v", cidrs)
+	}
+}
+
 func TestParseProseOnly(t *testing.T) {
 	p := scope.Parse("the production web application only, no IPs given")
 	if !p.Empty() {

@@ -23,6 +23,10 @@ func (Bash) Schema() Schema {
 	}
 }
 
+// Execute is used only to exercise the bash path in tests and as a fallback; in the
+// running harness bash is dispatched engine-side (Agent.doBash) so it goes through
+// the foreground/background job machinery and the bash deny-pattern guard. Bash{} is
+// registered mainly to supply the tool Schema advertised to the model.
 func (Bash) Execute(ctx context.Context, c Call) (Result, error) {
 	var args struct {
 		Cmd string `json:"cmd"`

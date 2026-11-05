@@ -18,12 +18,13 @@ type destroyItem struct {
 	label string // human line shown in the menu
 }
 
-// runDestroy lists ONLY oline-managed environments (WSL distros + QEMU images and
-// persisted engagement disks whose name carries the oline- prefix) and destroys
-// the one the user selects, after they retype its exact name. It never lists or
-// touches anything without the oline- prefix, so a WSL distro or QEMU image the
-// user keeps for other purposes can never be affected. It does nothing unless the
-// user explicitly runs `oline -destroy` and confirms.
+// runDestroy lists ONLY oline-managed environments and destroys the one the user
+// selects, after they retype its exact name. WSL distros and QEMU base images are
+// listed only when oline-managed (the oline- name prefix); persisted engagement
+// disks are listed because they live under oline's own managed state tree
+// (images/.state), and DestroyEngagement confines removal to that tree. A WSL distro
+// or QEMU image the user keeps for other purposes is never listed or touched. It
+// does nothing unless the user explicitly runs `oline -destroy` and confirms.
 func runDestroy() {
 	ctx := context.Background()
 	var items []destroyItem

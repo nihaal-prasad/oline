@@ -507,6 +507,10 @@ func (q *qemuSandbox) bootResume(ctx context.Context, engagement string, opts Bo
 		cleanupBoot(hn, "", "")
 		return nil, err
 	}
+	// MemMB/CPUs apply to this boot (opts may differ from the first boot); DiskGB is
+	// deliberately NOT honored on resume — the disk keeps the size it was created with,
+	// and cloud-init's growpart/resize_rootfs only runs on first boot, so re-growing
+	// the qcow2 now would not expand the guest filesystem anyway.
 	memMB, cpus := qemuResources(opts)
 	cmd := exec.Command(qemuBinary(), BuildQemuArgs(disk, "", memMB, cpus, port, tap)...)
 	if err := cmd.Start(); err != nil {
@@ -536,7 +540,7 @@ func (q *qemuSandbox) bootResume(ctx context.Context, engagement string, opts Bo
 		signer: signer, cmd: cmd, client: client,
 		imagesDir: q.imagesDir, persist: true, keyPEM: keyPEM,
 		hostNet: hn, allowInternet: opts.AllowInternet,
-		workdir: WSLWorkspace + "/" + engagement,
+		workdir: WSLWorkspace + "/" + sanitizeHostname(engagement),
 	}, nil
 }
 

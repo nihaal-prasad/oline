@@ -82,7 +82,7 @@ func TestLiveSlice(t *testing.T) {
 		t.Fatalf("Run error: %v", res.Err)
 	}
 	t.Logf("orchestrator final: %q", res.Text)
-	if !c.sawSpawn("probe") {
+	if !c.sawSpawn("Probe") { // roles are presented capitalized (core.CanonRole)
 		t.Error("orchestrator did not spawn the probe subagent")
 	}
 	if !c.sawToolStart("bash") {

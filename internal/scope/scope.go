@@ -20,7 +20,9 @@ var reCIDR = regexp.MustCompile(`\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?:/\d{1,2
 var reDomain = regexp.MustCompile(`\b([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+)\b`)
 
 // Parse extracts IP/CIDR and domain targets from arbitrary scope text (the TUI
-// scope field is free-form, e.g. "10.0.0.0/24 and app.example.com only").
+// scope field is free-form, e.g. "10.0.0.0/24 and app.example.com only"). Both
+// IPv4 and IPv6 literals/prefixes are recognized; IPv6 enforcement still depends on
+// network.allowIPv6 being set (see config and the egress layer).
 func Parse(text string) Policy {
 	p := Policy{raw: strings.TrimSpace(text)}
 	for _, m := range reCIDR.FindAllString(text, -1) {
@@ -29,7 +31,25 @@ func Parse(text string) Policy {
 			s += "/32"
 		}
 		if pref, err := netip.ParsePrefix(s); err == nil {
-			p.nets = append(p.nets, pref.Masked())
+			p.addNet(pref.Masked())
+		}
+	}
+	// IPv6 targets: the dotted-quad regex above cannot match colon form, so scan the
+	// free text for whitespace/comma-separated tokens containing ':' and parse each as
+	// an IPv6 prefix or address. A bare address becomes a /128. (IPv4 is handled above;
+	// domains never contain a colon, and non-IP tokens like "http://..." simply fail to
+	// parse and are skipped.)
+	for _, tok := range strings.FieldsFunc(text, isScopeSep) {
+		tok = strings.Trim(tok, "[]()<>\"'")
+		if !strings.Contains(tok, ":") {
+			continue
+		}
+		if pref, err := netip.ParsePrefix(tok); err == nil && pref.Addr().Is6() {
+			p.addNet(pref.Masked())
+			continue
+		}
+		if a, err := netip.ParseAddr(tok); err == nil && a.Is6() {
+			p.addNet(netip.PrefixFrom(a, a.BitLen()))
 		}
 	}
 	// Domains: anything with a dot that isn't an IP.
@@ -46,6 +66,22 @@ func Parse(text string) Policy {
 		}
 	}
 	return p
+}
+
+// isScopeSep reports whether r separates tokens in free-form scope text.
+func isScopeSep(r rune) bool {
+	return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == ',' || r == ';'
+}
+
+// addNet appends a prefix to the in-scope set, de-duplicating so repeated targets
+// don't produce duplicate firewall rules.
+func (p *Policy) addNet(pref netip.Prefix) {
+	for _, n := range p.nets {
+		if n == pref {
+			return
+		}
+	}
+	p.nets = append(p.nets, pref)
 }
 
 // CIDRs returns the in-scope prefixes as strings (for firewall rules).

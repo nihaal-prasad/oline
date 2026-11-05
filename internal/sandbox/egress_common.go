@@ -18,7 +18,7 @@ import (
 //
 //	oline-scope : may reach ONLY the in-scope targets       (InScopeOnly)
 //	oline-net   : may reach the internet EXCEPT the targets  (InternetNoTarget)
-//	oline-iso   : no network at all                          (Isolated)
+//	oline-iso   : no network except loopback                 (Isolated)
 //
 // Agents run as one of these users (no root, no sudo) so they cannot alter the
 // rules; only the Privileged installer runs as root.
@@ -99,8 +99,9 @@ func (e *egressCore) ensureUsers(ctx context.Context) error {
 	return nil
 }
 
-// ApplyBaseline snapshots the current rules and installs the owner-match policy
-// derived from scope. Teardown restores the snapshot.
+// ApplyBaseline installs the owner-match egress policy derived from scope into the
+// dedicated OLINE_OUT chain; Teardown removes that chain. (It does not snapshot or
+// restore the host's other rules — the policy lives entirely in its own chain.)
 func (e *egressCore) ApplyBaseline(scope Scope) error {
 	ctx := context.Background()
 	if len(e.uids) == 0 {
@@ -109,6 +110,14 @@ func (e *egressCore) ApplyBaseline(scope Scope) error {
 		}
 	}
 	us, un, ui := e.uids[egScopeUser], e.uids[egNetUser], e.uids[egISOUser]
+	// Fail closed if the three oline uids didn't resolve to distinct non-root ids:
+	// a uid of 0 would emit `--uid-owner 0 -j DROP` and cut off ALL root egress in the
+	// guest (OLINE_OUT is hooked at OUTPUT position 1), and a collision would conflate
+	// two policies. This should never happen after ensureUsers, but never emit the
+	// policy against root.
+	if us == 0 || un == 0 || ui == 0 || us == un || us == ui || un == ui {
+		return fmt.Errorf("sandbox egress: refusing to apply rules — oline users did not resolve to distinct non-root uids (scope=%d net=%d iso=%d)", us, un, ui)
+	}
 	// Resolve domain targets to IP addresses so a target given as a hostname is
 	// firewall-enforced the same as one given as an IP (in-scope agents can reach
 	// it; internet-only agents cannot). buildEgressRules also opens DNS to the
@@ -137,7 +146,8 @@ func (e *egressCore) PathFor(_ core.AgentID, policy EgressPolicy) (NetPath, erro
 	}
 }
 
-// Teardown restores the firewall snapshot taken by ApplyBaseline.
+// Teardown removes the dedicated OLINE_OUT chain installed by ApplyBaseline (it
+// takes no snapshot, so there is nothing to restore — only its own chain to delete).
 func (e *egressCore) Teardown() error {
 	if !e.applied {
 		return nil
@@ -241,11 +251,6 @@ func buildEgressTeardown() string {
 	return v4 + v6
 }
 
-// sanitizeCIDRs keeps only well-formed IPv4 addresses/prefixes, re-emitting each
-// in canonical form so nothing unsafe is ever interpolated into the root script.
-// Malformed entries, out-of-range masks, and IPv6 are dropped here because this
-// is the IPv4 sanitizer; IPv6 scope targets are handled separately by
-// resolveScope and only used when the operator enabled IPv6 egress.
 // resolveScope turns a mixed list of IPs/CIDRs/domains into canonical rule targets,
 // split by address family: IPv4 addresses/prefixes and IPv6 addresses/prefixes are
 // kept as-is in their respective lists; a domain is resolved (bounded) to its IPv4

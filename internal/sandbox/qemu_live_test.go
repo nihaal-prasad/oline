@@ -83,7 +83,7 @@ func TestLiveQEMU(t *testing.T) {
 		t.Errorf("Privileged agent uid = %q, want 0", strings.TrimSpace(root.String()))
 	}
 
-	// Write then read a file back through the file-copy path.
+	// Copy a file into the guest through the file-copy path.
 	if err := h.CopyIn(ctx, writeTemp(t, "hello oline"), "/opt/oline/engagements/probe.txt"); err != nil {
 		t.Fatalf("CopyIn: %v", err)
 	}

@@ -357,7 +357,14 @@ func (c *Client) backoff(ctx context.Context, n int, d time.Duration) error {
 		if base <= 0 {
 			base = 500 * time.Millisecond
 		}
-		d = base << uint(n) // n = attempt-1
+		// n = attempt-1 (>=1 for the first retry). Shift by n-1 so the first retry waits
+		// exactly backoffBase, matching the doc (backoffBase * 2^(n-1)); the guard keeps
+		// the shift non-negative if ever called with n==0.
+		shift := n - 1
+		if shift < 0 {
+			shift = 0
+		}
+		d = base << uint(shift)
 		if d > 8*time.Second {
 			d = 8 * time.Second
 		}

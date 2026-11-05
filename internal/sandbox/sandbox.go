@@ -41,7 +41,7 @@ type EgressPolicy int
 const (
 	InScopeOnly      EgressPolicy = iota // may reach in-scope targets only (default)
 	InternetNoTarget                     // may reach the wider internet but NOT the target
-	Isolated                             // no network
+	Isolated                             // no network except loopback (127.0.0.0/8, ::1)
 	Privileged                           // runs as root: unrestricted (the installer only)
 )
 

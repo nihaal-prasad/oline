@@ -139,7 +139,7 @@ func ImportWSLEngagement(ctx context.Context, distro, localPath, name string) er
 	dest := WSLWorkspace + "/" + name
 	script := fmt.Sprintf(`set -e
 mkdir -p %s
-tar xzf %s -C %s
+tar --no-same-owner --no-same-permissions -xzf %s -C %s
 rm -f %s
 getent group oline >/dev/null 2>&1 && chown -R root:oline %s 2>/dev/null || true
 chmod -R g+rwX %s 2>/dev/null || true

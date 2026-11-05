@@ -148,15 +148,18 @@ func (m *model) createShellLeaf() *pane {
 // (Info / Subagents) it opens the shell in a fresh Shell tab instead, since those
 // tabs can't hold command panes.
 func (m *model) openShellPane() {
-	leaf := m.createShellLeaf()
 	if m.needNewCommandTab() {
+		leaf := m.createShellLeaf()
 		m.openLeafInNewShellTab(leaf)
 		m.status = "opened a new " + tabShell.label() + " tab with a shell (" + string(leaf.agent) + ")"
 		return
 	}
+	// Create the shell state only after the nil-guard, so a failed open can't leave an
+	// orphan entry in m.shells (a command-pane row with no pane).
 	if m.paneRoot == nil || m.focusPane == nil {
 		return
 	}
+	leaf := m.createShellLeaf()
 	m.zoom = false
 	m.paneRoot, m.focusPane = splitPaneWith(m.paneRoot, m.focusPane, splitV, leaf)
 	m.relayout()

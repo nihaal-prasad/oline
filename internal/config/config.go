@@ -565,7 +565,11 @@ func (s *Store) ResolveKey(provider string) (string, error) {
 			return "", fmt.Errorf("config: provider %q apiKeyRef has unknown kind %q", provider, kind)
 		}
 	}
-	return "", fmt.Errorf("config: no API key found for provider %q (set %s or save one in the model editor)", provider, p.APIKeyRef)
+	keyRef := p.APIKeyRef
+	if keyRef == "" {
+		keyRef = "an apiKeyRef (env:NAME or secret:<provider>)"
+	}
+	return "", fmt.Errorf("config: no API key found for provider %q (set %s, or save one in the model editor)", provider, keyRef)
 }
 
 // KnownSecrets returns the literal API-key values the store can currently

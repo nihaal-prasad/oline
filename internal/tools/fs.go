@@ -108,10 +108,15 @@ func (Read) Execute(ctx context.Context, c Call) (Result, error) {
 		return Result{Content: "read: path is outside the sandbox (host /mnt is off-limits)", IsError: true}, nil
 	}
 	var script string
-	if a.Limit > 0 {
+	switch {
+	case a.Limit > 0:
 		start, end := a.Offset+1, a.Offset+a.Limit
 		script = fmt.Sprintf("sed -n '%d,%dp' -- %s", start, end, q(ap))
-	} else {
+	case a.Offset > 0:
+		// offset without limit: read from the 0-based start line to EOF (the schema
+		// promises offset is honored even when no limit is given).
+		script = fmt.Sprintf("tail -n +%d -- %s", a.Offset+1, q(ap))
+	default:
 		script = "cat -- " + q(ap)
 	}
 	out, st, err := runScript(ctx, c, script)

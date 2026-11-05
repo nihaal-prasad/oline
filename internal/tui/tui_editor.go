@@ -519,9 +519,14 @@ func (m *model) saveItem() {
 			m.eStatus = styleErr.Render("model tier must be big, medium, or small")
 			return
 		}
+		eff := strings.ToLower(strings.TrimSpace(m.eFields[1].Value()))
+		if eff != "" && eff != "low" && eff != "medium" && eff != "high" {
+			m.eStatus = styleErr.Render("thinking-level must be low, medium, or high")
+			return
+		}
 		ov := config.AgentOverride{
 			Tier:          tier,
-			ThinkingLevel: strings.TrimSpace(m.eFields[1].Value()),
+			ThinkingLevel: eff,
 		}
 		ctxTokens := 0
 		if raw := strings.TrimSpace(m.eFields[2].Value()); raw != "" {

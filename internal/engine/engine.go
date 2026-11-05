@@ -1083,11 +1083,11 @@ func (a *Agent) gate() (killed bool) {
 		case core.Killed:
 			return true
 		case core.Paused:
-			select {
-			case <-ch: // resumed or killed
-			case env := <-a.box: // accept steering while paused
-				a.foldEnvelope(env)
-			}
+			// Wait for resume/kill only. Any steering that arrives stays queued in the
+			// mailbox and is folded at the loop top AFTER this tool batch's results are
+			// appended — folding it here would insert a user message between the
+			// assistant tool_calls turn and its tool_results (a provider 400).
+			<-ch
 		default:
 			return false
 		}
@@ -1173,7 +1173,7 @@ func (a *Agent) Run(parent context.Context) Result {
 		}
 		if serr != nil {
 			cancel()
-			a.s.emit(event.Notice{Level: "error", Text: fmt.Sprintf("%s: %v", a.id, serr)})
+			a.s.emit(event.Notice{Agent: a.id, Level: "error", Text: fmt.Sprintf("%s: %v", a.id, serr)})
 			return Result{Agent: a.id, Err: serr, Text: text}
 		}
 
@@ -1478,8 +1478,12 @@ func (a *Agent) doReprompt(tc llm.ToolCall) (string, bool) {
 	}
 	target := core.AgentID(args.Agent)
 	if _, ok := a.s.router.get(target); ok {
-		a.s.router.send(Envelope{From: a.id, To: target, Kind: MsgSteer, Body: args.Prompt})
-		return fmt.Sprintf("repromted %s. Call wait to collect its next result.", args.Agent), false
+		// Only report success if delivery actually succeeds; the target can unregister
+		// (finish/tear down) between get and send, in which case fall through to respawn
+		// rather than claiming we steered an agent that never got the message.
+		if a.s.router.send(Envelope{From: a.id, To: target, Kind: MsgSteer, Body: args.Prompt}) {
+			return fmt.Sprintf("repromted %s. Call wait to collect its next result.", args.Agent), false
+		}
 	}
 	role := roleOf(args.Agent)
 	if !a.cfg.maySpawn(role) {
@@ -1509,11 +1513,12 @@ func (a *Agent) doWait(ctx context.Context) (string, bool) {
 		case MsgJobDone:
 			return env.Body, false
 		default:
-			// A steer / user message INTERRUPTS the wait (folded into context) so the
-			// agent reacts promptly instead of staying blocked until a subagent or
-			// job finishes. It can call wait again to keep waiting.
-			a.foldEnvelope(env)
-			return fmt.Sprintf("you were woken early: a message from %s arrived while you were waiting (added to your context) — act on it now, or call wait again to keep waiting for a subagent/job.", env.From), false
+			// A steer / user message INTERRUPTS the wait so the agent reacts promptly
+			// instead of staying blocked until a subagent or job finishes. The message is
+			// returned INSIDE this tool result (not folded as a separate user turn, which
+			// mid-batch would break assistant→tool_result pairing). Call wait again to
+			// keep waiting.
+			return fmt.Sprintf("you were woken early by a message that arrived while you were waiting — act on it now, or call wait again to keep waiting for a subagent/job:\n\n%s", envelopeText(env)), false
 		}
 	case <-ctx.Done():
 		return "wait aborted", true
@@ -1562,6 +1567,11 @@ func (a *Agent) doBash(tc llm.ToolCall) (string, bool) {
 	a.s.router.wg.Add(1)
 	go func() {
 		defer a.s.router.wg.Done()
+		// Release the per-command context when the command truly ends (this goroutine
+		// blocks in execCommand for its whole life, even after promotion to background),
+		// so a finished command's context isn't leaked in baseCtx's child set until the
+		// engagement ends. The stop/pause paths also call cancel(); it is idempotent.
+		defer cancel()
 		r := a.execCommand(ctx, args.Cmd)
 		job.mu.Lock()
 		if job.promoted {
@@ -1669,6 +1679,10 @@ func (a *Agent) doBashBg(tc llm.ToolCall) (string, bool) {
 	a.s.router.wg.Add(1)
 	go func() {
 		defer a.s.router.wg.Done()
+		// Release the job's context when it ends naturally (StopCommands/engagement-end
+		// also cancel; idempotent), so a finished job's context isn't leaked in
+		// baseCtx's child set for the rest of the engagement.
+		defer cancel()
 		r := a.execCommand(ctx, cmd)
 		a.forgetJob(id)
 		if r.finished {
@@ -1951,15 +1965,26 @@ func (a *Agent) doAsk(ctx context.Context, tc llm.ToolCall) (string, bool) {
 	if a.s.Mode == core.Automatic {
 		return "Automatic mode: no interactive user is available right now. Proceed using your best judgment, strictly within the authorized scope; do not block waiting on this.", false
 	}
-	// Planner/watcher mode: block for a user answer relayed into the mailbox.
+	// Planner/watcher mode: block for a user answer relayed into the mailbox. Any
+	// other messages that arrive meanwhile are returned inside this tool result rather
+	// than folded as separate user turns (which mid-batch would break tool_result
+	// pairing), so the agent still sees them.
+	var meanwhile []string
 	for {
 		select {
 		case env := <-a.box:
 			if env.Kind == MsgUserAnswer {
-				return "user answered: " + env.Body, false
+				res := "user answered: " + env.Body
+				if len(meanwhile) > 0 {
+					res += "\n\nmessages that also arrived while waiting:\n" + strings.Join(meanwhile, "\n")
+				}
+				return res, false
 			}
-			a.foldEnvelope(env)
+			meanwhile = append(meanwhile, envelopeText(env))
 		case <-ctx.Done():
+			if len(meanwhile) > 0 {
+				return "ask aborted\n\nmessages that arrived while waiting:\n" + strings.Join(meanwhile, "\n"), true
+			}
 			return "ask aborted", true
 		}
 	}
@@ -2000,8 +2025,9 @@ func (a *Agent) doHeartbeat(ctx context.Context, tc llm.ToolCall) (string, bool)
 	case <-timer.C:
 		return fmt.Sprintf("heartbeat elapsed (%ds); no messages queued.", secs), false
 	case env := <-a.box:
-		a.foldEnvelope(env)
-		return fmt.Sprintf("heartbeat woke early: message from %s.", env.From), false
+		// Return the message inside this tool result rather than folding it as a
+		// separate user turn (mid-batch that would break tool_result pairing).
+		return fmt.Sprintf("heartbeat woke early:\n\n%s", envelopeText(env)), false
 	case <-ctx.Done():
 		return "heartbeat aborted", true
 	}
@@ -2040,7 +2066,12 @@ func (a *Agent) drainMailbox() {
 	}
 }
 
-func (a *Agent) foldEnvelope(env Envelope) {
+// envelopeText renders an envelope as a single labeled line. foldEnvelope appends it
+// as a user turn; the wait/ask/heartbeat tools instead splice it into their own
+// tool-result string, so an interrupting message never lands as a user message
+// BETWEEN an assistant tool_calls turn and its tool_results (which an OpenAI-style
+// provider rejects with a 400).
+func envelopeText(env Envelope) string {
 	var label string
 	switch env.Kind {
 	case MsgSteer:
@@ -2056,10 +2087,14 @@ func (a *Agent) foldEnvelope(env Envelope) {
 	default:
 		label = "message"
 	}
-	a.appendHistory(llm.Message{
-		Role:    llm.RoleUser,
-		Content: fmt.Sprintf("[%s from %s] %s", label, env.From, env.Body),
-	})
+	return fmt.Sprintf("[%s from %s] %s", label, env.From, env.Body)
+}
+
+// foldEnvelope appends an interrupting message as a user turn. It is only safe to
+// call OUTSIDE a tool batch (loop top / idle wait); mid-batch, the dispatch handlers
+// return the message inside their tool-result string instead (see envelopeText).
+func (a *Agent) foldEnvelope(env Envelope) {
+	a.appendHistory(llm.Message{Role: llm.RoleUser, Content: envelopeText(env)})
 }
 
 func allowed(list []string, name string) bool {

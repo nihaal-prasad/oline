@@ -1,7 +1,8 @@
 // Package tools defines the tool interface, the registry, and the per-agent
-// tool view that enforces each subagent's allow-list. The concrete tools (bash,
-// read, write, edit, find/grep/glob, web_search, web_fetch, runtime, task, …)
-// are implemented in this package.
+// tool view that enforces each subagent's allow-list. The sandbox-facing tools
+// (read, write, edit, find/grep/glob, web_search, web_fetch) are implemented here;
+// bash's schema lives here too but its execution is engine-side (doBash), and the
+// coordination primitives (task, wait, runtime, …) live in the engine, not here.
 package tools
 
 import (

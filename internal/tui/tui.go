@@ -63,15 +63,11 @@ type engListMsg struct {
 	err   error
 }
 
+// listEngagementsCmd lists the saved engagements inside a WSL distro for the resume
+// step. QEMU resume is handled inline in the environment step (a persisted QEMU VM
+// is its own Candidate with Engagement set), so this is only ever called for WSL.
 func listEngagementsCmd(cand sandbox.Candidate) tea.Cmd {
 	return func() tea.Msg {
-		if cand.Backend == sandbox.BackendQEMU {
-			// QEMU resumes from a persisted VM disk on the host, not from distro files.
-			if qc, ok := sandbox.NewQEMU().(sandbox.QEMUControl); ok {
-				return engListMsg{names: qc.ResumableEngagements()}
-			}
-			return engListMsg{}
-		}
 		names, err := sandbox.ListWSLEngagements(context.Background(), cand.ID)
 		return engListMsg{names: names, err: err}
 	}
@@ -1007,14 +1003,19 @@ func (m *model) wizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			// WSL resume: pick a distro here, then choose which saved engagement inside it.
-			if m.resume && cand.Backend == sandbox.BackendWSL {
+			// WSL resume: pick an existing distro here, then choose which saved engagement
+			// inside it. The "create a new distro" entry is NOT a resume target, so let it
+			// fall through to the create branch even when the Start step chose resume.
+			if m.resume && cand.Backend == sandbox.BackendWSL && !cand.NeedsCreate {
 				m.step = wResume
 				return m, listEngagementsCmd(cand)
 			}
 			// Create a fresh oline-managed WSL distro. Generate its oline- name now;
-			// it appears in the reuse list on later runs and is a Destroy target.
+			// it appears in the reuse list on later runs and is a Destroy target. A new
+			// distro always starts a new engagement, so clear any Start-step "resume".
 			if cand.Backend == sandbox.BackendWSL && cand.NeedsCreate {
+				m.resume = false
+				m.engagement = ""
 				m.createWSL = true
 				m.newEnvName = sandbox.Prefix + "debian-" + time.Now().Format("20060102-150405")
 				m.selDistro = m.newEnvName

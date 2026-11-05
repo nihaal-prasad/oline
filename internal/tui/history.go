@@ -52,7 +52,11 @@ type savedPane struct {
 }
 
 func historyPath(engagement string) string {
-	return filepath.Join(config.HistoryDir(), engagement+".json")
+	// Sanitize the engagement name the same way the activity log does: the name can
+	// originate from a WSL workspace listing or a QEMU engagement id and may contain
+	// characters illegal in a host (Windows) filename, which would otherwise make the
+	// atomic save fail silently and history never persist.
+	return filepath.Join(config.HistoryDir(), safeFileName(engagement)+".json")
 }
 
 // historyExists reports whether a non-empty saved conversation exists for an
@@ -373,7 +377,10 @@ func sanitizeHistory(h []llm.Message) []llm.Message {
 				return h[:lastSafe]
 			}
 			i, lastSafe = j, j
-		default: // an orphan tool result: skip it
+		default:
+			// An orphan tool result (no preceding assistant tool_calls — shouldn't
+			// normally happen). Step over it but DON'T advance the safe boundary, so it is
+			// only kept if a later complete exchange pulls lastSafe past it.
 			i++
 		}
 	}

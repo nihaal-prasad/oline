@@ -170,8 +170,8 @@ func (m *model) startRevTail(rs *revState) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	rs.cancel = cancel
-	// Print the whole log so far, then follow it. --retry waits out a log that is
-	// (re)created, and stdbuf keeps tail from buffering so output appears promptly.
+	// Print the whole log so far, then follow it. `-F` (not `-f`) keeps following
+	// across truncation/recreation of out.log, so a reopened channel still streams.
 	script := fmt.Sprintf(`exec tail -n +1 -F %s/out.log 2>/dev/null`, shQuote(rs.dir))
 	id, sb, ch := rs.id, m.sess.Sandbox, m.shellCh
 	go func() {

@@ -28,8 +28,8 @@ func (WebFetch) Schema() Schema {
 	}
 }
 
-// webFetchMax caps how much decoded text a single fetch returns, so a huge page
-// can't flood the agent's context.
+// webFetchDefault is how much decoded text a fetch returns by default, and
+// webFetchHardMax the ceiling, so a huge page can't flood the agent's context.
 const webFetchDefault = 20000
 const webFetchHardMax = 200000
 

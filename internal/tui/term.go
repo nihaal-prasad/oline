@@ -139,7 +139,9 @@ func (m *model) openRevTermPane(port int) {
 	m.openTermWith(id, []string{"bash", "-lc", cmd}, sandbox.Privileged, fmt.Sprintf("revshell :%d", port))
 }
 
-// openTermWith splits the focused pane into a terminal running argv under a PTY.
+// openTermWith opens a terminal running argv under a PTY: it splits the focused
+// pane on a Shell tab (or in customizable mode), or opens a fresh Shell tab when the
+// current tab (Info / Subagents) can't hold command panes.
 func (m *model) openTermWith(id core.AgentID, argv []string, policy sandbox.EgressPolicy, title string) {
 	if m.paneRoot == nil || m.focusPane == nil {
 		return
@@ -169,9 +171,8 @@ func (m *model) openTermWith(id core.AgentID, argv []string, policy sandbox.Egre
 	if newTab {
 		m.openLeafInNewShellTab(leaf) // saves the prior tab, activates the new one, relayouts
 	} else {
-		if m.paneRoot == nil || m.focusPane == nil {
-			return
-		}
+		// paneRoot/focusPane were already nil-checked at the top and nothing above
+		// changed them, so no re-check is needed here.
 		m.zoom = false
 		m.paneRoot, m.focusPane = splitPaneWith(m.paneRoot, m.focusPane, splitV, leaf)
 		m.relayout()
