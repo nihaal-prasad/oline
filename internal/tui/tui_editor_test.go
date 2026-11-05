@@ -10,46 +10,78 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// TestEditorSaveOrchestratorPrompt checks the orchestrator's prompt items
-// (system prompt, personality) each expose a box and save to their own .md override
-// while updating the matching in-memory roster field.
-func TestEditorSaveOrchestratorPrompt(t *testing.T) {
-	cases := []struct {
-		item string // the editor sub-item name
-		file string // the override file it writes
-		get  func(*model) string
-	}{
-		{"system prompt", "SYSTEM_TEMPLATE.md", func(m *model) string { return m.roster.Orchestrator.SystemTemplate }},
-		{"personality", "PERSONALITY.md", func(m *model) string { return m.roster.Orchestrator.Personality }},
+// TestEditorSaveOrchestrator checks the single orchestrator section edits the
+// orchestrator like a subagent: its model tier / thinking level / max context save
+// to config.yml, and its system prompt saves to SYSTEM_TEMPLATE.md (in-memory
+// roster updated too).
+func TestEditorSaveOrchestrator(t *testing.T) {
+	m, home := tempHomeModel(t)
+	m.openEditor()
+	i := findItem(m, "orchestrator", "")
+	if i < 0 {
+		t.Fatal("orchestrator not in editor list")
 	}
-	for _, tc := range cases {
-		t.Run(tc.item, func(t *testing.T) {
-			m, home := tempHomeModel(t)
-			m.openEditor()
-			i := findItem(m, "orchestrator", tc.item)
-			if i < 0 {
-				t.Fatalf("orchestrator %q not in editor list", tc.item)
-			}
-			m.eSel = i
-			m.buildFields()
-			if m.ePrompt == nil {
-				t.Fatalf("orchestrator %q has no prompt box", tc.item)
-			}
-			want := "NEW ORCHESTRATOR " + strings.ToUpper(tc.item)
-			m.ePrompt.SetValue(want)
-			m.saveItem()
+	m.eSel = i
+	m.buildFields()
+	if len(m.eFields) != 3 {
+		t.Fatalf("orchestrator editor should have tier/thinking/context (3 fields), got %d", len(m.eFields))
+	}
+	if m.ePrompt == nil {
+		t.Fatal("orchestrator has no system-prompt box")
+	}
+	m.eFields[0].SetValue("big")  // tier
+	m.eFields[1].SetValue("high") // thinking level
+	m.ePrompt.SetValue("NEW ORCHESTRATOR SYSTEM PROMPT")
+	m.saveItem()
 
-			data, err := os.ReadFile(filepath.Join(home, "oline", "config", "pentester", tc.file))
-			if err != nil {
-				t.Fatalf("%s not written: %v", tc.file, err)
-			}
-			if string(data) != want {
-				t.Errorf("%s not persisted verbatim:\n%s", tc.file, data)
-			}
-			if tc.get(m) != want {
-				t.Errorf("in-memory orchestrator %q not updated", tc.item)
-			}
-		})
+	data, err := os.ReadFile(filepath.Join(home, "oline", "config", "pentester", "SYSTEM_TEMPLATE.md"))
+	if err != nil {
+		t.Fatalf("SYSTEM_TEMPLATE.md not written: %v", err)
+	}
+	if string(data) != "NEW ORCHESTRATOR SYSTEM PROMPT" {
+		t.Errorf("system prompt not persisted verbatim:\n%s", data)
+	}
+	if m.roster.Orchestrator.SystemTemplate != "NEW ORCHESTRATOR SYSTEM PROMPT" {
+		t.Error("in-memory orchestrator system prompt not updated")
+	}
+	cfg, err := os.ReadFile(filepath.Join(home, "oline", "config", "pentester", "config.yml"))
+	if err != nil {
+		t.Fatalf("config.yml not written: %v", err)
+	}
+	if !strings.Contains(string(cfg), "tier: big") {
+		t.Errorf("orchestrator tier override not persisted:\n%s", cfg)
+	}
+	if oc := m.store.Orchestrator(); oc.Tier != "big" || oc.ThinkingLevel != "high" {
+		t.Errorf("orchestrator config in memory = %+v, want tier big / thinking high", oc)
+	}
+}
+
+// TestEditorSaveModePersonality checks the separate personality section saves to
+// PERSONALITY.md and updates the in-memory roster.
+func TestEditorSaveModePersonality(t *testing.T) {
+	m, home := tempHomeModel(t)
+	m.openEditor()
+	i := findItem(m, "personality", "")
+	if i < 0 {
+		t.Fatal("personality not in editor list")
+	}
+	m.eSel = i
+	m.buildFields()
+	if m.ePrompt == nil {
+		t.Fatal("personality has no prompt box")
+	}
+	m.ePrompt.SetValue("NEW PERSONALITY")
+	m.saveItem()
+
+	data, err := os.ReadFile(filepath.Join(home, "oline", "config", "pentester", "PERSONALITY.md"))
+	if err != nil {
+		t.Fatalf("PERSONALITY.md not written: %v", err)
+	}
+	if string(data) != "NEW PERSONALITY" {
+		t.Errorf("personality not persisted verbatim:\n%s", data)
+	}
+	if m.roster.Orchestrator.Personality != "NEW PERSONALITY" {
+		t.Error("in-memory personality not updated")
 	}
 }
 
@@ -116,6 +148,47 @@ func TestEditorLeftPaneFitsScopeLine(t *testing.T) {
 	}
 	if !strings.Contains(scopeLine, "in-scope targets") {
 		t.Errorf("scope row wrapped: 'in-scope targets' is not on the same line as 'scope':\n%q", scopeLine)
+	}
+}
+
+// TestEditorMouse checks the settings editor is clickable: a left-click on a
+// left-list row opens that item, and a click on a right-pane field focuses it.
+func TestEditorMouse(t *testing.T) {
+	m, _ := tempHomeModel(t)
+	withFireworks(m.store)
+	m.store.SetModelRoles(
+		"fireworks/accounts/fireworks/models/deepseek-v4p1-flash",
+		"fireworks/accounts/fireworks/models/glm-5p3-flash",
+		"fireworks/accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b",
+	)
+	m.w, m.h = 120, 40
+	m.openEditor()
+	_ = m.viewEditor() // records the left-list anchors for the current render
+
+	// Click the "big" role row in the left list: it should open (fields built, focus 0).
+	big := findItem(m, "role", "big")
+	if big < 0 {
+		t.Fatal("big role not in editor list")
+	}
+	click := func(x, y int) {
+		m.handleEditorMouse(tea.MouseMsg{Button: tea.MouseButtonLeft, Action: tea.MouseActionPress, X: x, Y: y})
+	}
+	click(1, m.eLeftItemTop+big)
+	if m.eSel != big {
+		t.Fatalf("left-click did not select the big role: eSel=%d want %d", m.eSel, big)
+	}
+	if m.eFocus != 0 || m.numFields() == 0 {
+		t.Fatalf("left-click did not open the item for editing (eFocus=%d, fields=%d)", m.eFocus, m.numFields())
+	}
+
+	// Re-render so the right-pane field anchors are recorded, then click field 2.
+	_ = m.viewEditor()
+	if len(m.eFieldRows) < 3 {
+		t.Fatalf("expected recorded field rows for the role editor, got %d", len(m.eFieldRows))
+	}
+	click(m.eRightLeft+1, m.eFieldRows[2])
+	if m.eFocus != 2 {
+		t.Errorf("clicking field 2 focused field %d, want 2", m.eFocus)
 	}
 }
 

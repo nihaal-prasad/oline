@@ -140,15 +140,23 @@ func Build(mode config.Mode, store *config.Store, roster *agents.Roster) (engine
 	if mode == config.ModeExploiter {
 		orchTools = append(orchTools, "runtime", "heartbeat")
 	}
-	bigModel := eff.ModelForTier("big")
+	// The orchestrator runs on a configurable tier (default medium) at a configurable
+	// thinking level (default high) — see config.OrchestratorConfig.
+	orchTier := tierOf(eff.Orchestrator.Tier)
+	orchModel := eff.ModelForTier(orchTier)
+	orchEffort := effortFor(eff, orchModel, eff.Orchestrator.ThinkingLevel)
+	orchCtx := eff.Orchestrator.MaxContextTokens
+	if orchCtx <= 0 {
+		orchCtx = contextForTier(eff, orchModel, orchTier)
+	}
 	orch := engine.AgentConfig{
 		Role:             "Main",
-		Model:            bigModel,
-		Effort:           modelDefaultLevel(eff, bigModel),
-		System:           orchestratorSystem(roster.Orchestrator) + tierRoster(roster),
+		Model:            orchModel,
+		Effort:           orchEffort,
+		System:           orchestratorSystem(roster.Orchestrator) + tierRoster(roster, orchTier),
 		Tools:            orchTools,
-		MaxContextTokens: contextForTier(eff, bigModel, "big"),
-		MaxTokens:        modelMaxTokens(eff, bigModel),
+		MaxContextTokens: orchCtx,
+		MaxTokens:        modelMaxTokens(eff, orchModel),
 		IsOrchestrator:   true,
 	}
 	return orch, resolver
@@ -187,7 +195,7 @@ func tierOf(t string) string {
 // tells it which subagents run on which model tier and how to use that: a weaker
 // (small-tier) agent that is struggling with something needing stronger reasoning
 // should be handed off to a higher-tier agent, not endlessly repromted.
-func tierRoster(roster *agents.Roster) string {
+func tierRoster(roster *agents.Roster, orchTier string) string {
 	byTier := map[string][]string{}
 	for _, name := range roster.Names() {
 		d := roster.Agents[name]
@@ -209,7 +217,7 @@ func tierRoster(roster *agents.Roster) string {
 		}
 		fmt.Fprintf(&sb, "- %s: %s\n", label, list)
 	}
-	sb.WriteString("You run on the big tier. If a lower-tier subagent keeps failing at a task that needs stronger reasoning (bad analysis, repeated mistakes, stuck), do not just reprompt it — hand that piece to a higher-tier agent from the lists above (`task` it), which is more capable. Match the work to the tier: routine, high-volume steps are fine on small/medium; hard reasoning belongs on big.\n")
+	fmt.Fprintf(&sb, "You run on the %s tier. If a subagent keeps failing at a task that needs stronger reasoning (bad analysis, repeated mistakes, stuck), do not just reprompt it — hand that piece to a higher-tier agent from the lists above (`task` it), which is more capable. Match the work to the tier: routine, high-volume steps are fine on small/medium; the hardest reasoning belongs on big.\n", orchTier)
 	return sb.String()
 }
 

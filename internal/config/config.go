@@ -52,6 +52,23 @@ type Root struct {
 	TUI            TUISettings              `yaml:"tui"`
 	Tools          []CommandToolSpec        `yaml:"tools"`
 	MCPServers     []MCPServerSpec          `yaml:"mcpServers"`
+	Orchestrator   OrchestratorConfig       `yaml:"orchestrator"`
+}
+
+// OrchestratorConfig is the orchestrator's (Main's) model configuration, the
+// counterpart to a subagent's frontmatter/AgentOverride: which tier it runs on,
+// its thinking level, and its auto-compaction context ceiling. Defaults live in the
+// embedded config.yml (tier: medium, thinkingLevel: high); the settings editor
+// writes this block.
+type OrchestratorConfig struct {
+	// Tier is the model tier Main runs on (big|medium|small); empty => medium.
+	Tier string `yaml:"tier"`
+	// ThinkingLevel is Main's reasoning effort (low|medium|high); empty => the
+	// model's own default level.
+	ThinkingLevel string `yaml:"thinkingLevel"`
+	// MaxContextTokens is the context-token ceiling at which Main auto-compacts;
+	// 0 => the tier-derived default.
+	MaxContextTokens int `yaml:"maxContextTokens"`
 }
 
 // QEMU holds options for the QEMU backend; the WSL backend ignores them.
@@ -162,7 +179,7 @@ type Budget struct {
 // There are no defaults: the user must configure all three the first time (the
 // engagement will not start otherwise), after which the choices are saved.
 type ModelRoles struct {
-	Big    string `yaml:"big"`    // strongest: exploiters, thinkers, critiques, the orchestrator
+	Big    string `yaml:"big"`    // strongest: exploiters, thinkers, critiques (and the orchestrator if its tier is raised)
 	Medium string `yaml:"medium"` // in-between work
 	Small  string `yaml:"small"`  // fastest/cheapest: summarizers, and context compaction
 }
@@ -899,6 +916,39 @@ func (s *Store) SaveTUICloseIdleSubagentPanes(v bool) error {
 	}
 	tui["closeIdleSubagentPanes"] = v
 	userRoot["tui"] = tui
+	if err := os.MkdirAll(s.userDir, 0o700); err != nil {
+		return fmt.Errorf("config: creating %s: %w", s.userDir, err)
+	}
+	data, err := yaml.Marshal(userRoot)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(userCfgPath, data, 0o600)
+}
+
+// Orchestrator returns the effective orchestrator model configuration.
+func (s *Store) Orchestrator() OrchestratorConfig { return s.eff.Orchestrator }
+
+// SaveOrchestrator persists the orchestrator's model config (tier / thinking level
+// / max context tokens) into the user config layer and applies it in memory.
+func (s *Store) SaveOrchestrator(oc OrchestratorConfig) error {
+	s.eff.Orchestrator = oc
+	userCfgPath := filepath.Join(s.userDir, "config.yml")
+	var userRoot map[string]any
+	if data, err := os.ReadFile(userCfgPath); err == nil {
+		_ = yaml.Unmarshal(data, &userRoot)
+	}
+	if userRoot == nil {
+		userRoot = map[string]any{}
+	}
+	orch := map[string]any{
+		"tier":          oc.Tier,
+		"thinkingLevel": oc.ThinkingLevel,
+	}
+	if oc.MaxContextTokens > 0 {
+		orch["maxContextTokens"] = oc.MaxContextTokens
+	}
+	userRoot["orchestrator"] = orch
 	if err := os.MkdirAll(s.userDir, 0o700); err != nil {
 		return fmt.Errorf("config: creating %s: %w", s.userDir, err)
 	}

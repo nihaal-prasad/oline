@@ -269,7 +269,8 @@ func (a *Agent) summarizeOnce(ctx context.Context, client LLM, model, userMsg st
 			{Role: llm.RoleSystem, Content: compactSystemPrompt},
 			{Role: llm.RoleUser, Content: userMsg},
 		},
-		MaxTokens: maxTok,
+		MaxTokens:       maxTok,
+		SessionAffinity: a.affinity, // keep the compaction prompt prefix warm on one replica
 	}
 	return a.runLLMText(ctx, client, req)
 }

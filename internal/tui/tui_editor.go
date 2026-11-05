@@ -34,10 +34,11 @@ func (m *model) openEditor() {
 	// TUI settings: terminal-UI preferences (not engagement behavior).
 	m.eItems = append(m.eItems, eItem{kind: "tui", name: "customizable panes"})
 	m.eItems = append(m.eItems, eItem{kind: "tui", name: "close idle subagent panes"})
-	// The orchestrator's prompt bundle, each editable like a subagent's prompt: its
-	// system prompt and its personality.
-	m.eItems = append(m.eItems, eItem{kind: "orchestrator", name: "system prompt"})
-	m.eItems = append(m.eItems, eItem{kind: "orchestrator", name: "personality"})
+	// The orchestrator, edited like a subagent: one section with its model tier,
+	// thinking level, max context, and its system prompt. Its mode personality is a
+	// separate prompt item (it is shared mode voice, not an orchestrator model knob).
+	m.eItems = append(m.eItems, eItem{kind: "orchestrator", name: ""})
+	m.eItems = append(m.eItems, eItem{kind: "personality", name: ""})
 	// The three model tiers: every agent runs on one of these, and compaction uses
 	// small. Configuring them here is the same as the first-run setup.
 	m.eItems = append(m.eItems,
@@ -138,7 +139,24 @@ func (m *model) buildFields() {
 		}
 		m.ePrompt = m.newPromptArea(m.roster.Agents[it.name].Prompt)
 	case "orchestrator":
-		m.ePrompt = m.newPromptArea(m.orchPromptValue(it.name))
+		// Edited like a subagent: tier / thinking / max-context fields + system prompt.
+		oc := m.store.Orchestrator()
+		tier := oc.Tier
+		if tier == "" {
+			tier = "medium"
+		}
+		ctxVal := ""
+		if oc.MaxContextTokens > 0 {
+			ctxVal = strconv.Itoa(oc.MaxContextTokens)
+		}
+		m.eFields = []textinput.Model{
+			mk("model tier (big|medium|small)", tier, false),
+			mk("thinking-level (low|medium|high)", oc.ThinkingLevel, false),
+			mk("max context tokens (blank = auto)", ctxVal, false),
+		}
+		m.ePrompt = m.newPromptArea(m.roster.Orchestrator.SystemTemplate)
+	case "personality":
+		m.ePrompt = m.newPromptArea(m.roster.Orchestrator.Personality)
 	}
 	if len(m.eFields) > 0 {
 		m.eFields[0].Focus()
@@ -157,27 +175,6 @@ func (m *model) newPromptArea(content string) *textarea.Model {
 	}
 	ta.SetHeight(m.ePromptH)
 	return &ta
-}
-
-// orchFile maps an orchestrator sub-item name to its on-disk override filename
-// under config/<mode>/.
-func orchFile(name string) string {
-	switch name {
-	case "personality":
-		return "PERSONALITY.md"
-	default:
-		return "SYSTEM_TEMPLATE.md"
-	}
-}
-
-// orchPromptValue returns the current text of an orchestrator sub-item.
-func (m *model) orchPromptValue(name string) string {
-	switch name {
-	case "personality":
-		return m.roster.Orchestrator.Personality
-	default:
-		return m.roster.Orchestrator.SystemTemplate
-	}
 }
 
 // modelCost returns the current cost (USD per 1M tokens) of a provider's model,
@@ -305,6 +302,9 @@ func (m *model) resolveAgent(name string) (struct {
 }
 
 func (m *model) updateEditor(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if mm, ok := msg.(tea.MouseMsg); ok {
+		return m, m.handleEditorMouse(mm)
+	}
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return m, nil
@@ -398,6 +398,56 @@ func (m *model) updateEditor(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// handleEditorMouse maps a click in the settings editor to the same actions the
+// keyboard offers: click a left-list item to open it, click a right-pane field to
+// focus it, and wheel over the prompt box to scroll it. Coordinates are matched
+// against the anchors viewEditor recorded for the last render.
+func (m *model) handleEditorMouse(msg tea.MouseMsg) tea.Cmd {
+	// Wheel: scroll the prompt box when the pointer is over the right pane.
+	if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
+		if m.ePrompt != nil && m.eFocus == m.promptIdx() && msg.X >= m.eRightLeft {
+			var cmd tea.Cmd
+			*m.ePrompt, cmd = m.ePrompt.Update(msg)
+			return cmd
+		}
+		return nil
+	}
+	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionPress {
+		return nil
+	}
+	// Left item list: select (and open) the clicked item.
+	if msg.X < m.eLeftWidth {
+		if idx := msg.Y - m.eLeftItemTop; idx >= 0 && idx < len(m.eItems) {
+			m.eSel = idx
+			m.eFocus = -1
+			m.eStatus = ""
+			m.buildFields()
+			if m.numFields() > 0 {
+				m.setEFocus(0)
+			}
+		}
+		return nil
+	}
+	// Right pane: focus the clicked field (only meaningful once an item is open).
+	if msg.X >= m.eRightLeft && m.eFocus >= 0 {
+		if m.ePrompt != nil {
+			if p := m.promptIdx(); p >= 0 && p < len(m.eFieldRows) {
+				if msg.Y >= m.eFieldRows[p] && msg.Y <= m.ePromptBot {
+					m.setEFocus(p)
+					return nil
+				}
+			}
+		}
+		for i := 0; i < len(m.eFields) && i < len(m.eFieldRows); i++ {
+			if r := m.eFieldRows[i]; msg.Y == r || msg.Y == r-1 { // the input row or its label
+				m.setEFocus(i)
+				return nil
+			}
+		}
+	}
+	return nil
+}
+
 func (m *model) cycleField(d int) {
 	n := m.numFields()
 	if n == 0 {
@@ -422,18 +472,45 @@ func (m *model) saveItem() {
 	it := m.eItems[m.eSel]
 	switch it.kind {
 	case "orchestrator":
+		tier := strings.ToLower(strings.TrimSpace(m.eFields[0].Value()))
+		if tier != "" && tier != "big" && tier != "medium" && tier != "small" {
+			m.eStatus = styleErr.Render("model tier must be big, medium, or small")
+			return
+		}
+		eff := strings.ToLower(strings.TrimSpace(m.eFields[1].Value()))
+		if eff != "" && eff != "low" && eff != "medium" && eff != "high" {
+			m.eStatus = styleErr.Render("thinking-level must be low, medium, or high")
+			return
+		}
+		oc := config.OrchestratorConfig{Tier: tier, ThinkingLevel: eff}
+		if raw := strings.TrimSpace(m.eFields[2].Value()); raw != "" {
+			n, err := strconv.Atoi(raw)
+			if err != nil || n <= 0 {
+				m.eStatus = styleErr.Render("max context tokens must be a positive whole number (or blank for auto)")
+				return
+			}
+			oc.MaxContextTokens = n
+		}
+		if err := m.store.SaveOrchestrator(oc); err != nil {
+			m.eStatus = styleErr.Render("save: " + err.Error())
+			return
+		}
+		// Persist the (possibly edited) system prompt alongside the model config.
 		prompt := m.ePrompt.Value()
-		if err := m.store.SaveModeFile(orchFile(it.name), prompt); err != nil {
+		if err := m.store.SaveModeFile("SYSTEM_TEMPLATE.md", prompt); err != nil {
 			m.eStatus = styleErr.Render("save prompt: " + err.Error())
 			return
 		}
-		switch it.name {
-		case "personality":
-			m.roster.Orchestrator.Personality = prompt
-		default:
-			m.roster.Orchestrator.SystemTemplate = prompt
+		m.roster.Orchestrator.SystemTemplate = prompt
+		m.eStatus = styleGreenRender("saved orchestrator (model config applies to the next engagement)")
+	case "personality":
+		prompt := m.ePrompt.Value()
+		if err := m.store.SaveModeFile("PERSONALITY.md", prompt); err != nil {
+			m.eStatus = styleErr.Render("save prompt: " + err.Error())
+			return
 		}
-		m.eStatus = styleGreenRender("saved orchestrator " + it.name + " (applies to the next engagement)")
+		m.roster.Orchestrator.Personality = prompt
+		m.eStatus = styleGreenRender("saved mode personality (applies to the next engagement)")
 	case "tui":
 		v := strings.ToLower(strings.TrimSpace(m.eFields[0].Value()))
 		var on bool
@@ -610,6 +687,16 @@ func (m *model) viewEditor() string {
 		boxH = clampInt(m.h-4, 6, 40)
 	}
 
+	// Record mouse hit-testing anchors (see the model fields). Content starts on the
+	// box's first inner row: terminal row 3 (header row 0, blank row 1, border row 2).
+	// The left list prints a title + blank line first, so item 0 is on row 5.
+	const contentTop = 3
+	m.eLeftItemTop = contentTop + 2
+	m.eLeftWidth = leftTotal
+	m.eRightLeft = leftTotal + 2 // leftBox (width leftTotal) + the "  " separator
+	m.eFieldRows = m.eFieldRows[:0]
+	m.ePromptBot = -1
+
 	var right strings.Builder
 	if m.eSel >= 0 && m.eSel < len(m.eItems) && m.eFocus >= 0 {
 		it := m.eItems[m.eSel]
@@ -624,6 +711,8 @@ func (m *model) viewEditor() string {
 			if i < len(labels) {
 				lbl = labels[i]
 			}
+			// The input line sits one row below its label: label row = contentTop+2+3i.
+			m.eFieldRows = append(m.eFieldRows, contentTop+2+3*i+1)
 			right.WriteString(marker + lbl + "\n  " + f.View() + "\n\n")
 		}
 		if m.ePrompt != nil {
@@ -634,14 +723,18 @@ func (m *model) viewEditor() string {
 			if m.eStatus != "" {
 				overhead += 2
 			}
-			m.ePrompt.SetHeight(clampInt(boxH-2-overhead, 3, m.ePromptH))
+			ph := clampInt(boxH-2-overhead, 3, m.ePromptH)
+			m.ePrompt.SetHeight(ph)
+			promptLabelRow := contentTop + 2 + 3*len(m.eFields)
+			m.eFieldRows = append(m.eFieldRows, promptLabelRow) // focus index == len(eFields)
+			m.ePromptBot = promptLabelRow + ph
 			marker := "  "
 			if m.eFocus == m.promptIdx() {
 				marker = styleAccent.Render("▸ ")
 			}
 			boxLabel := "system prompt"
-			if it.kind == "orchestrator" {
-				boxLabel = it.name // "system prompt" | "personality"
+			if it.kind == "personality" {
+				boxLabel = "personality"
 			}
 			right.WriteString(marker + boxLabel + "\n" + m.ePrompt.View() + "\n")
 		}
@@ -670,9 +763,10 @@ func (m *model) fieldLabels(it eItem) []string {
 		return []string{it.name + " (true|false)"}
 	case "role":
 		return []string{"model (provider/model-id)", "input $/1M", "output $/1M", "cache-read $/1M", "cache-write $/1M"}
-	case "orchestrator":
-		return nil // only the system-prompt box, no text fields
+	case "personality":
+		return nil // only the personality prompt box, no text fields
 	}
+	// "agent" and "orchestrator": tier / thinking / max-context.
 	return []string{"model tier (big|medium|small)", "thinking-level", "max context tokens"}
 }
 

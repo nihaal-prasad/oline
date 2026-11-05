@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -175,6 +176,10 @@ type Session struct {
 	baseCtx    context.Context  // engagement-lifetime context; subagents run under this, NOT a parent's per-turn context
 	fileLocks  *tools.FileLocks // cross-agent file-write locks
 	backupGate backupGate       // pauses write/edit while a workspace backup runs
+	// affinityBase is a per-session nonce; each agent's prompt-cache affinity key is
+	// affinityBase+"/"+id, so an agent's turns stick to one serverless replica (warm
+	// prompt cache) while different engagements don't collide on a stale cache.
+	affinityBase string
 
 	// Reverse-shell channels opened via the `revshell` tool, keyed by name. Each is
 	// a netcat listener running as a persistent job on the engagement context, so it
@@ -405,6 +410,7 @@ func NewSession(reg *tools.Registry, sb sandbox.Handle, llmFor LLMResolver, cfgF
 		subSlots = 1
 	}
 	s := &Session{Registry: reg, Sandbox: sb, LLMFor: llmFor, ConfigFor: cfgFor, Events: events, fileLocks: tools.NewFileLocks()}
+	s.affinityBase = strconv.FormatInt(time.Now().UnixNano(), 36) // per-session nonce for prompt-cache affinity keys
 	s.router = &Router{agents: map[core.AgentID]*Agent{}, sem: make(chan struct{}, subSlots), counts: map[string]int{}, sess: s}
 	return s
 }
@@ -859,6 +865,7 @@ type Agent struct {
 
 	parent   core.AgentID // who spawned this agent ("" for the orchestrator / a directly-run agent)
 	holdsSem bool         // whether this spawned agent currently holds a concurrency slot
+	affinity string       // prompt-cache session-affinity key (stable for this agent's life)
 
 	mu         sync.Mutex
 	stepCancel context.CancelFunc
@@ -894,6 +901,7 @@ func newAgent(id core.AgentID, cfg AgentConfig, client LLM, modelID string, s *S
 		budget:  time.Duration(cfg.BudgetMinutes) * time.Minute,
 		jobs:    map[int]*bgJob{},
 	}
+	a.affinity = s.affinityBase + "/" + string(id)
 	a.budgetFrom = a.started
 	if seed != "" {
 		a.history = append(a.history, llm.Message{Role: llm.RoleUser, Content: seed})
@@ -1438,6 +1446,7 @@ func (a *Agent) buildReq() llm.ChatReq {
 		Tools:           a.toolDefs(),
 		ReasoningEffort: a.cfg.Effort,
 		MaxTokens:       maxTokens,
+		SessionAffinity: a.affinity,
 	}
 }
 

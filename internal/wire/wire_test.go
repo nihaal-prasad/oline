@@ -105,8 +105,13 @@ func TestBuildPentester(t *testing.T) {
 	if !orch.IsOrchestrator {
 		t.Error("orchestrator not flagged")
 	}
-	if orch.Model != "fireworks/accounts/fireworks/models/deepseek-v4p1-flash" {
-		t.Errorf("orchestrator model = %q", orch.Model)
+	// The orchestrator defaults to the MEDIUM tier (GLM) at a HIGH thinking level
+	// (config.OrchestratorConfig defaults in the embedded config.yml).
+	if !strings.Contains(orch.Model, "glm-5p3-flash") {
+		t.Errorf("orchestrator model = %q (want the medium-tier GLM by default)", orch.Model)
+	}
+	if orch.Effort != "high" {
+		t.Errorf("orchestrator effort = %q (want high by default)", orch.Effort)
 	}
 	for _, want := range []string{"task", "wait", "ask", "send_message"} {
 		if !has(orch.Tools, want) {

@@ -70,6 +70,13 @@ type ChatReq struct {
 	Tools           []FunctionDef
 	ReasoningEffort string // low|medium|high -> reasoning_effort (when the model supports it)
 	MaxTokens       int
+	// SessionAffinity, when set, is sent as the `x-session-affinity` request header.
+	// On multi-replica serverless providers (e.g. Fireworks) prompt caches are
+	// per-replica, so a stable per-agent affinity key pins an agent's successive
+	// turns to the same replica and lets its growing, mostly-unchanged prompt prefix
+	// hit the (far cheaper) prompt cache instead of being reprocessed in full. It is
+	// only a routing hint and never changes the model's output.
+	SessionAffinity string
 }
 
 // Delta is one normalized streamed event. Exactly one of its fields is
@@ -253,7 +260,7 @@ func (c *Client) Stream(ctx context.Context, req ChatReq, ch chan<- Delta) error
 	// provider blip or rate-limit instead of killing the agent's turn. Once the body
 	// is being read and deltas have been emitted, a mid-stream failure is NOT retried
 	// (the partial output already went out) — it returns an error as before.
-	resp, err := c.connect(ctx, raw)
+	resp, err := c.connect(ctx, raw, req.SessionAffinity)
 	if err != nil {
 		return err
 	}
@@ -297,7 +304,7 @@ func (c *Client) Stream(ctx context.Context, req ChatReq, ch chan<- Delta) error
 // connect-phase failure (network error, 429, or 5xx) up to c.maxAttempts with
 // exponential backoff. It never retries once a 200 body is in hand, so no streamed
 // output is ever duplicated. Cancelling ctx aborts immediately.
-func (c *Client) connect(ctx context.Context, raw []byte) (*http.Response, error) {
+func (c *Client) connect(ctx context.Context, raw []byte, affinity string) (*http.Response, error) {
 	attempts := c.maxAttempts
 	if attempts < 1 {
 		attempts = 1
@@ -319,6 +326,12 @@ func (c *Client) connect(ctx context.Context, raw []byte) (*http.Response, error
 		httpReq.Header.Set("Accept", "text/event-stream")
 		if c.apiKey != "" {
 			httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+		}
+		// Prompt-cache stickiness: route this agent's turns to the same serverless
+		// replica so its cached prompt prefix is reused (ignored by providers that
+		// don't honor the header). Harmless when empty.
+		if affinity != "" {
+			httpReq.Header.Set("x-session-affinity", affinity)
 		}
 
 		resp, err := c.http.Do(httpReq)
