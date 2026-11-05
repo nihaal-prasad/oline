@@ -182,16 +182,23 @@ type ModelRoles struct {
 	Big    string `yaml:"big"`    // strongest: exploiters, thinkers, critiques (and the orchestrator if its tier is raised)
 	Medium string `yaml:"medium"` // in-between work
 	Small  string `yaml:"small"`  // fastest/cheapest: summarizers, and context compaction
+	// Decision is the OPTIONAL System-1 decision model (empty = disabled). It is not a
+	// chat model and is not one of the required tiers; when set and reachable it powers
+	// finding triage/dedup, the judge pre-screen, the subagent progress detector, and
+	// task routing. See internal/decide.
+	Decision string `yaml:"decision"`
 }
 
 // ModelForTier returns the "provider/model-id" selector for a tier name
-// (big|medium|small), defaulting an unknown/empty tier to medium.
+// (big|medium|small|decision), defaulting an unknown/empty tier to medium.
 func (r Root) ModelForTier(tier string) string {
 	switch strings.ToLower(strings.TrimSpace(tier)) {
 	case "big":
 		return r.ModelRoles.Big
 	case "small":
 		return r.ModelRoles.Small
+	case "decision":
+		return r.ModelRoles.Decision
 	default:
 		return r.ModelRoles.Medium
 	}
@@ -852,8 +859,10 @@ func (s *Store) SaveModelRole(tier, selector string) error {
 		s.eff.ModelRoles.Medium = selector
 	case "small":
 		s.eff.ModelRoles.Small = selector
+	case "decision":
+		s.eff.ModelRoles.Decision = selector
 	default:
-		return fmt.Errorf("config: unknown model tier %q (want big|medium|small)", tier)
+		return fmt.Errorf("config: unknown model tier %q (want big|medium|small|decision)", tier)
 	}
 	return s.editSharedModels(func(root map[string]any) {
 		roles, _ := root["modelRoles"].(map[string]any)
@@ -989,6 +998,39 @@ func (s *Store) ValidateModels() error {
 		if _, err := s.ResolveKey(prov); err != nil {
 			return fmt.Errorf("the %q model's provider %q has no usable API key: %w", tier, prov, err)
 		}
+	}
+	return nil
+}
+
+// ValidateDecisionModel checks the OPTIONAL decision model is usable, the same way
+// ValidateModels checks a tier. It must be called only when the decision tier is set;
+// an error means the caller should treat the decision model as disabled. A missing
+// decision model is never an error here (and never blocks engagement start).
+func (s *Store) ValidateDecisionModel() error {
+	sel := strings.TrimSpace(s.eff.ModelRoles.Decision)
+	if sel == "" {
+		return nil // not configured = disabled, not an error
+	}
+	prov, id, ok := strings.Cut(sel, "/")
+	if !ok || prov == "" || id == "" {
+		return fmt.Errorf("the decision model %q must be in provider/model-id form", sel)
+	}
+	p, ok := s.eff.Providers[prov]
+	if !ok {
+		return fmt.Errorf("the decision model uses unknown provider %q", prov)
+	}
+	found := false
+	for _, md := range p.Models {
+		if md.ID == id {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("the decision model %q is not in provider %q's model list", id, prov)
+	}
+	if _, err := s.ResolveKey(prov); err != nil {
+		return fmt.Errorf("the decision model's provider %q has no usable API key: %w", prov, err)
 	}
 	return nil
 }

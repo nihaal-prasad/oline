@@ -1802,7 +1802,36 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 
 	reg := wire.BuildRegistry(m.store)
 	llmFor := wire.NewLLMResolver(m.store)
-	orch, resolver := wire.Build(m.mode, m.store, m.roster)
+
+	// Optional System-1 decision model: enabled only when it is configured, valid, AND
+	// reachable (probed now). Otherwise the decision features stay off and the
+	// orchestrator is never told they exist.
+	decisionEnabled := false
+	var decClient engine.Decider
+	var decModel string
+	var decCtx int
+	if sel := strings.TrimSpace(m.store.Effective().ModelRoles.Decision); sel != "" {
+		switch {
+		case m.store.ValidateDecisionModel() != nil:
+			m.writeln(core.Main, styleWarn.Render("decision model not usable — decision features disabled: "+m.store.ValidateDecisionModel().Error()))
+		default:
+			if cl, mid, ctxTok, err := wire.DecisionClient(m.store, sel); err != nil {
+				m.writeln(core.Main, styleWarn.Render("decision model setup failed — decision features disabled: "+err.Error()))
+			} else {
+				pctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				perr := cl.Ping(pctx)
+				cancel()
+				if perr != nil {
+					m.writeln(core.Main, styleWarn.Render("decision model unreachable — decision features disabled: "+perr.Error()))
+				} else {
+					decClient, decModel, decCtx = cl, mid, ctxTok
+					decisionEnabled = true
+				}
+			}
+		}
+	}
+
+	orch, resolver := wire.Build(m.mode, m.store, m.roster, decisionEnabled)
 
 	// Connect operator-configured MCP servers (host-side integrations) and register
 	// their tools into the registry, so an agent granted <server>__<tool> can call it.
@@ -1847,6 +1876,17 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 			m.sess.SummarizerLLM, m.sess.SummarizerModel = cl, mid
 			m.sess.SummarizerContextTokens = m.modelContextWindow(small)
 		}
+	}
+	// Goal + target as structured state so engine-side decision calls can use them.
+	m.sess.Goal = m.goalIn.Value()
+	m.sess.Target = m.scopeIn.Value()
+	// Activate the decision model (already probed above).
+	if decisionEnabled {
+		m.sess.Decider = decClient
+		m.sess.DecisionModel = decModel
+		m.sess.DecisionContextTokens = decCtx
+		m.sess.RouterRoles = routerRolesFromRoster(m.roster)
+		m.writeln(core.Main, styleAccent.Render("decision model active ("+decModel+"): finding triage/dedup, judge pre-screen, progress checks, and task routing enabled"))
 	}
 	m.costCap = m.store.Effective().Budget.MaxCostUSD
 	m.summaryCap = m.store.Effective().Budget.MaxSummaryCostUSD
@@ -3632,6 +3672,21 @@ func (m *model) modelContextWindow(sel string) int {
 		}
 	}
 	return 0
+}
+
+// routerRolesFromRoster builds the decision-model router's role list from the current
+// mode's roster: each spawnable subagent's name + a one-line description. It is scoped
+// to this roster, so the router can only ever pick a role that exists in this mode.
+func routerRolesFromRoster(r *agents.Roster) []engine.RoleInfo {
+	out := make([]engine.RoleInfo, 0, len(r.Agents))
+	for _, name := range r.Names() {
+		desc := r.Agents[name].Description
+		if i := strings.IndexByte(desc, '\n'); i >= 0 {
+			desc = desc[:i]
+		}
+		out = append(out, engine.RoleInfo{Name: name, Description: strings.TrimSpace(desc)})
+	}
+	return out
 }
 
 func (m *model) addAgent(id core.AgentID) {

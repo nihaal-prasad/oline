@@ -10,6 +10,7 @@ import (
 	"github.com/nihaal-prasad/oline/internal/agents"
 	"github.com/nihaal-prasad/oline/internal/config"
 	"github.com/nihaal-prasad/oline/internal/core"
+	"github.com/nihaal-prasad/oline/internal/decide"
 	"github.com/nihaal-prasad/oline/internal/engine"
 	"github.com/nihaal-prasad/oline/internal/llm"
 	"github.com/nihaal-prasad/oline/internal/sandbox"
@@ -86,7 +87,7 @@ func NewLLMResolver(store *config.Store) engine.LLMResolver {
 // Build resolves the orchestrator config and a ConfigResolver for the roster's
 // subagents. taskRole supplies the model for agents with no explicit model; the
 // orchestrator uses the default role at that model's own default thinking level.
-func Build(mode config.Mode, store *config.Store, roster *agents.Roster) (engine.AgentConfig, engine.ConfigResolver) {
+func Build(mode config.Mode, store *config.Store, roster *agents.Roster, decisionEnabled bool) (engine.AgentConfig, engine.ConfigResolver) {
 	toConfig := func(eff config.Root, def agents.AgentDef) engine.AgentConfig {
 		tier := tierOf(def.Tier)
 		model := eff.ModelForTier(tier)
@@ -149,17 +150,60 @@ func Build(mode config.Mode, store *config.Store, roster *agents.Roster) (engine
 	if orchCtx <= 0 {
 		orchCtx = contextForTier(eff, orchModel, orchTier)
 	}
+	// When the decision model is on, the orchestrator does NOT pick specialists (a
+	// router does) and must not see the per-agent roster; instead it is told the
+	// automated gates exist. Otherwise it gets the normal per-tier roster listing.
+	sys := orchestratorSystem(roster.Orchestrator)
+	if decisionEnabled {
+		sys += decisionGatesPrompt()
+	} else {
+		sys += tierRoster(roster, orchTier)
+	}
 	orch := engine.AgentConfig{
 		Role:             "Main",
 		Model:            orchModel,
 		Effort:           orchEffort,
-		System:           orchestratorSystem(roster.Orchestrator) + tierRoster(roster, orchTier),
+		System:           sys,
 		Tools:            orchTools,
 		MaxContextTokens: orchCtx,
 		MaxTokens:        modelMaxTokens(eff, orchModel),
 		IsOrchestrator:   true,
 	}
 	return orch, resolver
+}
+
+// decisionGatesPrompt is appended to the orchestrator's system prompt when the
+// decision model is enabled. It replaces the per-tier roster (so no specialist names
+// are exposed) and tells the orchestrator that routing, finding triage, and judge
+// pre-screening are automatic.
+func decisionGatesPrompt() string {
+	return "\n\n# Automated assignment and gates\n" +
+		"A fast automated system assists you; rely on it rather than working around it.\n" +
+		"- **Specialist assignment:** You do NOT choose or name specialists. For every `task`, describe the work fully and self-containedly in the prompt; the right specialist is assigned for you automatically. (`reprompt` still targets an agent you already started, by its id.)\n" +
+		"- **Findings:** Findings you or your subagents record are automatically deduplicated, assigned a severity, and noise-filtered. If a finding is dropped as noise or out of scope, you will be told — if you believe that was wrong, have it re-recorded with stronger, concrete evidence.\n" +
+		"- **Verification:** When you `task` a verification of an exploit, it is automatically pre-screened for sufficient evidence before a verifier runs. If it does not meet the bar you will be told to gather stronger, reproducible proof first.\n"
+}
+
+// DecisionClient builds the optional decision-model client from a "provider/model-id"
+// selector, returning the client, the bare model id, and the model's context window
+// (0 if unknown). It resolves the provider base URL + API key exactly like the LLM
+// resolver. Used at engagement start; the caller probes it before enabling the
+// decision features.
+func DecisionClient(store *config.Store, selector string) (*decide.Client, string, int, error) {
+	eff := store.Effective()
+	provider, modelID, ok := strings.Cut(selector, "/")
+	if !ok || provider == "" || modelID == "" {
+		return nil, "", 0, fmt.Errorf("decision model %q must be in provider/model-id form", selector)
+	}
+	p, ok := eff.Providers[provider]
+	if !ok {
+		return nil, "", 0, fmt.Errorf("decision model: unknown provider %q", provider)
+	}
+	key, err := store.ResolveKey(provider)
+	if err != nil {
+		return nil, "", 0, err
+	}
+	return decide.New(p.BaseURL, key, modelID), modelID, modelContextWindow(eff, selector), nil
 }
 
 // modelMaxTokens returns the declared output-token cap for a "provider/model-id"

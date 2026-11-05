@@ -142,9 +142,10 @@ a human override and doesn't take the agents' token. It all stays inside the san
 
 ## Model tiers
 
-There are three tiers: `big`, `medium`, and `small`. Every agent runs on one, and
-you choose which model backs each tier (see [configuration.md](configuration.md)).
-All three must be set before an engagement starts.
+There are three required tiers: `big`, `medium`, and `small`. Every agent runs on
+one, and you choose which model backs each tier (see
+[configuration.md](configuration.md)). All three must be set before an engagement
+starts.
 
 - `big`: the orchestrator, exploiters, thinkers, and critiques.
 - `medium`: balanced work (for example recon, enumerator, installer, reporter).
@@ -152,6 +153,36 @@ All three must be set before an engagement starts.
 
 Set an agent's tier in its frontmatter (`tier:`), in `config.yml`
 (`agents.<name>.tier`), or in the editor.
+
+## Decision model (optional)
+
+A fourth, **optional** tier — `decision` — is a System-1 decision model: it reads a
+document and answers typed questions (multiple-choice, yes/no, graded-scale) with
+calibrated probabilities and generates no prose. It is model- and provider-agnostic
+(any OpenAI-compatible `/decisions` endpoint). Leave it blank to disable it.
+
+It is validated and probed once at engagement start. **If it is set and reachable**,
+four behaviors switch on and the orchestrator is told they exist:
+
+1. **Finding triage + dedup** — each `record_finding` is assigned a severity,
+   duplicates are merged into the existing finding, and noise is dropped (a dropped
+   finding is reported to the orchestrator).
+2. **Judge pre-screen** — a verification task is screened for sufficient evidence
+   before the `judge` runs; the decision model, not the orchestrator, decides whether
+   the judge is called, and the judge is never aware of the gate.
+3. **Progress detector** — a subagent's progress toward the goal is graded after 1/3
+   and 2/3 of its time budget; if it looks stuck, the orchestrator is notified and the
+   subagent is nudged to refocus.
+4. **Task routing** — the orchestrator no longer names a specialist; it describes the
+   task and the decision model assigns the right subagent (constrained to the current
+   mode's roster).
+
+**If it is unset or unreachable**, none of this is active, the orchestrator is never
+told these features exist, and oline behaves exactly as it does without a decision
+model. All four gates also fail open at runtime: a transient decision-model outage
+never drops a finding, blocks the judge, or kills an agent. Documents too large for
+the decision model's context window are compacted (by the `small`-tier summarizer)
+first.
 
 ## Context auto-compaction
 

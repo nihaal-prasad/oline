@@ -77,7 +77,7 @@ func fireworksProvider() config.Provider {
 // that was configured when Build ran.
 func TestResolverReadsLiveConfig(t *testing.T) {
 	store, roster := load(t, config.ModePentester)
-	_, resolver := wire.Build(config.ModePentester, store, roster)
+	_, resolver := wire.Build(config.ModePentester, store, roster, false)
 
 	// recon is a medium-tier agent; it starts on the GLM configured by load().
 	if recon, _ := resolver("recon"); !strings.Contains(recon.Model, "glm-5p3-flash") {
@@ -98,9 +98,30 @@ func TestResolverReadsLiveConfig(t *testing.T) {
 	}
 }
 
+// TestBuildDecisionEnabledPrompt: with the decision model on, the orchestrator is
+// told the automated gates exist and the per-agent tier roster is hidden (it no
+// longer picks specialists).
+func TestBuildDecisionEnabledPrompt(t *testing.T) {
+	store, roster := load(t, config.ModePentester)
+	on, _ := wire.Build(config.ModePentester, store, roster, true)
+	if !strings.Contains(on.System, "Automated assignment and gates") {
+		t.Error("decision-enabled orchestrator prompt should explain the automated gates")
+	}
+	if strings.Contains(on.System, "Subagent model tiers") {
+		t.Error("decision-enabled orchestrator must NOT see the per-agent tier roster (hide specific agents)")
+	}
+	off, _ := wire.Build(config.ModePentester, store, roster, false)
+	if strings.Contains(off.System, "Automated assignment and gates") {
+		t.Error("decision-disabled orchestrator must not mention the gates")
+	}
+	if !strings.Contains(off.System, "Subagent model tiers") {
+		t.Error("decision-disabled orchestrator should keep the tier roster")
+	}
+}
+
 func TestBuildPentester(t *testing.T) {
 	store, roster := load(t, config.ModePentester)
-	orch, resolver := wire.Build(config.ModePentester, store, roster)
+	orch, resolver := wire.Build(config.ModePentester, store, roster, false)
 
 	if !orch.IsOrchestrator {
 		t.Error("orchestrator not flagged")
@@ -258,7 +279,7 @@ func TestBuildPentester(t *testing.T) {
 
 func TestBuildExploiter(t *testing.T) {
 	store, roster := load(t, config.ModeExploiter)
-	orch, resolver := wire.Build(config.ModeExploiter, store, roster)
+	orch, resolver := wire.Build(config.ModeExploiter, store, roster, false)
 	if !has(orch.Tools, "runtime") || !has(orch.Tools, "heartbeat") {
 		t.Error("exploiter orchestrator should have runtime+heartbeat")
 	}
@@ -312,7 +333,7 @@ func TestLiveRecon(t *testing.T) {
 	}
 	store, roster := load(t, config.ModePentester)
 	llmFor := wire.NewLLMResolver(store)
-	_, resolver := wire.Build(config.ModePentester, store, roster)
+	_, resolver := wire.Build(config.ModePentester, store, roster, false)
 
 	reg := tools.NewRegistry()
 	reg.Register(tools.Bash{})

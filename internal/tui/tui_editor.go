@@ -45,7 +45,8 @@ func (m *model) openEditor() {
 	m.eItems = append(m.eItems,
 		eItem{kind: "role", name: "big"},
 		eItem{kind: "role", name: "medium"},
-		eItem{kind: "role", name: "small"})
+		eItem{kind: "role", name: "small"},
+		eItem{kind: "role", name: "decision"}) // optional System-1 model; blank = disabled
 	provs := make([]string, 0)
 	for name := range m.store.Providers() {
 		provs = append(provs, name)
@@ -201,6 +202,8 @@ func (m *model) roleModel(tier string) string {
 		return r.Big
 	case "small":
 		return r.Small
+	case "decision":
+		return r.Decision
 	default:
 		return r.Medium
 	}

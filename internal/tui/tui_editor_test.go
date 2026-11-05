@@ -212,6 +212,30 @@ func TestEditorMouse(t *testing.T) {
 	}
 }
 
+// TestEditorDecisionRole checks the optional decision tier appears as a role row and
+// is edited like the other tiers (model selector + 4 price fields).
+func TestEditorDecisionRole(t *testing.T) {
+	m, _ := tempHomeModel(t)
+	withFireworks(m.store)
+	const dec = "fireworks/accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b"
+	if err := m.store.SaveModelRole("decision", dec); err != nil {
+		t.Fatalf("SaveModelRole(decision): %v", err)
+	}
+	m.openEditor()
+	i := findItem(m, "role", "decision")
+	if i < 0 {
+		t.Fatal("decision role not in the editor list")
+	}
+	m.eSel = i
+	m.buildFields()
+	if len(m.eFields) != 5 {
+		t.Fatalf("decision role should show model + 4 price fields (5), got %d", len(m.eFields))
+	}
+	if !strings.Contains(m.eFields[0].Value(), "nemotron-lightning") {
+		t.Errorf("decision role model field = %q, want the saved decision model", m.eFields[0].Value())
+	}
+}
+
 // tempHomeModel points config at a throwaway HOME so saves don't touch the real
 // ~/oline/config, then returns a loaded model.
 func tempHomeModel(t *testing.T) (*model, string) {

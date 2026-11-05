@@ -120,10 +120,10 @@ func printRoster(mode config.Mode) {
 		fmt.Fprintln(os.Stderr, "load roster:", err)
 		os.Exit(1)
 	}
-	orch, resolver := wire.Build(mode, store, roster)
+	orch, resolver := wire.Build(mode, store, roster, false)
 	fmt.Printf("oline — mode=%s  config=%s\n", mode, store.ConfigDir())
 	roles := store.ModelRoles()
-	fmt.Printf("model tiers: big=%s medium=%s small=%s\n", dash(roles.Big), dash(roles.Medium), dash(roles.Small))
+	fmt.Printf("model tiers: big=%s medium=%s small=%s decision=%s\n", dash(roles.Big), dash(roles.Medium), dash(roles.Small), dash(roles.Decision))
 	if !store.ModelsConfigured() {
 		fmt.Println("  (tiers not configured yet — set them in the setup wizard or `oline -edit`; the engagement will not start until they are)")
 	}

@@ -19,6 +19,7 @@ import (
 
 	"github.com/nihaal-prasad/oline/internal/audit"
 	"github.com/nihaal-prasad/oline/internal/core"
+	"github.com/nihaal-prasad/oline/internal/decide"
 	"github.com/nihaal-prasad/oline/internal/event"
 	"github.com/nihaal-prasad/oline/internal/llm"
 	"github.com/nihaal-prasad/oline/internal/sandbox"
@@ -44,6 +45,25 @@ type LLM interface {
 
 // LLMResolver maps a "provider/model-id" selector to a client and the bare model id.
 type LLMResolver func(selector string) (client LLM, modelID string, err error)
+
+// RoleInfo is a spawnable role the decision-model router may choose: its canonical
+// name and a one-line description.
+type RoleInfo struct {
+	Name        string
+	Description string
+}
+
+// Decider is the optional System-1 decision model (satisfied by *decide.Client;
+// mockable). It never generates text — it answers typed questions about a document
+// with calibrated probabilities, used for oline's cheap triage/routing/gate decisions.
+type Decider interface {
+	// Predicate returns the probability (0..1) that the answer to a yes/no question is true.
+	Predicate(ctx context.Context, input, instructions string) (float64, error)
+	// Choice picks one of choices and returns its value and the probability assigned to it.
+	Choice(ctx context.Context, input, instructions string, choices []decide.Choice) (string, float64, error)
+	// Score grades on a levels scale (lowest-first), returning the level index and a 0..1 grade.
+	Score(ctx context.Context, input, instructions string, levels []string) (int, float64, error)
+}
 
 // ConfigResolver maps a subagent role name to its AgentConfig.
 type ConfigResolver func(role string) (AgentConfig, bool)
@@ -159,6 +179,27 @@ type Session struct {
 	// Compaction caps the transcript it hands that model to what this window holds,
 	// so a small summarizer model isn't sent more than it can accept.
 	SummarizerContextTokens int
+
+	// Decider, when non-nil, is the optional System-1 decision model that powers the
+	// finding triage/dedup gate, the judge pre-screen, the subagent progress detector,
+	// and task routing. Nil = the decision features are off and behavior is unchanged.
+	// Set at engagement start only after a successful reachability probe, so a mid-run
+	// outage never un-sets it (the gates fail open instead).
+	Decider               Decider
+	DecisionModel         string // the decision model id (for logging)
+	DecisionContextTokens int    // the decision model's context window (0 = unknown)
+
+	// Goal and Target are the engagement's objective and in-scope target(s), as plain
+	// text, so engine-side decision calls (progress detector, judge gate) can give the
+	// decision model that context. Set at engagement start.
+	Goal   string
+	Target string
+
+	// RouterRoles lists the spawnable subagent roles of the CURRENT mode (name +
+	// one-line description) for the decision-model task router. It holds only this
+	// mode's roles, so the router can never pick a role from another mode. Set at
+	// engagement start; used only when the decision model is on.
+	RouterRoles []RoleInfo
 
 	// Workspace is the engagement's guest workspace directory (e.g.
 	// /opt/oline/engagements/<name>). File-tool relative paths resolve against it,
@@ -417,6 +458,10 @@ func NewSession(reg *tools.Registry, sb sandbox.Handle, llmFor LLMResolver, cfgF
 
 // Router returns the session's router (for TUI control: Pause/Resume/Kill).
 func (s *Session) Router() *Router { return s.router }
+
+// decisionOn reports whether the optional decision model is configured and reachable
+// (set only after a successful startup probe). All decision features gate on this.
+func (s *Session) decisionOn() bool { return s != nil && s.Decider != nil }
 
 func (s *Session) emit(ev event.Event) {
 	if s.Events == nil {
@@ -867,19 +912,20 @@ type Agent struct {
 	holdsSem bool         // whether this spawned agent currently holds a concurrency slot
 	affinity string       // prompt-cache session-affinity key (stable for this agent's life)
 
-	mu         sync.Mutex
-	stepCancel context.CancelFunc
-	history    []llm.Message
-	lastThink  string         // latest turn's reasoning/thoughts (for the inspect tool)
-	lastText   string         // last non-empty assistant text this cycle (result fallback)
-	jobSeq     int            // id counter for commands / background jobs
-	budget     time.Duration  // engine time budget; 0 = no limit
-	budgetFrom time.Time      // when the CURRENT budget window started (reset on a manual change / reprompt)
-	budgetSent int            // reminders already sent (reset when the budget changes)
-	pausedAt   time.Time      // when the agent was paused (to exclude paused time from the budget)
-	fgID       int            // id of the current foreground command (0 = none)
-	fgJob      *bgJob         // the current foreground command's job (nil = none)
-	jobs       map[int]*bgJob // backgrounded jobs, by id
+	mu            sync.Mutex
+	stepCancel    context.CancelFunc
+	history       []llm.Message
+	lastThink     string         // latest turn's reasoning/thoughts (for the inspect tool)
+	lastText      string         // last non-empty assistant text this cycle (result fallback)
+	jobSeq        int            // id counter for commands / background jobs
+	budget        time.Duration  // engine time budget; 0 = no limit
+	budgetFrom    time.Time      // when the CURRENT budget window started (reset on a manual change / reprompt)
+	budgetSent    int            // reminders already sent (reset when the budget changes)
+	spiralChecked int            // progress-detector checks fired this cycle (1 after 1/3, 2 after 2/3)
+	pausedAt      time.Time      // when the agent was paused (to exclude paused time from the budget)
+	fgID          int            // id of the current foreground command (0 = none)
+	fgJob         *bgJob         // the current foreground command's job (nil = none)
+	jobs          map[int]*bgJob // backgrounded jobs, by id
 	// tokensEst is a running estimate of the agent's context size (system + history)
 	// in tokens, maintained incrementally so ContextUsage is O(1) instead of
 	// re-summing the whole history on every roster render.
@@ -1104,6 +1150,7 @@ func (a *Agent) setBudget(d time.Duration) {
 	had := a.budget > 0
 	a.budget = d
 	a.budgetSent = 0
+	a.spiralChecked = 0
 	a.budgetFrom = time.Now() // a manual change means "N minutes from now"
 	a.mu.Unlock()
 
@@ -1131,9 +1178,29 @@ func (a *Agent) checkBudget() {
 	budget, sent, from := a.budget, a.budgetSent, a.budgetFrom
 	a.mu.Unlock()
 	if budget <= 0 {
-		return // no limit
+		return // no limit (and no fractional progress checks)
 	}
 	elapsed := time.Since(from)
+
+	// Spiral / progress detector (only when the decision model is on): grade progress
+	// once after 1/3 and once after 2/3 of the budget. Claim the slot under the lock
+	// so a slow decision call can't double-fire, then run it off the monitor goroutine.
+	if a.s.decisionOn() {
+		a.mu.Lock()
+		spiral := a.spiralChecked
+		if spiral == 0 && elapsed >= budget/3 {
+			a.spiralChecked = 1
+		} else if spiral == 1 && elapsed >= 2*budget/3 {
+			a.spiralChecked = 2
+		} else {
+			spiral = -1 // nothing to fire this tick
+		}
+		a.mu.Unlock()
+		if spiral >= 0 {
+			go a.progressCheck()
+		}
+	}
+
 	switch {
 	case sent == 0 && elapsed >= budget:
 		a.sendBudgetReminder(1, budget)
@@ -1353,6 +1420,7 @@ func (a *Agent) Run(parent context.Context) Result {
 				a.started = time.Now()
 				a.budgetFrom = a.started
 				a.budgetSent = 0
+				a.spiralChecked = 0
 				a.lastText = "" // a new cycle: don't carry the prior result's text forward
 				a.mu.Unlock()
 				a.sm.setRunning()
@@ -1456,6 +1524,11 @@ func (a *Agent) toolDefs() []llm.FunctionDef {
 	var defs []llm.FunctionDef
 	for _, name := range a.cfg.Tools {
 		if d, ok := primitiveSchemas[name]; ok {
+			// With the decision router on, the orchestrator does not name specialists:
+			// advertise a `task` that takes only a prompt (the router picks the role).
+			if name == "task" && a.cfg.IsOrchestrator && a.s.decisionOn() {
+				d = taskRoutedSchema
+			}
 			defs = append(defs, d)
 			continue
 		}
@@ -1594,17 +1667,45 @@ func (a *Agent) doTask(ctx context.Context, tc llm.ToolCall) (string, bool) {
 	if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
 		return "task: invalid arguments: " + err.Error(), true
 	}
-	if args.Agent == "" {
+	if strings.TrimSpace(args.Prompt) == "" {
+		return "task: 'prompt' is required", true
+	}
+
+	role := args.Agent
+	// Routing assist (only when the decision model is on): the orchestrator does not
+	// name a specialist — the decision model picks the role from the current mode's
+	// roster, given only the task prompt. A routing failure is surfaced to the
+	// orchestrator (we never fall back to it picking, nor to a default role).
+	if a.s.decisionOn() && a.cfg.IsOrchestrator {
+		r, err := a.routeTask(args.Prompt)
+		if err != nil {
+			return "task: the router is temporarily unavailable — resubmit this task in a moment.", true
+		}
+		role = r
+	}
+	if role == "" {
 		return "task: 'agent' is required", true
 	}
-	if !a.cfg.maySpawn(args.Agent) {
-		return fmt.Sprintf("task: %s is not permitted to spawn %q", a.id, args.Agent), true
+	if !a.cfg.maySpawn(role) {
+		return fmt.Sprintf("task: %s is not permitted to spawn %q", a.id, role), true
 	}
-	id, err := a.s.router.spawn(a.id, args.Agent, args.Prompt)
+
+	// Judge pre-screen (only when the decision model is on): the decision model — not
+	// the orchestrator — decides whether a verification task meets the evidence bar for
+	// the judge. The "judge" role exists only in the exploiter roster, so gating on the
+	// role name needs no mode check. The judge never learns a gate ran. Fails open
+	// (judge runs) on a decision error.
+	if a.s.decisionOn() && strings.EqualFold(core.CanonRole(role), "Judge") {
+		if !a.judgeGate(args.Prompt) {
+			return "task: this verification request does not yet meet the evidence threshold for judgement — gather stronger, reproducible proof before resubmitting.", false
+		}
+	}
+
+	id, err := a.s.router.spawn(a.id, role, args.Prompt)
 	if err != nil {
 		return "task: " + err.Error(), true
 	}
-	return fmt.Sprintf("spawned subagent %s (role %s). Call wait to collect its result.", id, core.CanonRole(args.Agent)), false
+	return fmt.Sprintf("spawned subagent %s (role %s). Call wait to collect its result.", id, core.CanonRole(role)), false
 }
 
 // doReprompt re-tasks an existing subagent with a new instruction. A finished or
@@ -1934,9 +2035,32 @@ func (a *Agent) doRecordFinding(tc llm.ToolCall) (string, bool) {
 	}
 	sev := normalizeSeverity(args.Severity)
 	title, target, detail := strings.TrimSpace(args.Title), strings.TrimSpace(args.Target), strings.TrimSpace(args.Detail)
-	a.s.emit(event.Finding{Agent: a.id, Severity: sev, Title: title, Target: target, Detail: detail})
-	a.s.addFinding(Finding{Time: time.Now().UTC(), Agent: string(a.id), Severity: sev, Title: title, Target: target, Detail: detail})
-	return reply(fmt.Sprintf("recorded %s finding %q (logged for the report). Keep it; the reporter will include it.", sev, title), false)
+	newF := Finding{Time: time.Now().UTC(), Agent: string(a.id), Severity: sev, Title: title, Target: target, Detail: detail}
+
+	// Decision-model triage gate (only when the decision model is on): assign severity,
+	// merge duplicates, and drop noise. It fails open — on any decision error the
+	// finding is recorded unchanged below.
+	if a.s.decisionOn() {
+		d := a.triageFinding(newF)
+		if d.severity != "" {
+			newF.Severity = d.severity
+		}
+		switch {
+		case d.mergeIdx >= 0:
+			a.s.mergeFindingDetail(d.mergeIdx, newF)
+			return reply(fmt.Sprintf("finding %q looks like a duplicate — merged into an existing finding instead of adding a new one.", title), false)
+		case d.drop:
+			// Hard-drop as noise, and tell the orchestrator so it can override.
+			a.s.router.send(Envelope{From: systemSender, To: core.Main, Kind: MsgSteer,
+				Body: fmt.Sprintf("Triage dropped a finding recorded by %s as noise / not in scope: %q (%s). If that is wrong, have it re-recorded with stronger evidence.", a.id, title, target)})
+			a.s.emit(event.Notice{Agent: a.id, Level: "warn", Text: fmt.Sprintf("%s: finding %q triaged out as noise (not recorded)", a.id, title)})
+			return reply(fmt.Sprintf("finding %q was triaged out as noise / not in scope and was NOT recorded. Record it again with concrete, confirmed evidence if it is real.", title), false)
+		}
+	}
+
+	a.s.emit(event.Finding{Agent: a.id, Severity: newF.Severity, Title: newF.Title, Target: newF.Target, Detail: newF.Detail})
+	a.s.addFinding(newF)
+	return reply(fmt.Sprintf("recorded %s finding %q (logged for the report). Keep it; the reporter will include it.", newF.Severity, title), false)
 }
 
 // doUpdateSummary sets the orchestrator's live engagement summary (replaces the
@@ -2315,6 +2439,15 @@ func PrimitiveNames() []string {
 		out = append(out, n)
 	}
 	return out
+}
+
+// taskRoutedSchema replaces the normal `task` schema for the orchestrator when the
+// decision router is on: the orchestrator does NOT choose a specialist — it describes
+// the task and a router assigns the right one.
+var taskRoutedSchema = llm.FunctionDef{
+	Name:        "task",
+	Description: "Spawn a subagent to do a piece of work. Describe the task fully and self-contained in `prompt`; the right specialist is assigned automatically — you do not choose one. Returns its id; call wait to collect its result.",
+	Parameters:  json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","description":"the self-contained task to carry out"}},"required":["prompt"]}`),
 }
 
 var primitiveSchemas = map[string]llm.FunctionDef{

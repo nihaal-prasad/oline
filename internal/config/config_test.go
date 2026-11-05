@@ -282,6 +282,27 @@ func TestLoadDefaultsAndRoles(t *testing.T) {
 	if len(eff.Bash.Patterns) == 0 {
 		t.Error("pentester should carry bash deny patterns")
 	}
+
+	// The OPTIONAL decision tier: ships empty (disabled), does not affect
+	// ModelsConfigured/ValidateModels, and round-trips through SaveModelRole.
+	if s.Effective().ModelRoles.Decision != "" {
+		t.Errorf("decision tier should ship empty, got %q", s.Effective().ModelRoles.Decision)
+	}
+	if err := s.ValidateDecisionModel(); err != nil {
+		t.Errorf("an unset decision model must validate as a no-op, got %v", err)
+	}
+	if !s.ModelsConfigured() || s.ValidateModels() != nil {
+		t.Error("an unset decision tier must not affect the required-tier checks")
+	}
+	if err := s.SaveModelRole("decision", "fireworks/accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b"); err != nil {
+		t.Fatalf("SaveModelRole(decision): %v", err)
+	}
+	if got := s.Effective().ModelForTier("decision"); got != "fireworks/accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b" {
+		t.Errorf("ModelForTier(decision) = %q after save", got)
+	}
+	if err := s.ValidateDecisionModel(); err != nil {
+		t.Errorf("a configured, resolvable decision model should validate, got %v", err)
+	}
 }
 
 func isolateHome(t *testing.T) {

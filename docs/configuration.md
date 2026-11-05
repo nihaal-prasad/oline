@@ -75,10 +75,11 @@ with the defaults. Edited files load on the next run.
 ## config.yml
 
 ```yaml
-modelRoles:                  # no defaults: set all three before the first run
+modelRoles:                  # no defaults: set the first three before the first run
   big:    ""                 # orchestrator, exploiters, thinkers, critiques
   medium: ""                 # balanced work
   small:  ""                 # summarizers and context compaction
+  decision: ""               # OPTIONAL System-1 decision model; blank = disabled
 
 maxConcurrency: 5            # cap on agents running at once (orchestrator included)
 
@@ -105,10 +106,15 @@ qemu:                        # QEMU backend only (ignored for WSL)
   hostFirewall: false        # Linux host: host-owned tap + nftables cap (needs sudo)
 ```
 
-- **modelRoles** maps each tier to a `provider/model-id` selector. All three must
-  be set before an engagement can start, and the model must exist in `models.yml`
-  with a usable API key, or oline refuses to start. The wizard prompts for them on
-  the first run, or use `oline -edit`.
+- **modelRoles** maps each tier to a `provider/model-id` selector. The first three
+  (`big`/`medium`/`small`) must be set before an engagement can start, and the model
+  must exist in `models.yml` with a usable API key, or oline refuses to start. The
+  wizard prompts for them on the first run, or use `oline -edit`. **`decision`** is
+  optional (blank = disabled): a System-1 decision model that enables finding
+  triage/dedup, judge pre-screening, a subagent progress detector, and task routing —
+  see [AGENTS.md](AGENTS.md#decision-model-optional). It is validated and probed at
+  engagement start; if it is unset or unreachable the features stay off and oline runs
+  exactly as before.
 - **maxConcurrency** caps how many agents run at once, the orchestrator included,
   so at the default of 5 up to 4 subagents run alongside it. Background `bash_bg`
   jobs are not counted.
