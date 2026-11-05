@@ -153,11 +153,32 @@ func (Write) Execute(ctx context.Context, c Call) (Result, error) {
 	if !writeAllowed(c, ap) {
 		return Result{Content: outsideWorkspaceMsg("write", c), IsError: true}, nil
 	}
+	gres, release, ok := enterBackupGate(c, "write")
+	if !ok {
+		return gres, nil
+	}
+	defer release()
 	if res, ok := lockFile(c, "write", ap); !ok {
 		return res, nil
 	}
 	defer unlockFile(c, ap)
 	return writeFile(ctx, c, ap, a.Content)
+}
+
+// enterBackupGate reserves the backup gate for a write/edit. It returns a release
+// func and true when the write may proceed, or an error result and false while a
+// workspace backup is running, so the agent is told to pause and retry. A nil gate
+// (tests / headless) never blocks, and the returned release func is always safe to
+// defer. The gate is held for the whole write/edit, so an in-progress write delays
+// the backup rather than being archived half-written.
+func enterBackupGate(c Call, tool string) (Result, func(), bool) {
+	if c.Backup == nil {
+		return Result{}, func() {}, true
+	}
+	if !c.Backup.TryEnter() {
+		return Result{Content: tool + ": a backup of the engagement workspace is in progress; file writes are paused — try again in 30 seconds", IsError: true}, func() {}, false
+	}
+	return Result{}, c.Backup.Leave, true
 }
 
 // lockFile claims a file for the calling agent so two subagents can't write it at
@@ -232,6 +253,13 @@ func (Edit) Execute(ctx context.Context, c Call) (Result, error) {
 	if !writeAllowed(c, ap) {
 		return Result{Content: outsideWorkspaceMsg("edit", c), IsError: true}, nil
 	}
+	// Refuse (don't block) while a backup is running; held across the whole
+	// read-modify-write so the backup waits for an in-flight edit to finish.
+	gres, release, ok := enterBackupGate(c, "edit")
+	if !ok {
+		return gres, nil
+	}
+	defer release()
 	// Hold the file for the whole read-modify-write so a concurrent writer can't
 	// slip in between (and so the slower of two editors gets the conflict error).
 	if res, ok := lockFile(c, "edit", ap); !ok {

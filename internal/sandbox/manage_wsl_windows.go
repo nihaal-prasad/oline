@@ -5,6 +5,7 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -196,8 +197,11 @@ func BackupWSLEngagement(ctx context.Context, distro, engagement, destPath strin
 	}
 
 	dir := WSLWorkspace + "/" + engagement
+	// --warning flags quiet tar's benign notes (IPC sockets/fifos it skips, and files
+	// the live agents change mid-read). Those still make tar exit 1, which is kept —
+	// the precondition below uses exit 2 so a missing workspace stays a real failure.
 	script := "[ -d " + shellQuote(dir) + " ] || { echo 'engagement workspace not found yet' >&2; exit 2; }; " +
-		"tar czf - -C " + shellQuote(WSLWorkspace) + " " + shellQuote(engagement)
+		"tar --warning=no-file-ignored --warning=no-file-changed -czf - -C " + shellQuote(WSLWorkspace) + " " + shellQuote(engagement)
 	c := exec.CommandContext(ctx, "wsl.exe", "-d", distro, "-u", "root", "--", "bash", "-lc", script)
 	c.Env = wslEnv()
 	c.Stdout = f
@@ -205,9 +209,14 @@ func BackupWSLEngagement(ctx context.Context, distro, engagement, destPath strin
 	c.Stderr = &errb
 	runErr := c.Run()
 	f.Close()
+	// tar exit 1 (sockets skipped, or a file changed while being read) still yields a
+	// complete archive, so keep it; only a transport error or tar's fatal exit 2+ fails.
 	if runErr != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("sandbox/wsl: backup %q: %w: %s", engagement, runErr, strings.TrimSpace(errb.String()))
+		var ee *exec.ExitError
+		if !errors.As(runErr, &ee) || tarExitIsFatal(ee.ExitCode()) {
+			os.Remove(tmp)
+			return fmt.Errorf("sandbox/wsl: backup %q: %w: %s", engagement, runErr, strings.TrimSpace(errb.String()))
+		}
 	}
 	if err := os.Rename(tmp, destPath); err != nil {
 		os.Remove(tmp)

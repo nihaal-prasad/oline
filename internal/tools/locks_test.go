@@ -95,6 +95,56 @@ func TestWriteConfinedToWorkspace(t *testing.T) {
 	}
 }
 
+// frozenGate is a BackupGate that is always frozen (a backup in progress): every
+// TryEnter is refused.
+type frozenGate struct{}
+
+func (frozenGate) TryEnter() bool { return false }
+func (frozenGate) Leave()         {}
+
+// countGate admits every write but counts entries and releases, so a test can
+// confirm the gate is always released (no RLock leak) even on a failed write.
+type countGate struct{ entered, left int }
+
+func (g *countGate) TryEnter() bool { g.entered++; return true }
+func (g *countGate) Leave()         { g.left++ }
+
+// TestWriteBlockedDuringBackup checks write and edit are refused while a workspace
+// backup holds the gate, with a message telling the agent that a backup is running
+// and to retry in 30 seconds.
+func TestWriteBlockedDuringBackup(t *testing.T) {
+	const ws = "/opt/oline/engagements/e1"
+	res, _ := Write{}.Execute(context.Background(), Call{
+		Agent: "web#1", Workspace: ws, Backup: frozenGate{},
+		Args: []byte(`{"path":"notes.md","content":"x"}`),
+	})
+	if !res.IsError || !strings.Contains(res.Content, "backup") || !strings.Contains(res.Content, "30 seconds") {
+		t.Errorf("write during a backup should be refused with a retry hint, got %q", res.Content)
+	}
+	er, _ := Edit{}.Execute(context.Background(), Call{
+		Agent: "web#1", Workspace: ws, Backup: frozenGate{},
+		Args: []byte(`{"path":"notes.md","old_string":"a","new_string":"b"}`),
+	})
+	if !er.IsError || !strings.Contains(er.Content, "backup") {
+		t.Errorf("edit during a backup should be refused, got %q", er.Content)
+	}
+}
+
+// TestWriteGateReleasedOnCompletion checks the backup gate is released even when the
+// write itself fails afterward, so a failed write never leaves writes paused.
+func TestWriteGateReleasedOnCompletion(t *testing.T) {
+	g := &countGate{}
+	// No sandbox: the write fails after the gate is entered; the gate must still be
+	// released via the deferred release.
+	Write{}.Execute(context.Background(), Call{
+		Agent: "web#1", Workspace: "/opt/oline/engagements/e1", Backup: g,
+		Args: []byte(`{"path":"notes.md","content":"x"}`),
+	})
+	if g.entered != 1 || g.left != 1 {
+		t.Errorf("gate must be entered and released exactly once, got entered=%d left=%d", g.entered, g.left)
+	}
+}
+
 func TestFileLocksConflict(t *testing.T) {
 	fl := NewFileLocks()
 	if h, ok := fl.Acquire("/x", "a"); !ok || h != "a" {

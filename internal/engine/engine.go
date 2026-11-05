@@ -170,9 +170,10 @@ type Session struct {
 	// <= 0, means "unknown / no limit" (e.g. headless runs) and the check is skipped.
 	DiagramWidth func() int
 
-	router    *Router
-	baseCtx   context.Context  // engagement-lifetime context; subagents run under this, NOT a parent's per-turn context
-	fileLocks *tools.FileLocks // cross-agent file-write locks
+	router     *Router
+	baseCtx    context.Context  // engagement-lifetime context; subagents run under this, NOT a parent's per-turn context
+	fileLocks  *tools.FileLocks // cross-agent file-write locks
+	backupGate backupGate       // pauses write/edit while a workspace backup runs
 
 	// Reverse-shell channels opened via the `revshell` tool, keyed by name. Each is
 	// a netcat listener running as a persistent job on the engagement context, so it
@@ -181,6 +182,23 @@ type Session struct {
 	chMu     sync.Mutex
 	channels map[string]*revChannel
 }
+
+// backupGate pauses agent file writes (the write/edit tools) while a workspace
+// backup runs, so the tar never archives a half-written file. A writer takes the
+// read side (TryEnter) for the duration of its write/edit; the backup takes the
+// write side (FreezeWrites), which waits for any in-flight write to finish and
+// makes new ones fail fast until UnfreezeWrites. The zero value is ready to use.
+type backupGate struct{ mu sync.RWMutex }
+
+func (g *backupGate) TryEnter() bool { return g.mu.TryRLock() }
+func (g *backupGate) Leave()         { g.mu.RUnlock() }
+
+// FreezeWrites pauses agent file writes for a workspace backup, blocking until any
+// in-flight write/edit finishes; while frozen, new writes fail fast and the agent
+// is told to retry. UnfreezeWrites resumes them. The TUI brackets each backup with
+// these so the archive is never captured mid-write. Calls must be balanced.
+func (s *Session) FreezeWrites()   { s.backupGate.mu.Lock() }
+func (s *Session) UnfreezeWrites() { s.backupGate.mu.Unlock() }
 
 // AgentRecord is a persisted snapshot of one agent's conversation, used to save an
 // engagement to the host and reload it on resume.
@@ -1433,6 +1451,7 @@ func (a *Agent) dispatch(ctx context.Context, tc llm.ToolCall) (content string, 
 		Policy:    a.cfg.Policy,
 		Emit:      func(r tools.Result) { a.s.emit(event.ToolOutput{Agent: a.id, Chunk: r.Content}) },
 		Locks:     a.s.fileLocks,
+		Backup:    &a.s.backupGate,
 	})
 	if err != nil {
 		return fmt.Sprintf("tool %q failed: %v", tc.Name, err), true

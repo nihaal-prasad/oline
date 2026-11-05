@@ -49,6 +49,15 @@ func (f *FileLocks) Release(path string, agent core.AgentID) {
 	}
 }
 
+// BackupGate pauses agent file writes while a workspace backup is running, so the
+// backup archive never captures a half-written file. TryEnter reports whether a
+// write may proceed (false while a backup holds the gate); a successful entry must
+// be released with Leave. A nil gate (tests / headless) never blocks.
+type BackupGate interface {
+	TryEnter() bool
+	Leave()
+}
+
 // maxToolOutput caps how much output the sandboxed tools retain (bash output,
 // file reads), so a runaway command can't exhaust memory. It also marks the
 // point past which `edit` refuses to operate, since its read would be truncated.
@@ -73,6 +82,7 @@ type Call struct {
 	Policy    sandbox.EgressPolicy // the calling agent's egress policy (routes exec to its guest user)
 	Emit      func(Result)         // stream partial output (e.g. bash stdout) to the TUI/history
 	Locks     *FileLocks           // cross-agent file-write locks (nil => no locking, e.g. in tests)
+	Backup    BackupGate           // pauses write/edit while a workspace backup runs (nil => no gating)
 }
 
 // Result is a tool's output.

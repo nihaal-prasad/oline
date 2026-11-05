@@ -231,18 +231,30 @@ func (h *qemuHandle) Backup(ctx context.Context, engagement, destPath string) er
 	defer os.Remove(tmpName)
 
 	guestDir := WSLWorkspace + "/" + sanitizeHostname(engagement)
-	inner := "tar czf - -C " + sshQuote(guestDir) + " ."
+	// --warning flags quiet tar's benign notes so they don't look like failures:
+	// IPC sockets/fifos in the workspace (which tar can't archive and skips) and
+	// files the live agents change mid-read. Those still make tar exit 1; see
+	// tarExitIsFatal for why that is kept rather than discarded.
+	inner := "tar --warning=no-file-ignored --warning=no-file-changed -czf - -C " + sshQuote(guestDir) + " ."
 	// stderr to a separate buffer: tar's warnings must not land inside the .tar.gz.
 	var errBuf bytes.Buffer
 	code, rerr := runSSH(ctx, h.client, "sudo -n bash -lc "+sshQuote(inner), nil, tmp, &errBuf)
 	if cerr := tmp.Close(); cerr != nil && rerr == nil {
 		rerr = cerr
 	}
-	if rerr != nil || code != 0 {
+	if rerr != nil || tarExitIsFatal(code) {
 		return fmt.Errorf("sandbox/qemu: backup: %v (exit %d): %s", rerr, code, strings.TrimSpace(errBuf.String()))
 	}
 	return os.Rename(tmpName, destPath)
 }
+
+// tarExitIsFatal reports whether a tar exit code means the archive is unusable.
+// GNU tar exits 1 for non-fatal differences — files that changed while being read
+// (expected on a live workspace the agents are still writing to) or members it
+// skipped such as sockets and fifos — and still writes a complete, valid archive,
+// so exit 1 is kept. Only exit 2 and up (tar aborted, leaving a truncated stream)
+// is fatal; our own precondition scripts likewise signal real failures with exit 2.
+func tarExitIsFatal(code int) bool { return code != 0 && code != 1 }
 
 func (h *qemuHandle) EgressController() EgressController {
 	if h.egress != nil {

@@ -1996,7 +1996,15 @@ func (m *model) runBackup(engagement string) {
 		return
 	}
 	dest := filepath.Join(m.store.BackupDir(), engagement+".tar.gz")
-	if err := m.sess.Sandbox.Backup(context.Background(), engagement, dest); err != nil {
+	// Pause agent file writes for the duration of the backup so the archive is never
+	// captured mid-write (agents get a "backup in progress, retry" error meanwhile);
+	// the closure guarantees writes resume even if Backup panics.
+	err := func() error {
+		m.sess.FreezeWrites()
+		defer m.sess.UnfreezeWrites()
+		return m.sess.Sandbox.Backup(context.Background(), engagement, dest)
+	}()
+	if err != nil {
 		m.emitNotice("warn", "backup skipped: "+err.Error())
 		return
 	}
