@@ -26,8 +26,8 @@ The wizard asks each setting in order, skipping steps that don't apply; Enter ad
    oline-managed Debian QEMU VM". Selecting a saved QEMU VM resumes its disk with the
    workspace and tooling it had; selecting the QEMU create entry boots a brand-new
    disposable disk from the shared read-only base (it never reuses or overwrites a saved
-   one). Saved QEMU VMs appear only when `qemu.persist` kept them. See
-   [sandbox.md](sandbox.md).
+   one). QEMU engagements persist by default, so a cleanly-stopped VM reappears here
+   to resume (set `qemu.disposable` for throwaway VMs). See [sandbox.md](sandbox.md).
    - **Disk size** (every new QEMU engagement): how many GB the VM's disk may use.
      Installing offensive tooling fills a small image fast, so the default is 25 GB;
      the guest grows its root filesystem to the chosen size on first boot.

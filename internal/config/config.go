@@ -73,12 +73,14 @@ type OrchestratorConfig struct {
 
 // QEMU holds options for the QEMU backend; the WSL backend ignores them.
 type QEMU struct {
-	// Persist keeps the VM's disk (a copy-on-write overlay of the base image)
-	// between runs, so a QEMU engagement can be resumed with its workspace and
-	// installed tooling intact. Off by default: QEMU engagements are disposable.
-	// Resume needs a clean shutdown (a crash does not persist the disk); the host
-	// workspace backup protects the files either way.
-	Persist bool `yaml:"persist"`
+	// Disposable throws the VM's copy-on-write disk overlay away when the engagement
+	// stops. It is false BY DEFAULT — QEMU engagements PERSIST: the disk (workspace +
+	// installed tooling) is kept under images/.state so the engagement can be resumed
+	// from the setup screen. Set it true only if you want a throwaway VM each run.
+	// (A clean stop persists the disk; a crash or force-kill cannot — the host
+	// workspace backup protects the files either way.) The legacy `persist` key is no
+	// longer read, so any old `persist: false` is ignored and the VM still persists.
+	Disposable bool `yaml:"disposable"`
 	// HostFirewall (Linux host only) runs the guest behind a host-side tap device
 	// and nftables rules that cap the whole guest to loopback and the in-scope
 	// targets (plus the wider internet when the roster has internet agents). This

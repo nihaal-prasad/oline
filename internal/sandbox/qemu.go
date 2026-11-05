@@ -16,8 +16,9 @@ import (
 // available (a separate kernel — no shared-kernel escape, and the host /mnt
 // drives aren't present). It boots a copy-on-write overlay of a base image and
 // drives it over SSH (Exec/Copy/Backup), satisfying the same sandbox.Handle
-// interface as WSL. The overlay is disposable by default; with qemu.persist on it
-// is kept per engagement so the engagement can be resumed (see boot / bootResume).
+// interface as WSL. oline keeps the overlay per engagement by default so it can be
+// resumed (see boot / bootResume); qemu.disposable makes it throwaway instead. At
+// this layer, persistence is driven by BootOpts.Persist on the boot call.
 //
 // Egress: per-agent egress is enforced with root-owned IN-GUEST iptables
 // (buildEgressRules, applied over SSH), the same as WSL. On a Linux host, with
@@ -168,8 +169,8 @@ func (q *qemuSandbox) Open(ctx context.Context, id string) (Handle, error) {
 }
 
 // OpenWith boots a base image with explicit boot options (persist / host
-// firewall). The TUI uses it for a new QEMU engagement when qemu.persist or
-// qemu.hostFirewall is set.
+// firewall). The TUI uses it for every new QEMU engagement, passing Persist (true
+// by default, unless qemu.disposable) and the host-firewall option.
 func (q *qemuSandbox) OpenWith(ctx context.Context, id string, opts BootOpts) (Handle, error) {
 	if qemuBinary() == "" {
 		return nil, qemuUnavailable()

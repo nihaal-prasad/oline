@@ -13,8 +13,8 @@
 //     egress is enforced by the same root-owned in-guest iptables owner-match
 //     rules as WSL (applied over SSH). On a Linux host, qemu.hostFirewall adds a
 //     host-owned tap + nftables whole-guest cap (BuildHostNftRules) the guest
-//     cannot change even as root; SSH stays on a user-mode NIC. The disk is
-//     disposable unless qemu.persist keeps it for resume.
+//     cannot change even as root; SSH stays on a user-mode NIC. The disk is kept
+//     for resume by default unless qemu.disposable makes it throwaway.
 //
 // Tool-layer checks (bash deny patterns, the file tools' host-path guard) are
 // defense-in-depth on top of the network boundary.

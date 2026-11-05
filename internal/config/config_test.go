@@ -250,6 +250,10 @@ func TestLoadDefaultsAndRoles(t *testing.T) {
 	if eff.MaxConcurrency != 5 {
 		t.Errorf("maxConcurrency = %d, want 5", eff.MaxConcurrency)
 	}
+	// QEMU engagements persist by default (disposable is opt-in).
+	if eff.QEMU.Disposable {
+		t.Error("qemu.disposable should default to false (VMs persist/resume by default)")
+	}
 	// No provider ships by default; the user configures one in setup.
 	if len(eff.Providers) != 0 {
 		t.Errorf("no providers should ship by default, got %d", len(eff.Providers))

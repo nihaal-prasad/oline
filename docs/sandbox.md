@@ -88,10 +88,11 @@ internet when the roster has internet agents) that a root agent inside the guest
 cannot change. SSH stays on a user-mode NIC. It needs root on the host (oline uses
 `sudo`) and is ignored on other hosts.
 
-QEMU VMs are disposable by default: the overlay is discarded on exit. Set
-`qemu.persist: true` to keep each engagement's disk (and its SSH key) so you can
-resume it with its workspace and installed tooling intact. Resume needs a clean
-shutdown; a crash does not persist the disk (the host workspace backup still does).
+QEMU engagements persist by default: each engagement's disk (and its SSH key) is
+kept so you can resume it from the setup screen with its workspace and installed
+tooling intact. Resume needs a clean stop; a crash or force-kill cannot persist the
+disk (the host workspace backup still does). Set `qemu.disposable: true` if you want
+a throwaway VM whose overlay is discarded when the engagement stops.
 Each saved VM appears as a reusable environment in the wizard's environment step
 (marked "saved VM"), alongside the "create a new Debian QEMU VM" entry — selecting a
 saved VM resumes it, exactly as reusing a WSL distro does.

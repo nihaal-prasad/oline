@@ -69,7 +69,7 @@ with the defaults. Edited files load on the next run.
 | Backup interval, host root | `config.yml` `backup.intervalMinutes`; `$OLINE_HOME` |
 | Blocked shell patterns | `config.yml` `bash.patterns` |
 | Fully customizable panes/tabs (off by default) | `config.yml` `tui.customizablePanes` (or `-edit` under the `tui` item) |
-| Keep the QEMU disk so an engagement can resume | `config.yml` `qemu.persist` |
+| Make QEMU VMs throwaway (they persist/resume by default) | `config.yml` `qemu.disposable` |
 | Host tap + nftables boundary for QEMU (Linux) | `config.yml` `qemu.hostFirewall` |
 
 ## config.yml
@@ -102,7 +102,7 @@ bash:
 agents: {}                   # per-agent overrides
 
 qemu:                        # QEMU backend only (ignored for WSL)
-  persist: false             # keep the VM disk so the engagement can resume
+  disposable: false          # VMs persist/resume by default; true = throwaway each run
   hostFirewall: false        # Linux host: host-owned tap + nftables cap (needs sudo)
 ```
 
@@ -124,8 +124,9 @@ qemu:                        # QEMU backend only (ignored for WSL)
   compaction. It counts toward `maxCostUSD`. 0 disables it.
 - **network.allowIPv6** enables outbound non-loopback IPv6 for agents. Off by
   default. See [sandbox.md](sandbox.md).
-- **qemu.persist / qemu.hostFirewall** keep the QEMU disk for resume, and (Linux
-  host) add a host-owned tap + nftables boundary. See [sandbox.md](sandbox.md).
+- **qemu.disposable / qemu.hostFirewall**: QEMU VMs persist for resume by default
+  (`disposable: true` makes them throwaway); on a Linux host `hostFirewall` adds a
+  host-owned tap + nftables boundary. See [sandbox.md](sandbox.md).
 - **bash.patterns** is a deny list for shell commands. See [sandbox.md](sandbox.md).
 - **agents** holds per-agent overrides: `tier`, `thinking-level`, `tools`,
   `spawns`, `time-budget`, and `max-context-tokens`.

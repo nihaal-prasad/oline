@@ -116,8 +116,8 @@ func scanEnvsCmd() tea.Cmd {
 		// Existing QEMU VMs from prior engagements (persisted disks under images/.state).
 		// Listing them here lets the user reuse one exactly like reusing a WSL distro:
 		// selecting one resumes its disk with its workspace and installed tooling intact.
-		// They appear only when qemu.persist kept them; otherwise the list shows just the
-		// create-new entry below.
+		// QEMU engagements persist by default (unless qemu.disposable is set, or the VM
+		// did not shut down cleanly), so a prior engagement's VM appears here to resume.
 		if qc, ok := sandbox.NewQEMU().(sandbox.QEMUControl); ok {
 			for _, eng := range qc.ResumableEngagements() {
 				all = append(all, sandbox.Candidate{
@@ -1774,7 +1774,7 @@ func (m *model) startEngagement() (tea.Model, tea.Cmd) {
 	m.wizErr = ""
 	eff := m.store.Effective()
 	qopts := sandbox.BootOpts{
-		Persist:       eff.QEMU.Persist,
+		Persist:       !eff.QEMU.Disposable, // QEMU engagements persist by default (opt out with qemu.disposable)
 		HostFirewall:  eff.QEMU.HostFirewall && runtime.GOOS == "linux",
 		AllowInternet: wire.RosterAllowsInternet(m.mode, m.roster),
 		DiskGB:        m.diskGB,       // 0 unless the wDisk step set it (new VM only)
@@ -3938,7 +3938,7 @@ func (m *model) envBodyView() string {
 		}
 		sb.WriteString(fmt.Sprintf("%s%s  %s%s%s\n", cur, name, styleMuted.Render(string(c.Backend)), tag, extra))
 	}
-	sb.WriteString(styleMuted.Render("    (r to rescan · pick a saved QEMU VM to resume it, or \"Create a new … QEMU VM\" for a fresh disk from the base; saved VMs appear only with qemu.persist on)"))
+	sb.WriteString(styleMuted.Render("    (r to rescan · pick a saved QEMU VM to resume it, or \"Create a new … QEMU VM\" for a fresh disk from the base; QEMU engagements persist by default, so a cleanly-stopped VM shows up here)"))
 	return sb.String()
 }
 
