@@ -202,6 +202,28 @@ func TestRevshellValidation(t *testing.T) {
 	}
 }
 
+// TestOrchestratorRevshellArbitrateOnly: the orchestrator may arbitrate/observe
+// reverse shells (grant/read/list/close) but may NOT create (`open`) or drive
+// (`send`/`acquire`/`release`) them.
+func TestOrchestratorRevshellArbitrateOnly(t *testing.T) {
+	sb := &revSB{readOut: "ok\n"}
+	_, s, _, cancel := newRevAgent(t, sb)
+	defer cancel()
+	orch := newAgent(core.Main, AgentConfig{Role: "Main", IsOrchestrator: true, Tools: []string{"revshell"}}, nil, "m", s, "", "")
+	s.router.register(orch)
+
+	for _, act := range []string{"open", "send", "acquire", "release"} {
+		out, isErr := orch.doRevshell(llm.ToolCall{Arguments: `{"action":"` + act + `","name":"c","port":4444,"data":"x"}`})
+		if !isErr || !strings.Contains(out, "only arbitrates") {
+			t.Errorf("orchestrator %q must be refused (arbitrate-only): isErr=%v out=%q", act, isErr, out)
+		}
+	}
+	// Observation is allowed for the orchestrator.
+	if _, isErr := orch.doRevshell(llm.ToolCall{Arguments: `{"action":"list"}`}); isErr {
+		t.Error("orchestrator should be allowed to `list` channels")
+	}
+}
+
 // newRevPeer registers an extra agent sharing session s (for arbitration tests).
 func newRevPeer(s *Session, id core.AgentID) *Agent {
 	a := newAgent(id, AgentConfig{Role: "peer", Tools: []string{"bash", "revshell"}}, nil, "m", s, "", "")

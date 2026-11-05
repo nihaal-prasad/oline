@@ -137,7 +137,10 @@ func Build(mode config.Mode, store *config.Store, roster *agents.Roster, decisio
 	// The orchestrator is instantiated once, at engagement start, so it is built
 	// from the config as it stands now.
 	eff := store.Effective()
-	orchTools := []string{"task", "wait", "reprompt", "inspect", "read", "write", "find", "grep", "glob", "send_message", "ask", "update_summary", "update_diagram", "record_finding", "resources", "terminal"}
+	// `revshell` is included so the orchestrator can arbitrate reverse-shell write
+	// access (it alone may `grant` the token — see the revshell tool), as the prompts
+	// describe; the engine still restricts the `grant` action itself to Main.
+	orchTools := []string{"task", "wait", "reprompt", "inspect", "read", "write", "find", "grep", "glob", "send_message", "ask", "update_summary", "update_diagram", "record_finding", "resources", "terminal", "revshell"}
 	if mode == config.ModeExploiter {
 		orchTools = append(orchTools, "runtime", "heartbeat")
 	}
@@ -322,7 +325,11 @@ func subagentSystem(body string, budgetMinutes int, hasBash bool) string {
 		"foothold, a confirmed finding, a credential, a dead end, or a blocker — not only when you finish. " +
 		"One or two sentences each. Reporting continuously lets the orchestrator act on your work in real " +
 		"time (e.g. start another agent on what you just found) while you keep going; don't hold it all back " +
-		"for your final result.\n\n")
+		"for your final result.\n")
+	sb.WriteString("You CANNOT spawn subagents yourself — only the orchestrator can. If you need a " +
+		"specialist's help (e.g. research, custom code, a scan of a newly reachable host), `send_message` " +
+		"the orchestrator describing what you need and let it start one; do not try to do that work outside " +
+		"your own role.\n\n")
 
 	sb.WriteString("# Operating mode — automatic, planner, or watcher\n")
 	sb.WriteString("Your task prompt names the current mode, and the operator can switch it mid-run.\n")
@@ -378,7 +385,11 @@ func subagentSystem(body string, budgetMinutes int, hasBash bool) string {
 		"`terminal list` shows every open operator terminal (e.g. `Shell#1`, `Term#1`) and `terminal read <id>` " +
 		"returns its recent output or current screen. Check it to coordinate with the operator, build on what " +
 		"they have already run, and avoid repeating their work. It is READ-ONLY — you cannot type into their " +
-		"terminals; run your own commands with `bash` and drive a reverse shell with `revshell`.\n\n")
+		"terminals.")
+	if hasBash {
+		sb.WriteString(" Run your own commands with `bash` and drive a reverse shell with `revshell`.")
+	}
+	sb.WriteString("\n\n")
 
 	if hasBash {
 		sb.WriteString("# Reverse shells and background jobs\n")
@@ -502,7 +513,7 @@ func orchestratorSystem(orch agents.OrchDef) string {
 	sb.WriteString("You are the orchestrator (the Main agent) of oline, an authorized offensive-security agent harness. ")
 	sb.WriteString("You coordinate a fleet of specialized subagents via the `task` tool, collect their work with `wait`, ")
 	sb.WriteString("steer peers with `send_message`, and consult the user with `ask`. You never run offensive tools yourself — you delegate.\n")
-	sb.WriteString("Your subagents stream you incremental progress updates with `send_message` as they work (a finished scan, a foothold, a finding, a blocker), not only in their final results. These arrive in your context and interrupt a `wait`. Read them and act on them as they come — fold them into your plan, re-task or coordinate agents based on what just arrived (for example, start an exploiter on a service recon just reported), and keep the engagement moving rather than waiting idly for a subagent to fully finish.\n")
+	sb.WriteString("Your subagents stream you incremental progress updates with `send_message` as they work (a finished scan, a foothold, a finding, a blocker), not only in their final results. These arrive in your context and interrupt a `wait`. Read them and act on them as they come — fold them into your plan, re-task or coordinate agents based on what just arrived (for example, start follow-up work on a service a subagent just reported), and keep the engagement moving rather than waiting idly for a subagent to fully finish.\n")
 	sb.WriteString("Subagents run under engine-enforced time budgets and may finish or be terminated before completing their task — that is expected. When one returns partial work or times out, `reprompt` it to continue with its context intact, or `task` a fresh one, rather than treating an unfinished subagent as a dead end. You are never time-limited yourself; keep any sleeps or waits bounded to the minimum.\n")
 	sb.WriteString("Keep the user oriented with two live panels, Summary and Diagram. Call `update_summary` whenever the state of play changes meaningfully (a new foothold, a confirmed finding, a phase done, a change of plan) with a concise plain-language state-of-play — what is done, confirmed, in progress, and next; this replaces the previous summary and saves the user from having to ask.\n")
 	sb.WriteString("Keep the Diagram panel current with `update_diagram`: a breadth-first ASCII map of the engagement. In a NETWORK pentest, draw the hosts in play, mark which you have a foothold on versus root on, show how hosts connect to each other, and flag which hosts run important services. In a SOFTWARE/exploiter engagement, draw the target's main components and how they interact, choosing which components are worth showing. Redraw it whenever the picture changes — a host discovered, a foothold or root gained, a key service or component identified. Legibility matters more than completeness: in a large environment show only the most important hosts/components and connections rather than every one, and include a short legend for your markers. The Diagram pane has a FIXED width (its exact current value is given to you at the start of the engagement): every line of the map must fit within it, because the pane clips over-wide lines rather than wrapping them. `update_diagram` enforces this — it REJECTS a map with any line wider than the pane, tells you exactly which lines are too wide and the current width limit, and does not change the panel; shorten those lines and call it again. The width can change if the user resizes the pane, so `update_diagram` always reports the current width (on success and on rejection) — treat its latest report as the authoritative limit. The map replaces the previous one each time.\n")

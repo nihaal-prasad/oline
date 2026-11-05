@@ -125,6 +125,17 @@ func (a *Agent) doRevshell(tc llm.ToolCall) (string, bool) {
 	action := strings.ToLower(strings.TrimSpace(args.Action))
 	name := strings.TrimSpace(args.Name)
 
+	// The orchestrator ARBITRATES reverse shells — it assigns the write token (`grant`)
+	// and may observe (`read`/`list`) and tear down (`close`) — but it never CREATES
+	// (`open`) or DRIVES (`send`) a channel, nor takes the token for itself
+	// (`acquire`/`release`); those are a subagent's job.
+	if a.cfg.IsOrchestrator {
+		switch action {
+		case "open", "send", "acquire", "release":
+			return reply("revshell: the orchestrator only arbitrates reverse shells (grant / read / list / close) — it cannot open or drive them. Have a subagent `open` the listener and `send` to it, and use `grant` to assign the write token.", true)
+		}
+	}
+
 	switch action {
 	case "open":
 		a.s.auditCmd(string(a.id), "revshell.open", name, fmt.Sprintf("port %d", args.Port))

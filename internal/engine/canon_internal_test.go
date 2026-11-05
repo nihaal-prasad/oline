@@ -40,12 +40,15 @@ func TestRouterGetCaseInsensitive(t *testing.T) {
 }
 
 // TestMaySpawnCaseInsensitive checks the spawn permission check ignores case.
-func TestMaySpawnCaseInsensitive(t *testing.T) {
-	c := AgentConfig{Spawns: []string{"researcher", "programmer"}}
-	if !c.maySpawn("Researcher") {
-		t.Error("maySpawn should match a capitalized request against a lower-case spawns list")
+// TestMaySpawnOrchestratorOnly: only the orchestrator may spawn subagents. A
+// subagent never may — even a role listed in its (now-ignored) spawns list.
+func TestMaySpawnOrchestratorOnly(t *testing.T) {
+	orch := AgentConfig{IsOrchestrator: true}
+	if !orch.maySpawn("researcher") || !orch.maySpawn("anything") {
+		t.Error("the orchestrator should be able to spawn any role")
 	}
-	if c.maySpawn("cleanup") {
-		t.Error("maySpawn should reject a role not in the spawns list")
+	sub := AgentConfig{Spawns: []string{"researcher", "programmer"}}
+	if sub.maySpawn("researcher") || sub.maySpawn("programmer") {
+		t.Error("a subagent must never spawn — only the orchestrator may (it asks the orchestrator instead)")
 	}
 }

@@ -87,16 +87,11 @@ type AgentConfig struct {
 	IsOrchestrator bool
 }
 
+// maySpawn reports whether this agent may spawn subagents. ONLY the orchestrator may
+// spawn — subagents never do; a subagent that needs a specialist asks the
+// orchestrator (via send_message) to start one.
 func (c AgentConfig) maySpawn(role string) bool {
-	if c.IsOrchestrator {
-		return true
-	}
-	for _, r := range c.Spawns {
-		if strings.EqualFold(r, role) { // role names are matched case-insensitively
-			return true
-		}
-	}
-	return false
+	return c.IsOrchestrator
 }
 
 // MsgKind classifies a mailbox envelope.
@@ -1393,7 +1388,7 @@ func (a *Agent) Run(parent context.Context) Result {
 				continue
 			case a.parent != "":
 				// A spawned subagent delivers this cycle's result to its parent, then
-				// idles — RELEASING its concurrency slot — and waits to be repromted
+				// idles — RELEASING its concurrency slot — and waits to be reprompted
 				// (so the orchestrator can restart / re-task a finished agent with its
 				// context intact). It re-acquires a slot before running again.
 				// If the final turn had no text, fall back to the last substantive
@@ -1687,7 +1682,7 @@ func (a *Agent) doTask(ctx context.Context, tc llm.ToolCall) (string, bool) {
 		return "task: 'agent' is required", true
 	}
 	if !a.cfg.maySpawn(role) {
-		return fmt.Sprintf("task: %s is not permitted to spawn %q", a.id, role), true
+		return "task: only the orchestrator may spawn subagents — use send_message to ask the orchestrator (Main) to start the specialist you need.", true
 	}
 
 	// Judge pre-screen (only when the decision model is on): the decision model — not
@@ -1709,7 +1704,7 @@ func (a *Agent) doTask(ctx context.Context, tc llm.ToolCall) (string, bool) {
 }
 
 // doReprompt re-tasks an existing subagent with a new instruction. A finished or
-// idle subagent stays alive (with its context), so repromting wakes it; a running
+// idle subagent stays alive (with its context), so reprompting wakes it; a running
 // one has the instruction folded in. If the agent is gone (killed/torn down), a
 // fresh instance of its role is started instead.
 func (a *Agent) doReprompt(tc llm.ToolCall) (string, bool) {
@@ -1729,7 +1724,7 @@ func (a *Agent) doReprompt(tc llm.ToolCall) (string, bool) {
 		// (finish/tear down) between get and send, in which case fall through to respawn
 		// rather than claiming we steered an agent that never got the message.
 		if a.s.router.send(Envelope{From: a.id, To: target, Kind: MsgSteer, Body: args.Prompt}) {
-			return fmt.Sprintf("repromted %s. Call wait to collect its next result.", args.Agent), false
+			return fmt.Sprintf("reprompted %s. Call wait to collect its next result.", args.Agent), false
 		}
 	}
 	role := roleOf(args.Agent)
@@ -2473,12 +2468,12 @@ var primitiveSchemas = map[string]llm.FunctionDef{
 	},
 	"revshell": {
 		Name:        "revshell",
-		Description: "Set up and drive a reverse-shell channel inside the sandbox: a named netcat listener on a TCP port that catches a shell connecting back from the target, plus a way to send it commands and read what it prints. This is ALWAYS the preferred way to create and use a reverse shell — use it rather than wiring up `nc`/`socat` by hand with bash or bash_bg. Only fall back to doing it by hand if the user explicitly asks you to, or if this tool genuinely does not work for the scenario at hand (then say briefly why). Unlike wiring up `nc` by hand with bash_bg, this keeps the listener's input open so you can send command after command to the same connected shell, and it surfaces the channel in the operator's UI as a dedicated pane the user can type into too. All of it stays inside the sandbox. WRITE ACCESS IS EXCLUSIVE: a channel may be shared by several subagents, but only ONE holds the write token and may `send` at a time (two agents driving one shell would clobber each other). The opener holds it first; an unheld channel is auto-claimed by the first sender. The ORCHESTRATOR (Main) is the arbiter — it alone can `grant` the token to a chosen subagent, so a subagent that needs a channel another agent holds must ask Main; meanwhile it can still `read`. Actions: `open` — start a listener (give `name` and `port`); `send` — write one command line to the channel's shell (give `name` and `data`), allowed only for the current writer, and return the output that follows; `read` — return the channel's recent output (give `name`, optional `bytes`), always allowed; `list` — show every channel, its port, output captured, and who holds write access; `acquire` — claim the write token if the channel is free; `release` — give up your write token; `grant` — (Main only) hand the write token to another subagent (give `name` and `agent`); `close` — stop the listener and remove the channel (writer or Main, give `name`). Open the listener BEFORE triggering the payload on the target that connects back to it.",
+		Description: "Set up and drive a reverse-shell channel inside the sandbox: a named netcat listener on a TCP port that catches a shell connecting back from the target, plus a way to send it commands and read what it prints. This is ALWAYS the preferred way to create and use a reverse shell — use it rather than wiring up `nc`/`socat` by hand with bash or bash_bg. Only fall back to doing it by hand if the user explicitly asks you to, or if this tool genuinely does not work for the scenario at hand (then say briefly why). Unlike wiring up `nc` by hand with bash_bg, this keeps the listener's input open so you can send command after command to the same connected shell, and it surfaces the channel in the operator's UI as a dedicated pane the user can type into too. All of it stays inside the sandbox. WRITE ACCESS IS EXCLUSIVE: a channel may be shared by several subagents, but only ONE holds the write token and may `send` at a time (two agents driving one shell would clobber each other). The opener holds it first; an unheld channel is auto-claimed by the first sender. The ORCHESTRATOR (Main) is the arbiter — it alone can `grant` the token to a chosen subagent, so a subagent that needs a channel another agent holds must ask Main; meanwhile it can still `read`. Main ONLY arbitrates: it may `grant`, `read`, `list`, and `close`, but it cannot `open` (create) or `send` (drive) a channel — a subagent opens the listener and drives it. Actions: `open` — start a listener (give `name` and `port`); `send` — write one command line to the channel's shell (give `name` and `data`), allowed only for the current writer, and return the output that follows; `read` — return the channel's recent output (give `name`, optional `bytes`), always allowed; `list` — show every channel, its port, output captured, and who holds write access; `acquire` — claim the write token if the channel is free; `release` — give up your write token; `grant` — (Main only) hand the write token to another subagent (give `name` and `agent`); `close` — stop the listener and remove the channel (writer or Main, give `name`). Open the listener BEFORE triggering the payload on the target that connects back to it.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","description":"open | send | read | list | close | acquire | release | grant"},"name":{"type":"string","description":"channel name (a short label, e.g. \"foothold\"); required for every action except list"},"port":{"type":"integer","description":"TCP port the listener binds (open only)"},"data":{"type":"string","description":"the command line to send to the connected shell (send only)"},"bytes":{"type":"integer","description":"max bytes of recent output to return (read only; default 4096)"},"agent":{"type":"string","description":"the subagent id to hand the write token to (grant only; orchestrator only)"}},"required":["action"]}`),
 	},
 	"terminal": {
 		Name:        "terminal",
-		Description: "Read what the OPERATOR (the human user) is doing in their own interactive terminals in the oline UI: the line-oriented shell panes (opened with Ctrl-b $) and the full-screen terminal panes (Ctrl-b T, including a reverse-shell catcher). Both run as root and are driven by the user, not by you — this is the user's side of the engagement. Use it to see what they have run and what is on their screen, so you can coordinate, pick up where they left off, or avoid repeating their work. It is READ-ONLY: you observe, you cannot type into the operator's terminals (to run commands yourself use `bash`; to drive a reverse shell use `revshell`). It mirrors how `revshell read` lets you read a reverse-shell channel. Actions: `list` — show every open operator terminal with its kind, retained size, and last activity; `read` — return a terminal's recent contents (give `name`, an id from `list` such as Shell#1 or Term#1; optional `bytes` caps how much recent output to return). For a line shell the contents are its command/output history; for a full terminal they are its current screen.",
+		Description: "Read what the OPERATOR (the human user) is doing in their own interactive terminals in the oline UI: the line-oriented shell panes (opened with Ctrl-b $) and the full-screen terminal panes (Ctrl-b T, including a reverse-shell catcher). Both run as root and are driven by the user, not by you — this is the user's side of the engagement. Use it to see what they have run and what is on their screen, so you can coordinate, pick up where they left off, or avoid repeating their work. It is READ-ONLY: you observe, you cannot type into the operator's terminals (to act, use your own execution tools; `terminal` only reads). It mirrors how `revshell read` lets you read a reverse-shell channel. Actions: `list` — show every open operator terminal with its kind, retained size, and last activity; `read` — return a terminal's recent contents (give `name`, an id from `list` such as Shell#1 or Term#1; optional `bytes` caps how much recent output to return). For a line shell the contents are its command/output history; for a full terminal they are its current screen.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"action":{"type":"string","description":"list | read"},"name":{"type":"string","description":"operator terminal id from list (e.g. Shell#1 or Term#1); required for read"},"bytes":{"type":"integer","description":"max bytes of recent content to return (read only; default: all retained)"}},"required":["action"]}`),
 	},
 	"runtime": {
@@ -2518,7 +2513,7 @@ var primitiveSchemas = map[string]llm.FunctionDef{
 	},
 	"update_diagram": {
 		Name:        "update_diagram",
-		Description: "Set the live ASCII map shown to the user in oline's diagram panel (this REPLACES the previous diagram, it does not append). In PENTESTER mode, draw a breadth-first network map: the hosts in play, which you have a foothold on vs. root on, how hosts connect to each other, and which hosts run important services. In EXPLOITER mode, draw a breadth-first map of the target software's components and how they interact; choose which components to show. Keep it LEGIBLE above all: in a large environment show only the most important hosts/components and connections rather than everything, and keep lines short (aim to stay within ~100 columns) so the ASCII art does not wrap. Update it whenever the map changes (new host discovered, foothold or root gained, a key service or component identified).",
+		Description: "Set the live ASCII map shown to the user in oline's diagram panel (this REPLACES the previous diagram, it does not append). In PENTESTER mode, draw a breadth-first network map: the hosts in play, which you have a foothold on vs. root on, how hosts connect to each other, and which hosts run important services. In EXPLOITER mode, draw a breadth-first map of the target software's components and how they interact; choose which components to show. Keep it LEGIBLE above all: in a large environment show only the most important hosts/components and connections rather than everything, and keep every line within the diagram pane's current width — it is given at engagement start and this tool reports it on each call; a map with any line wider than the pane is REJECTED (with the offending lines and the current width limit), so shorten and resubmit rather than letting it clip. Update it whenever the map changes (new host discovered, foothold or root gained, a key service or component identified).",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"diagram":{"type":"string","description":"the current map as monospaced ASCII art (replaces the previous one); use a legend for markers such as foothold/root"}},"required":["diagram"]}`),
 	},
 	"resources": {

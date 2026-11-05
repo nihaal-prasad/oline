@@ -213,7 +213,7 @@ func (a *Agent) progressCheck() {
 		return
 	}
 	a.s.router.send(Envelope{From: systemSender, To: core.Main, Kind: MsgSteer,
-		Body: fmt.Sprintf("%s appears to be making little progress toward the goal (automatic progress check). Consider refocusing it, repromting it with a sharper instruction, or killing it.", a.id)})
+		Body: fmt.Sprintf("%s appears to be making little progress toward the goal (automatic progress check). Consider refocusing it, reprompting it with a sharper instruction, or killing it.", a.id)})
 	a.s.router.send(Envelope{From: systemSender, To: a.id, Kind: MsgSteer,
 		Body: "Automatic progress check: you may be rabbit-holing. Step back, re-read your objective, and either switch to a clearly different approach on the SAME objective or return what you have to the orchestrator now."})
 	a.s.emit(event.Notice{Agent: a.id, Level: "warn", Text: string(a.id) + ": low progress — nudged to refocus"})

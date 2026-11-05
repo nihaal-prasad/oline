@@ -148,6 +148,11 @@ func TestBuildPentester(t *testing.T) {
 	if has(orch.Tools, "bash") {
 		t.Error("orchestrator should not have bash")
 	}
+	// It does hold `revshell` — but only to ARBITRATE the write token (the engine
+	// restricts it to grant/read/list/close; it cannot open or drive channels).
+	if !has(orch.Tools, "revshell") {
+		t.Error("orchestrator should hold revshell to arbitrate reverse-shell write access")
+	}
 	if !strings.Contains(orch.System, "orchestrator") {
 		t.Error("orchestrator system prompt not rendered")
 	}
