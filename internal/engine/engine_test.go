@@ -109,6 +109,17 @@ func (c *collector) sawSpawn(role string) bool {
 	}
 	return false
 }
+func (c *collector) spawnCount(role string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, e := range c.ev {
+		if s, ok := e.(event.Spawned); ok && s.Role == role {
+			n++
+		}
+	}
+	return n
+}
 func (c *collector) sawToolStart(tool string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -269,6 +280,82 @@ func TestSpawnWaitResult(t *testing.T) {
 	}
 	if !c.sawText("Linux mock box") {
 		t.Error("probe's result text was not streamed")
+	}
+}
+
+// sleepLLM always issues a single `sleeper` tool call, so the agent it drives
+// parks in that tool (holding its concurrency slot) until its context is cancelled.
+type sleepLLM struct{}
+
+func (sleepLLM) Stream(ctx context.Context, _ llm.ChatReq, ch chan<- llm.Delta) error {
+	defer close(ch)
+	select {
+	case ch <- llm.Delta{ToolCall: &llm.ToolCallDelta{Index: 0, ID: "s", Name: "sleeper", ArgsFragment: "{}"}}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case ch <- llm.Delta{Finish: "tool_calls"}:
+	case <-ctx.Done():
+	}
+	return nil
+}
+
+// TestSpawnDoesNotBlockOrchestratorWhenPoolFull is the regression for the freeze
+// where a saturated concurrency pool wedged the whole engagement. spawn used to
+// acquire the slot in the CALLER's dispatch, so once every subagent slot was held
+// the orchestrator blocked inside `task` — unable to drain its mailbox, read user
+// messages, reprompt, or make any progress (agents stuck "running", nothing
+// thinking). Spawning is now async: the child acquires its slot in its own
+// goroutine, so the orchestrator keeps running even when the pool is full.
+func TestSpawnDoesNotBlockOrchestratorWhenPoolFull(t *testing.T) {
+	mainMock := &mockLLM{steps: []step{
+		{toolID: "t1", toolName: "task", toolArgs: `{"agent":"probe","prompt":"A"}`},
+		{toolID: "t2", toolName: "task", toolArgs: `{"agent":"probe","prompt":"B"}`},
+		{text: "MAIN CONTINUED"},
+	}}
+	llmFor := func(sel string) (engine.LLM, string, error) {
+		if sel == "mock/main" {
+			return mainMock, "m", nil
+		}
+		return sleepLLM{}, "p", nil
+	}
+	cfgFor := func(role string) (engine.AgentConfig, bool) {
+		if role == "probe" {
+			return engine.AgentConfig{Role: "probe", Model: "mock/probe", Tools: []string{"sleeper"}}, true
+		}
+		return engine.AgentConfig{}, false
+	}
+
+	reg := tools.NewRegistry()
+	reg.Register(sleeperTool{started: make(chan struct{}, 8)})
+
+	events := make(chan event.Event, 256)
+	c := newCollector()
+	go drain(events, c)
+
+	// maxConcurrency 2 => exactly ONE subagent slot, so the second spawn cannot get
+	// a slot while the first probe is parked in the sleeper tool.
+	s := engine.NewSession(reg, mockSB{}, llmFor, cfgFor, events, 2)
+	mainCfg := engine.AgentConfig{Role: "Main", Model: "mock/main", Tools: []string{"task", "wait"}, IsOrchestrator: true}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res := s.Run(ctx, mainCfg, "go")
+	close(events)
+	<-c.done
+
+	if res.Err != nil {
+		t.Fatalf("Run error: %v", res.Err)
+	}
+	// The orchestrator reached its third step even though the single subagent slot
+	// was held by the first probe: the second `task` did not block it. Under the old
+	// blocking spawn this hung until the 5s context deadline and never produced it.
+	if res.Text != "MAIN CONTINUED" {
+		t.Fatalf("orchestrator blocked on a full pool: final text = %q, want \"MAIN CONTINUED\"", res.Text)
+	}
+	if n := c.spawnCount("Probe"); n != 2 {
+		t.Errorf("want 2 Probe spawns (both tasks issued without blocking), got %d", n)
 	}
 }
 

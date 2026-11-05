@@ -617,37 +617,55 @@ func (a *Agent) wake(env Envelope) {
 // Send is the public steer/peer entry point (used by the TUI and peers).
 func (r *Router) Send(env Envelope) bool { return r.send(env) }
 
-// spawn creates, registers, and starts a child agent; its result posts back to
-// the parent's mailbox. Blocks on the concurrency semaphore when full. The child
-// runs under the engagement context (not the caller's per-turn context), so the
-// parent finishing its turn never cancels the child.
+// spawn creates and registers a child agent, then starts it in its own goroutine;
+// its result posts back to the parent's mailbox. The concurrency slot is acquired
+// INSIDE the child's goroutine (not in the caller's dispatch), so spawn returns
+// immediately and the orchestrator NEVER blocks on a full pool — it stays free to
+// read messages, reprompt, and kill, which is also what lets it free a slot and so
+// prevents the deadlock where a wedged orchestrator can't recover. The child runs
+// under the engagement context (not the caller's per-turn context), so the parent
+// finishing its turn never cancels the child.
 func (r *Router) spawn(parent core.AgentID, role, prompt string) (core.AgentID, error) {
 	cfg, ok := r.sess.ConfigFor(role)
 	if !ok {
 		return "", fmt.Errorf("unknown agent role %q", role)
 	}
+	client, modelID, err := r.sess.LLMFor(cfg.Model)
+	if err != nil {
+		return "", err
+	}
 	base := r.sess.baseCtx
 	if base == nil {
 		base = context.Background()
 	}
-	select {
-	case r.sem <- struct{}{}:
-	case <-base.Done():
-		return "", base.Err()
-	}
-	client, modelID, err := r.sess.LLMFor(cfg.Model)
-	if err != nil {
-		<-r.sem
-		return "", err
-	}
 	id := r.newID(role)
 	child := newAgent(id, cfg, client, modelID, r.sess, parent, prompt)
-	child.holdsSem = true // spawn acquired the slot above; the agent holds it while running
 	r.register(child)
 	r.sess.emit(event.Spawned{Parent: parent, Child: id, Role: core.CanonRole(role), Prompt: prompt})
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
+		// Acquire the concurrency slot here, in the child's own goroutine. When the
+		// pool is full this blocks the CHILD (not the orchestrator), and acquireSem
+		// watches the kill signal and engagement end, so a queued child can still be
+		// killed or torn down while it waits. The child holds the slot only while it
+		// actually runs (releaseSem on every idle / exit).
+		if !child.acquireSem(base) {
+			// Killed or the engagement ended before a slot was free: it never ran.
+			r.unregister(id)
+			if base.Err() == nil {
+				r.sess.emit(event.AgentState{Agent: id, State: core.Killed})
+				// Unblock a parent waiting on this subagent's result.
+				r.send(Envelope{From: id, To: parent, Kind: MsgResult, Body: "[killed before starting — no concurrency slot became free]"})
+			}
+			return
+		}
+		// Start the time-budget clock when the child actually gets a slot, so time
+		// spent queued for concurrency (pool full) is never charged to its budget.
+		child.mu.Lock()
+		child.started = time.Now()
+		child.budgetFrom = child.started
+		child.mu.Unlock()
 		res := child.Run(base)
 		r.unregister(id)
 		child.releaseSem() // release the slot if still held (idle agents already released it)
@@ -1287,11 +1305,11 @@ func (a *Agent) Run(parent context.Context) Result {
 		if len(calls) == 0 {
 			cancel()
 			a.sm.setIdle()
-			a.emitState(core.Idle)
 			switch {
 			case a.cfg.IsOrchestrator && a.s.Interactive:
 				// The orchestrator stays alive between turns: wait for the next
 				// message (user or peer) and continue rather than ending the run.
+				a.emitState(core.Idle)
 				if !a.awaitInput(parent) {
 					return Result{Agent: a.id, Killed: a.sm.State() == core.Killed, Text: text}
 				}
@@ -1305,8 +1323,16 @@ func (a *Agent) Run(parent context.Context) Result {
 				// context intact). It re-acquires a slot before running again.
 				// If the final turn had no text, fall back to the last substantive
 				// output so the orchestrator never receives an empty result.
+				//
+				// Release the concurrency slot BEFORE the (possibly blocking) Idle
+				// lifecycle emit: emit() blocks on a must-deliver event when the event
+				// buffer is full, so emitting first could strand this agent's slot while
+				// it is already finished — leaking slots until the pool reads "full" and
+				// the orchestrator wedges in spawn. Freeing the slot first makes the leak
+				// impossible regardless of UI back-pressure.
 				a.s.router.send(Envelope{From: a.id, To: a.parent, Kind: MsgResult, Body: a.finalBody(text)})
 				a.releaseSem()
+				a.emitState(core.Idle)
 				if !a.awaitInput(parent) {
 					return Result{Agent: a.id, Killed: a.sm.State() == core.Killed, Text: text}
 				}
@@ -1327,6 +1353,7 @@ func (a *Agent) Run(parent context.Context) Result {
 			default:
 				// A directly-run, non-interactive agent (e.g. an isolated test) just
 				// returns its result.
+				a.emitState(core.Idle)
 				return Result{Agent: a.id, Text: text}
 			}
 		}
