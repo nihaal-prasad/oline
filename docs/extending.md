@@ -42,8 +42,19 @@ later with `-edit` or `Ctrl-b e`.
 ## Custom tools
 
 A tool is a capability an agent calls. Grant a tool to an agent by listing its name
-in that agent's `tools:` frontmatter (a built-in agent or your own). There are two
-ways to add one.
+in that agent's `tools:` frontmatter (a built-in agent or your own). There are three
+ways to add one:
+
+- a **command tool** — a shell command, declared in config, that runs inside the
+  sandbox (no rebuild);
+- a **Go tool** — the `tools.Tool` interface implemented in the extension package
+  (rebuild), for logic beyond a single command;
+- an **MCP tool server** — an external [Model Context Protocol](https://modelcontextprotocol.io)
+  server, declared in config, whose tools oline connects to and exposes (no rebuild).
+
+The first two run **inside the sandbox** under the calling agent's egress policy. MCP
+servers run **on the host**, outside the sandbox — see the trust note in that
+section.
 
 ### Command tools (config files, no rebuild)
 
@@ -118,11 +129,65 @@ the sandbox handle, and the agent's egress policy. Run any command work through
 `c.Sandbox` so it stays inside the sandbox, exactly like the built-in tools. Rebuild
 (`make` or `pwsh ./build.ps1`), then grant the tool to agents by name.
 
+### MCP tool servers (config, no rebuild)
+
+oline is a [Model Context Protocol](https://modelcontextprotocol.io) **client**: it
+can connect to external MCP tool servers and expose their tools to agents. This plugs
+oline into the whole MCP ecosystem — filesystem, git, HTTP, ticketing, and your
+organization's own internal MCP servers — without writing any code.
+
+Declare servers in `~/oline/config/<mode>/config.yml` under `mcpServers:`. oline
+spawns each server at engagement start (stdio transport), runs the MCP handshake,
+discovers its tools, and registers each one as an oline tool named
+**`<server-name>__<tool-name>`**.
+
+```yaml
+mcpServers:
+  - name: fs                       # namespace for this server's tools
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/data/engagement"]
+  - name: jira
+    command: /opt/mcp/jira-server  # a binary, uvx, docker run, …
+    env:
+      JIRA_BASE_URL: https://example.atlassian.net
+      JIRA_TOKEN: ${env:JIRA_TOKEN}   # keep secrets in the environment, not here
+    tools: [search_issues, create_issue]   # optional: expose only these tools
+    timeoutSeconds: 60                      # optional: per-call timeout
+```
+
+Fields: `name` (required, the tool namespace), `command` (required, the server
+executable), `args`, `env` (merged over oline's environment), `dir` (working
+directory), `tools` (optional allow-list of server-side tool names to expose; omit
+for all), and `timeoutSeconds` (per tool call; default 120).
+
+At engagement start, oline prints each connected server and the exact tool names it
+exposes (for example `fs__read_file`, `jira__search_issues`) to the orchestrator's
+transcript. **Grant a tool to an agent by listing that `<server>__<tool>` name in the
+agent's `tools:` frontmatter** — only agents that list it can call it. A server that
+fails to connect is reported and skipped; the engagement proceeds without it. The
+server processes are shut down when the engagement ends.
+
+> **Trust boundary — read this.** Unlike command and Go tools, an MCP server runs on
+> the **host**, outside the sandbox and its per-agent egress firewall (the same place
+> `web_search`/`web_fetch` run). A granted MCP tool can therefore reach whatever the
+> server can reach — the host filesystem, internal networks, third-party APIs —
+> regardless of an agent's scope restrictions. Treat an MCP server as an
+> operator-trusted integration: only configure servers you trust, and grant their
+> tools only to the agents that genuinely need them. In **watcher mode** MCP tools are
+> blocked along with the other execution tools.
+
+Only **stdio** servers are supported in this version (remote servers over Streamable
+HTTP are a planned addition). Whole-server grants (listing just `jira` to grant all of
+its tools) are planned too; for now, grant the individual `<server>__<tool>` names.
+
 ## Notes
 
-- **Watcher mode** executes nothing, so custom tools (command and Go) are blocked
-  there alongside `bash`, just like any other execution.
+- **Watcher mode** executes nothing, so custom tools (command, Go, and MCP) are
+  blocked there alongside `bash`, just like any other execution.
 - A custom tool's name must be unique; a custom tool with a built-in's name overrides
   the built-in.
-- Custom tools run inside the sandbox under the calling agent's egress policy; the
-  same scope firewall that confines the built-in tools confines yours.
+- **Command and Go tools** run inside the sandbox under the calling agent's egress
+  policy; the same scope firewall that confines the built-in tools confines yours.
+- **MCP tools run on the host**, outside the sandbox and the egress firewall, so grant
+  them deliberately (see the trust note above). `oline -print` lists configured MCP
+  servers but does not connect to them; tool names are discovered at engagement start.

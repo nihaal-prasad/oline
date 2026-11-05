@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/nihaal-prasad/oline/internal/agents"
 	"github.com/nihaal-prasad/oline/internal/config"
 	"github.com/nihaal-prasad/oline/internal/engine"
+	"github.com/nihaal-prasad/oline/internal/mcp"
 	"github.com/nihaal-prasad/oline/internal/tools"
 	"github.com/nihaal-prasad/oline/internal/tools/custom"
 )
@@ -60,6 +62,29 @@ func configCommandTools(store *config.Store) []tools.Tool {
 	return out
 }
 
+// MCPServerConfigs translates the config's `mcpServers:` specs into mcp.ServerConfig
+// values for the MCP client to connect to. A spec missing a name or command is
+// skipped (the lint flags it). Connecting itself happens at engagement start (it
+// spawns host processes), not here.
+func MCPServerConfigs(store *config.Store) []mcp.ServerConfig {
+	var out []mcp.ServerConfig
+	for _, s := range store.Effective().MCPServers {
+		if strings.TrimSpace(s.Name) == "" || strings.TrimSpace(s.Command) == "" {
+			continue
+		}
+		out = append(out, mcp.ServerConfig{
+			Name:       s.Name,
+			Command:    s.Command,
+			Args:       s.Args,
+			Env:        s.Env,
+			Dir:        s.Dir,
+			AllowTools: s.Tools,
+			Timeout:    time.Duration(s.TimeoutSeconds) * time.Second,
+		})
+	}
+	return out
+}
+
 // CustomToolNames lists every custom tool's name (config command tools + Go
 // extension tools), so watcher mode can block them as execution tools.
 func CustomToolNames(store *config.Store) map[string]bool {
@@ -88,6 +113,23 @@ func Lint(store *config.Store, roster *agents.Roster, reg *tools.Registry) []str
 	for _, n := range roster.Names() {
 		agentSet[strings.ToLower(n)] = true
 	}
+	// MCP tool names (<server>__<tool>) can't be enumerated without connecting to the
+	// server, so treat any grant with a configured server's prefix as known rather than
+	// warning on it.
+	var mcpPrefixes []string
+	for _, s := range store.Effective().MCPServers {
+		if n := strings.TrimSpace(s.Name); n != "" {
+			mcpPrefixes = append(mcpPrefixes, n+"__")
+		}
+	}
+	isMCPGrant := func(tl string) bool {
+		for _, p := range mcpPrefixes {
+			if strings.HasPrefix(tl, p) {
+				return true
+			}
+		}
+		return false
+	}
 
 	var warns []string
 	for _, n := range roster.Names() {
@@ -99,7 +141,7 @@ func Lint(store *config.Store, roster *agents.Roster, reg *tools.Registry) []str
 			warns = append(warns, fmt.Sprintf("agent %q: no description — the orchestrator won't know when to use it", n))
 		}
 		for _, tl := range d.Tools {
-			if !known[tl] {
+			if !known[tl] && !isMCPGrant(tl) {
 				warns = append(warns, fmt.Sprintf("agent %q: tool %q is not registered and will be ignored", n, tl))
 			}
 		}
@@ -124,6 +166,22 @@ func Lint(store *config.Store, roster *agents.Roster, reg *tools.Registry) []str
 			warns = append(warns, fmt.Sprintf("config tool %q: defined more than once", name))
 		}
 		seen[name] = true
+	}
+
+	seenMCP := map[string]bool{}
+	for _, s := range store.Effective().MCPServers {
+		name := strings.TrimSpace(s.Name)
+		if name == "" {
+			warns = append(warns, "mcp server: an entry under `mcpServers:` has no name")
+			continue
+		}
+		if strings.TrimSpace(s.Command) == "" {
+			warns = append(warns, fmt.Sprintf("mcp server %q: no command, so it will be skipped", name))
+		}
+		if seenMCP[name] {
+			warns = append(warns, fmt.Sprintf("mcp server %q: defined more than once", name))
+		}
+		seenMCP[name] = true
 	}
 	return warns
 }

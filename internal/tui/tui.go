@@ -29,8 +29,10 @@ import (
 	"github.com/nihaal-prasad/oline/internal/core"
 	"github.com/nihaal-prasad/oline/internal/engine"
 	"github.com/nihaal-prasad/oline/internal/event"
+	"github.com/nihaal-prasad/oline/internal/mcp"
 	"github.com/nihaal-prasad/oline/internal/sandbox"
 	"github.com/nihaal-prasad/oline/internal/scope"
+	"github.com/nihaal-prasad/oline/internal/tools"
 	"github.com/nihaal-prasad/oline/internal/wire"
 )
 
@@ -393,6 +395,7 @@ type model struct {
 	quitArmedAt time.Time     // first Ctrl-c; a second within 3s confirms quit
 	log         *englog       // per-engagement host activity log
 	audit       *audit.Log    // per-engagement tamper-evident command audit log (host-side)
+	mcp         *mcp.Manager  // connected external MCP tool servers (host-side), closed at shutdown
 
 	budgetInput   bool         // the command line is entering a time budget
 	budgetTarget  core.AgentID // which agent the budget entry applies to
@@ -1789,12 +1792,31 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	llmFor := wire.NewLLMResolver(m.store)
 	orch, resolver := wire.Build(m.mode, m.store, m.roster)
 
+	// Connect operator-configured MCP servers (host-side integrations) and register
+	// their tools into the registry, so an agent granted <server>__<tool> can call it.
+	// A server that fails to connect is skipped with a warning (non-fatal). Reported to
+	// Main's transcript in the startup block below; closed at shutdown.
+	var mcpWarns []string
+	if cfgs := wire.MCPServerConfigs(m.store); len(cfgs) > 0 {
+		var mcpTools []tools.Tool
+		m.mcp, mcpTools, mcpWarns = mcp.ConnectAll(context.Background(), cfgs)
+		for _, t := range mcpTools {
+			reg.Register(t)
+		}
+	}
+
 	m.events = make(chan event.Event, 4096) // generous buffer; the TUI batch-drains it
 	m.sess = engine.NewSession(reg, h, llmFor, resolver, m.events, m.store.Effective().MaxConcurrency)
 	m.sess.Mode = runModeFromSel(m.autoSel)
-	// Custom tools (config command tools + Go extension tools) execute, so watcher
-	// mode must block them along with bash/bash_bg/revshell.
-	m.sess.ExecTools = wire.CustomToolNames(m.store)
+	// Custom tools (config command tools, Go extension tools, and MCP tools) execute,
+	// so watcher mode must block them along with bash/bash_bg/revshell.
+	execTools := wire.CustomToolNames(m.store)
+	if m.mcp != nil {
+		for _, n := range m.mcp.ToolNames() {
+			execTools[n] = true
+		}
+	}
+	m.sess.ExecTools = execTools
 	m.saveReq = make(chan struct{}, 1)
 	// Surface config mistakes (unknown tool grants, bad tiers, missing descriptions,
 	// bad spawns, malformed custom tools) rather than letting them fail silently.
@@ -1933,6 +1955,20 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	}
 	if p := m.audit.Path(); p != "" {
 		m.writeln(core.Main, styleMuted.Render("audit log (tamper-evident) → "+p+"  (verify with: oline -audit-verify "+m.engagement+")"))
+	}
+	// MCP servers (host-side integrations): report what connected and what didn't, so
+	// the operator knows the exact tool names to grant to agents.
+	for _, w := range mcpWarns {
+		m.writeln(core.Main, styleWarn.Render("mcp: "+w))
+	}
+	if m.mcp != nil {
+		for _, s := range m.mcp.Servers() {
+			if len(s.Tools) == 0 {
+				m.writeln(core.Main, styleMuted.Render("mcp server "+s.Name+" connected (no tools exposed)"))
+				continue
+			}
+			m.writeln(core.Main, styleMuted.Render("mcp server "+s.Name+" connected (host-side) → tools: "+strings.Join(s.Tools, ", ")+"  (grant a tool to an agent by name)"))
+		}
 	}
 
 	// Resume: make sure the engagement's files are in the canonical workspace,
@@ -3342,6 +3378,10 @@ func (m *model) shutdown() {
 	if m.audit != nil {
 		_ = m.audit.Close()
 		m.audit = nil
+	}
+	if m.mcp != nil {
+		m.mcp.Close() // terminate the external MCP server processes
+		m.mcp = nil
 	}
 }
 

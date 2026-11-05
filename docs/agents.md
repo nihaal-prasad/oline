@@ -79,7 +79,8 @@ Subagents can also use `send_message` and `ask`.
 ## Tools
 
 Each subagent only sees the tools on its allow-list. You can add your own agents and
-tools via config; see [extending.md](extending.md).
+tools via config — a shell-command tool, a Go tool, or an external MCP tool server
+(oline is an MCP client); see [extending.md](extending.md).
 
 Sandbox and file tools (run inside the sandbox):
 

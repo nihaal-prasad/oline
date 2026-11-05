@@ -51,6 +51,7 @@ type Root struct {
 	QEMU           QEMU                     `yaml:"qemu"`
 	TUI            TUISettings              `yaml:"tui"`
 	Tools          []CommandToolSpec        `yaml:"tools"`
+	MCPServers     []MCPServerSpec          `yaml:"mcpServers"`
 }
 
 // QEMU holds options for the QEMU backend; the WSL backend ignores them.
@@ -84,6 +85,26 @@ type CommandToolSpec struct {
 	Command string `yaml:"command"`
 	// Dir is the guest working directory ("" => the engagement workspace).
 	Dir string `yaml:"dir"`
+}
+
+// MCPServerSpec declares an external Model Context Protocol (MCP) tool server for
+// oline to connect to (no recompile). oline spawns the server on the HOST over stdio,
+// discovers its tools, and exposes each to agents as `<name>__<tool>`. Because the
+// server runs on the host — outside the sandbox and its per-agent egress firewall —
+// it is an operator-trusted integration, like web_search/web_fetch: grant its tools
+// only to agents that should have them, by listing the `<name>__<tool>` names in that
+// agent's `tools:` frontmatter.
+type MCPServerSpec struct {
+	Name    string            `yaml:"name"`    // namespace for this server's tools (e.g. "jira")
+	Command string            `yaml:"command"` // the server executable (stdio transport)
+	Args    []string          `yaml:"args"`    // arguments for the executable
+	Env     map[string]string `yaml:"env"`     // extra environment, merged over the host environment
+	Dir     string            `yaml:"dir"`     // working directory for the server ("" => inherit)
+	// Tools optionally restricts which of the server's tools are exposed (an allow-list
+	// of server-side tool names). Empty exposes all of them.
+	Tools []string `yaml:"tools"`
+	// TimeoutSeconds caps a single tool call (0 => the built-in default).
+	TimeoutSeconds int `yaml:"timeoutSeconds"`
 }
 
 // TUISettings holds terminal-UI preferences (not engagement behavior).
