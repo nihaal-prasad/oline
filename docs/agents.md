@@ -98,11 +98,14 @@ Sandbox and file tools (run inside the sandbox):
 reach the target. They are granted separately in an agent's frontmatter.
 
 Coordination tools (run in the engine): `task`, `wait`, `reprompt`, `inspect`,
-`send_message`, `ask`, `runtime`, `record_finding`, `update_summary` and
+`send_message`, `ask`, `runtime`, `record_finding`, `terminal`, `update_summary` and
 `update_diagram` (orchestrator only), and `heartbeat` (exploiter). `record_finding`
 logs a confirmed finding for the report; every agent has it. `update_summary` sets
 the Summary pane and `update_diagram` sets the Diagram pane. `runtime` reports the
-agent's remaining time budget.
+agent's remaining time budget. `terminal` is read-only: an agent uses it to read
+what the operator is doing in their own shell / terminal panes (see
+[the interface](tui.md)), so the agents can coordinate with the operator; it cannot
+type into them.
 
 `write` and `edit` can only write inside the engagement workspace
 (`/opt/oline/engagements/<name>`): a relative path is taken from that workspace, and a
@@ -147,12 +150,17 @@ one, and you choose which model backs each tier (see
 [configuration.md](configuration.md)). All three must be set before an engagement
 starts.
 
-- `big`: the orchestrator, exploiters, thinkers, and critiques.
+- `big`: the strongest work — exploiters, thinkers, and critiques.
 - `medium`: balanced work (for example recon, enumerator, installer, reporter).
 - `small`: summarizers, and context compaction.
 
 Set an agent's tier in its frontmatter (`tier:`), in `config.yml`
 (`agents.<name>.tier`), or in the editor.
+
+The orchestrator (Main) runs on a configurable tier too — **by default the `medium`
+tier at a high thinking level**, strong planning at a lower cost than `big`. Change
+it with the `orchestrator:` block in `config.yml` or the editor's **Main** section
+(see [configuration.md](configuration.md)).
 
 ## Decision model (optional)
 

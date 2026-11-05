@@ -109,9 +109,10 @@ Shown in the status bar; pick one in the wizard, switch anytime with `Ctrl-b m`
   step at a time.
 - **Watcher**: you run everything; the AI executes nothing (`bash`, `bash_bg`,
   `revshell`, and custom tools are hard-blocked for every agent). It watches, keeps
-  notes, and advises, and may still read and write the workspace. It does not read
-  your terminals on its own: `Ctrl-b a` shares the focused pane's current content with
-  the orchestrator (works in any mode).
+  notes, and advises, and may still read and write the workspace. It can read your
+  shell / terminal panes with its read-only `terminal` tool to follow what you do, and
+  `Ctrl-b a` pushes the focused pane's current content to the orchestrator (both work
+  in any mode).
 
 ## Keybindings
 
@@ -228,4 +229,4 @@ engagement). See [configuration.md](configuration.md#the-in-app-editor).
 
 ### Change a time budget
 
-Focus an agent, press `Ctrl-b b`, and type minutes (or `none`). See [agents.md](agents.md).
+Focus an agent, press `Ctrl-b b`, and type minutes (or `none`). See [AGENTS.md](AGENTS.md).

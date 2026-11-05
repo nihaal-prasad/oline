@@ -19,7 +19,7 @@ Two modes:
 
 - [Getting started](docs/getting-started.md): build, API key, running, and flags.
 - [The interface](docs/tui.md): the setup wizard, the running view, and keybindings.
-- [Agents, modes, and tools](docs/agents.md): the rosters, tools, and time budgets.
+- [Agents, modes, and tools](docs/AGENTS.md): the rosters, tools, and time budgets.
 - [Configuration](docs/configuration.md): config files, models, secrets, backups, and logs.
 - [Extending oline](docs/extending.md): add your own subagents and tools via config (or Go).
 - [Sandbox and egress](docs/sandbox.md): the WSL and QEMU backends and the network boundary.

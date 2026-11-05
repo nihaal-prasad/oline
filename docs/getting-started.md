@@ -58,12 +58,13 @@ oline -mode pentester -env <wsl-distro> -scope "10.0.0.5, 10.0.0.0/24" -goal "pr
 | `-edit` | open the model/provider editor and exit |
 | `-destroy` | interactively destroy an oline-managed WSL/QEMU environment and exit (only `oline-` envs; asks you to confirm by name; never touches anything else) |
 | `-init-config` | write the mode's default `config.yml`, `models.yml`, and prompt files to `~/oline/config/<mode>/`, then exit (`-force` overwrites existing) |
+| `-audit-verify "<engagement>"` | verify an engagement's tamper-evident audit log and exit |
 | `-print` | print the resolved roster and exit |
 | `-version` | print the version and exit |
 
 ## Next
 
 - [tui.md](tui.md): the setup wizard and the running interface.
-- [agents.md](agents.md): the modes, the agent rosters, and the tools.
+- [AGENTS.md](AGENTS.md): the modes, the agent rosters, and the tools.
 - [configuration.md](configuration.md): config files, models, secrets, backups, and logs.
 - [sandbox.md](sandbox.md): the WSL and QEMU backends and the network boundary.

@@ -20,6 +20,7 @@ Everything oline keeps on the host lives under one root directory: `~/oline`, or
       ...                     #   same layout
   backups/<engagement>.tar.gz
   logs/<engagement>.log
+  audit/<engagement>.audit.jsonl  # tamper-evident, hash-chained command log
   history/<engagement>.json   # saved conversation, reloaded when you resume
   images/                     # cached QEMU base images and user qcow2 files
 ```
@@ -54,6 +55,7 @@ with the defaults. Edited files load on the next run.
 |---|---|
 | The model for each tier (big/medium/small) | shared `models.yml` `modelRoles` (or `-edit`, or the wizard); applies to every mode |
 | Which tier an agent runs on, its thinking level | `config.yml` `agents.<name>.tier` (or `-edit`), or `tier:` in `agents/<name>.md` |
+| The orchestrator's tier, thinking level, context ceiling | `config.yml` `orchestrator` (or the editor's **Main** section) |
 | A provider's base URL / API key | `models.yml` `baseUrl` and `secrets.yml` (or `-edit`) |
 | Model list, context window, output `maxTokens` | `models.yml` under the provider's `models` |
 | A tier's model token prices (input / output / cache-read / cache-write) | `-edit` under that tier's `role` item, or `cost:` in `models.yml` |
@@ -69,6 +71,7 @@ with the defaults. Edited files load on the next run.
 | Backup interval, host root | `config.yml` `backup.intervalMinutes`; `$OLINE_HOME` |
 | Blocked shell patterns | `config.yml` `bash.patterns` |
 | Fully customizable panes/tabs (off by default) | `config.yml` `tui.customizablePanes` (or `-edit` under the `tui` item) |
+| Auto-close a subagent's pane when it goes idle | `config.yml` `tui.closeIdleSubagentPanes` (on by default) |
 | Make QEMU VMs throwaway (they persist/resume by default) | `config.yml` `qemu.disposable` |
 | Host tap + nftables boundary for QEMU (Linux) | `config.yml` `qemu.hostFirewall` |
 
@@ -76,12 +79,17 @@ with the defaults. Edited files load on the next run.
 
 ```yaml
 modelRoles:                  # no defaults: set the first three before the first run
-  big:    ""                 # orchestrator, exploiters, thinkers, critiques
-  medium: ""                 # balanced work
+  big:    ""                 # strongest: exploiters, thinkers, critiques
+  medium: ""                 # balanced work (and the orchestrator, by default)
   small:  ""                 # summarizers and context compaction
   decision: ""               # OPTIONAL System-1 decision model; blank = disabled
 
 maxConcurrency: 5            # cap on agents running at once (orchestrator included)
+
+orchestrator:                # the orchestrator (Main) runs on its own tier
+  tier: medium               # which tier backs it (default medium)
+  thinkingLevel: high        # its reasoning effort (default high)
+  maxContextTokens: 0        # compaction ceiling (0 = auto, a fraction of the window)
 
 backup:
   intervalMinutes: 10        # 0 disables backups
@@ -104,6 +112,10 @@ agents: {}                   # per-agent overrides
 qemu:                        # QEMU backend only (ignored for WSL)
   disposable: false          # VMs persist/resume by default; true = throwaway each run
   hostFirewall: false        # Linux host: host-owned tap + nftables cap (needs sudo)
+
+tui:                         # interface preferences (not engagement behavior)
+  customizablePanes: false   # true = free-form numeric tabs (drops the fixed tabs/auto-layout)
+  closeIdleSubagentPanes: true  # auto-close a subagent's pane when it goes idle/killed
 ```
 
 - **modelRoles** maps each tier to a `provider/model-id` selector. The first three
@@ -118,6 +130,10 @@ qemu:                        # QEMU backend only (ignored for WSL)
 - **maxConcurrency** caps how many agents run at once, the orchestrator included,
   so at the default of 5 up to 4 subagents run alongside it. Background `bash_bg`
   jobs are not counted.
+- **orchestrator** sets the tier, thinking level, and context ceiling for the
+  orchestrator (Main). It defaults to the `medium` tier at `high` thinking —
+  strong planning at a lower cost than `big`. `maxContextTokens: 0` auto-sizes the
+  compaction ceiling to a fraction of the model's window.
 - **budget.maxCostUSD** caps engagement spend in US dollars. At the cap, oline
   pauses all agents; raise the value or resume with `Ctrl-b R`. 0 disables it.
 - **budget.maxSummaryCostUSD** caps the spend of the `small`-tier model used for
@@ -225,3 +241,24 @@ Each engagement writes a human-readable log at `<root>/logs/<engagement>.log`: e
 agent's thinking, text, tool calls and output, state changes, spawns, questions, and
 notices, as timestamped entries you can `tail -f`. Append-only, mode 0600, with known
 API keys redacted.
+
+## Audit log
+
+Alongside the activity log, oline keeps a tamper-evident command log at
+`<root>/audit/<engagement>.audit.jsonl`. Every command run during the engagement —
+by an agent (`bash`, `bash_bg`, `revshell`) or by you in your own shell/terminal
+panes — is appended as one JSON record carrying who ran it, when, and what. Each
+record's SHA-256 hash covers the previous record's hash, forming a chain: altering,
+inserting, removing, or reordering any entry breaks the chain from that point on. The
+log lives on the host (never inside the sandbox), so a compromised target cannot
+reach it, and a resumed engagement extends the same chain.
+
+Verify an engagement's chain at any time:
+
+```bash
+oline -audit-verify "<engagement>"
+```
+
+It reports whether the log is intact or names the first broken entry, then exits. (As
+with any local append-only log, someone with write access to the host file could
+rewrite the whole chain; an off-host copy of the head hash defends against that.)
