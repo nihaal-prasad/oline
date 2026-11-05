@@ -105,29 +105,63 @@ func waitResult(ch chan engine.Result) tea.Cmd {
 	return func() tea.Msg { return resultMsg{<-ch} }
 }
 
+// newWSLSentinel is the Candidate ID of the synthetic "create a new WSL distro"
+// entry; it is not a real distro name (the oline- name is generated on selection).
+const newWSLSentinel = "oline-new-wsl-distro"
+
 func scanEnvsCmd() tea.Cmd {
 	return func() tea.Msg {
 		var all []sandbox.Candidate
 		cs, err := sandbox.NewWSL().Scan(context.Background())
 		all = append(all, cs...)
+		// Existing QEMU VMs from prior engagements (persisted disks under images/.state).
+		// Listing them here lets the user reuse one exactly like reusing a WSL distro:
+		// selecting one resumes its disk with its workspace and installed tooling intact.
+		// They appear only when qemu.persist kept them; otherwise the list shows just the
+		// create-new entry below.
+		if qc, ok := sandbox.NewQEMU().(sandbox.QEMUControl); ok {
+			for _, eng := range qc.ResumableEngagements() {
+				all = append(all, sandbox.Candidate{
+					ID: eng, Name: eng, Backend: sandbox.BackendQEMU,
+					Managed: true, Engagement: eng,
+				})
+			}
+		}
 		qs, qerr := sandbox.NewQEMU().Scan(context.Background())
 		all = append(all, qs...)
-		// If QEMU is installed but no Debian base is present yet, offer a synthetic
-		// entry that downloads + boots one on first use.
+		// Present the managed Debian base as a "create a fresh VM" action, parallel to
+		// the WSL create entry below. Every QEMU engagement boots a new disposable
+		// overlay on the one read-only base, so selecting it always makes a brand-new
+		// instance — it never reuses or overwrites a prior disk (reuse is the Resume
+		// step). A bare "oline-debian13" filename read as "reuse this", which was the
+		// source of confusion. NeedsCreate here is display-only for QEMU: it selects
+		// the sentence-form label, and OpenWith downloads the base if it is missing.
 		if sandbox.QEMUAvailable() {
-			hasDebian := false
-			for _, c := range all {
+			debianIdx := -1
+			for i, c := range all {
 				if c.Backend == sandbox.BackendQEMU && c.ID == sandbox.QEMUDebianID {
-					hasDebian = true
+					debianIdx = i
 					break
 				}
 			}
-			if !hasDebian {
+			if debianIdx >= 0 {
+				all[debianIdx].Name = "Create a new oline-managed Debian QEMU VM (fresh disk from the base)"
+				all[debianIdx].NeedsCreate = true
+			} else {
 				all = append(all, sandbox.Candidate{
-					ID: sandbox.QEMUDebianID, Name: "Debian 13 VM (download on first use)",
+					ID: sandbox.QEMUDebianID, Name: "Create a new oline-managed Debian QEMU VM (downloads the base on first use)",
 					Backend: sandbox.BackendQEMU, Managed: true, NeedsCreate: true,
 				})
 			}
+		}
+		// Offer creating a fresh oline-managed Debian WSL distro (vs reusing an
+		// existing distro above). The ID is a sentinel; the real oline- name is
+		// generated when the entry is chosen.
+		if sandbox.WSLAvailable() {
+			all = append(all, sandbox.Candidate{
+				ID: newWSLSentinel, Name: "Create a new oline-managed Debian WSL distro",
+				Backend: sandbox.BackendWSL, Managed: true, NeedsCreate: true,
+			})
 		}
 		if err == nil {
 			err = qerr // surface a QEMU scan error when the WSL scan was fine
@@ -152,6 +186,9 @@ type sandboxPrep struct {
 	qemu       sandbox.BootOpts // persist / host firewall / allow-internet (QEMU only)
 	resume     bool
 	engagement string // the QEMU engagement to resume (resume + QEMU only)
+	createWSL  bool   // provision a new WSL distro named newName (vs open an existing one)
+	newName    string // oline- name for the new WSL distro (createWSL only)
+	wslRootfs  string // rootfs tarball to import ("" => wsl --install; createWSL only)
 }
 
 // prepareSandboxCmd opens (or creates/resumes) the chosen environment and sets up
@@ -174,10 +211,22 @@ func prepareSandboxCmd(p sandboxPrep) tea.Cmd {
 				h, err = qc.OpenWith(ctx, cand.ID, p.qemu)
 			}
 		default:
-			h, err = sandbox.NewWSL().Open(ctx, cand.ID)
+			if p.createWSL {
+				wc, ok := sandbox.NewWSL().(sandbox.WSLControl)
+				if !ok {
+					return sandboxReadyMsg{err: fmt.Errorf("this platform cannot create a WSL distro")}
+				}
+				h, err = wc.CreateDistro(ctx, p.newName, p.wslRootfs)
+			} else {
+				h, err = sandbox.NewWSL().Open(ctx, cand.ID)
+			}
 		}
 		if err != nil {
-			return sandboxReadyMsg{err: fmt.Errorf("open %s: %w", cand.ID, err)}
+			id := cand.ID
+			if p.createWSL {
+				id = p.newName
+			}
+			return sandboxReadyMsg{err: fmt.Errorf("prepare %s: %w", id, err)}
 		}
 		pol := scope.Parse(p.scopeStr)
 		if err := h.SetupEgress(ctx, sandbox.Scope{Targets: append(pol.CIDRs(), pol.Domains()...), AllowIPv6: p.allowIPv6}); err != nil {
@@ -212,7 +261,8 @@ const (
 	wKey            // shown only if a chosen model's provider has no API key yet
 	wStart
 	wEnv
-	wDisk // new-environment only: how much disk to allocate to the created VM
+	wDisk      // new QEMU engagement: how much disk to allocate to the VM
+	wWSLRootfs // new WSL distro, older WSL only: path to a Debian rootfs tarball to import
 	wResume
 	wImport
 	wHistory // resume only: load the prior conversation, or start from a clean slate
@@ -231,22 +281,26 @@ type model struct {
 	w, h int
 
 	// wizard
-	running  bool
-	step     wizStep
-	modeSel  int
-	startSel int // 0 = new engagement, 1 = resume previous
-	resume   bool
-	histSel  int  // wHistory: 0 = load previous conversation, 1 = clean slate
-	loadHist bool // resume with the saved conversation history (vs a clean slate)
-	autoSel  int
-	scopeIn  textinput.Model
-	goalIn   textinput.Model
-	diskIn   textinput.Model // GB to allocate when creating a new VM (wDisk step)
-	diskGB   int             // parsed result of diskIn, applied to the created VM's disk
-	cands    []sandbox.Candidate
-	envSel   int
-	scanned  bool
-	wizErr   string
+	running     bool
+	step        wizStep
+	modeSel     int
+	startSel    int // 0 = new engagement, 1 = resume previous
+	resume      bool
+	histSel     int  // wHistory: 0 = load previous conversation, 1 = clean slate
+	loadHist    bool // resume with the saved conversation history (vs a clean slate)
+	autoSel     int
+	scopeIn     textinput.Model
+	goalIn      textinput.Model
+	diskIn      textinput.Model // GB to allocate when creating a new VM (wDisk step)
+	diskGB      int             // parsed result of diskIn, applied to the created VM's disk
+	wslRootfsIn textinput.Model // Debian rootfs tarball path (wWSLRootfs fallback step)
+	newEnvName  string          // generated oline- name for a newly created environment
+	createWSL   bool            // the chosen env is a NEW WSL distro to provision
+	wslRootfs   string          // rootfs tarball for the new WSL distro ("" => wsl --install)
+	cands       []sandbox.Candidate
+	envSel      int
+	scanned     bool
+	wizErr      string
 
 	// first-run model configuration (wModels step): the user must pick a model for
 	// each of the three tiers from the provider catalog before an engagement can run.
@@ -443,7 +497,7 @@ func (m *model) applyModePlaceholders() {
 
 // defaultDiskGB is the suggested disk size for a newly created VM (the wDisk step).
 // Installing offensive tooling fills a small disk fast, so the default is generous.
-const defaultDiskGB = 20
+const defaultDiskGB = 25
 
 func newModel(mode config.Mode, store *config.Store, roster *agents.Roster) *model {
 	si := textinput.New()
@@ -460,10 +514,14 @@ func newModel(mode config.Mode, store *config.Store, roster *agents.Roster) *mod
 	}
 	gi.Width = 64
 	di := textinput.New()
-	di.Placeholder = "GB for the new VM's disk (e.g. 20)"
+	di.Placeholder = "GB for the new VM's disk (e.g. 25)"
 	di.SetValue(strconv.Itoa(defaultDiskGB))
 	di.CharLimit = 5
 	di.Width = 24
+	ri := textinput.New()
+	ri.Placeholder = "path to a Debian rootfs .tar / .tar.gz / .tar.xz"
+	ri.CharLimit = 1024
+	ri.Width = 64
 	ci := textinput.New()
 	ci.Placeholder = "message the focused agent…  (Ctrl-b then a key for commands)"
 	ci.Width = 64
@@ -488,6 +546,7 @@ func newModel(mode config.Mode, store *config.Store, roster *agents.Roster) *mod
 		scopeIn:        si,
 		goalIn:         gi,
 		diskIn:         di,
+		wslRootfsIn:    ri,
 		input:          ci,
 		importIn:       ii,
 		vpnIn:          vi,
@@ -905,25 +964,60 @@ func (m *model) wizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.wizErr = "QEMU not found — install QEMU (on PATH or in Program Files), or pick a WSL distro."
 				return m, nil
 			}
-			if cand.Backend == sandbox.BackendQEMU && m.resume {
-				qc, _ := sandbox.NewQEMU().(sandbox.QEMUControl)
-				if qc == nil || len(qc.ResumableEngagements()) == 0 {
-					m.wizErr = "no resumable QEMU engagements — enable qemu.persist and finish an engagement first (a clean shutdown persists the disk)."
-					return m, nil
-				}
-			}
 			m.selDistro = cand.ID
-			if m.resume {
+			m.createWSL = false
+			m.newEnvName = ""
+			m.wslRootfs = ""
+			// QEMU: an existing VM (a persisted engagement's disk) chosen from the list is
+			// reused by resuming it — the parallel to picking an existing WSL distro. The
+			// list selection is authoritative, overriding the Start step's new/resume
+			// choice (picking a saved VM always resumes it).
+			if cand.Backend == sandbox.BackendQEMU && cand.Engagement != "" {
+				m.resume = true
+				m.engagement = cand.Engagement
+				if historyExists(m.engagement) {
+					m.histSel = 0
+					m.step = wHistory
+				} else {
+					m.step = wScope
+					m.scopeIn.Focus()
+				}
+				return m, nil
+			}
+			// WSL resume: pick a distro here, then choose which saved engagement inside it.
+			if m.resume && cand.Backend == sandbox.BackendWSL {
 				m.step = wResume
 				return m, listEngagementsCmd(cand)
 			}
-			// A brand-new environment (currently the QEMU "download & create" VM) gets
-			// a disk-size step; existing environments keep their disk, so skip it.
-			if cand.NeedsCreate {
+			// Create a fresh oline-managed WSL distro. Generate its oline- name now;
+			// it appears in the reuse list on later runs and is a Destroy target.
+			if cand.Backend == sandbox.BackendWSL && cand.NeedsCreate {
+				m.createWSL = true
+				m.newEnvName = sandbox.Prefix + "debian-" + time.Now().Format("20060102-150405")
+				m.selDistro = m.newEnvName
+				// If this WSL can install under a custom name, no tarball is needed;
+				// otherwise collect a Debian rootfs tarball to import.
+				if wc, ok := sandbox.NewWSL().(sandbox.WSLControl); ok && wc.InstallSupportsName(context.Background()) {
+					m.step = wScope
+					m.scopeIn.Focus()
+					return m, nil
+				}
+				m.step = wWSLRootfs
+				m.wslRootfsIn.Focus()
+				return m, nil
+			}
+			// QEMU: create a new engagement on a fresh disposable overlay of the base
+			// image; size it here (default 25 GB) so tool installs don't fill a tiny
+			// base — otherwise the guest root is only the base image's ~2 GB. Selecting a
+			// base always starts a new engagement, overriding a Start-step "resume".
+			if cand.Backend == sandbox.BackendQEMU {
+				m.resume = false
+				m.engagement = ""
 				m.step = wDisk
 				m.diskIn.Focus()
 				return m, nil
 			}
+			// Reuse an existing WSL distro as-is (a new engagement inside it).
 			m.step = wScope
 			m.scopeIn.Focus()
 		}
@@ -946,6 +1040,24 @@ func (m *model) wizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.diskIn, cmd = m.diskIn.Update(msg)
+		return m, cmd
+
+	case wWSLRootfs:
+		if k == "enter" {
+			p := strings.TrimSpace(m.wslRootfsIn.Value())
+			if p == "" {
+				m.wizErr = "enter the path to a Debian rootfs tarball (.tar / .tar.gz / .tar.xz)"
+				return m, nil
+			}
+			m.wslRootfs = p
+			m.wizErr = ""
+			m.wslRootfsIn.Blur()
+			m.step = wScope
+			m.scopeIn.Focus()
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.wslRootfsIn, cmd = m.wslRootfsIn.Update(msg)
 		return m, cmd
 
 	case wResume:
@@ -1595,6 +1707,9 @@ func (m *model) startEngagement() (tea.Model, tea.Cmd) {
 		qemu:       qopts,
 		resume:     m.resume && cand.Backend == sandbox.BackendQEMU,
 		engagement: m.engagement,
+		createWSL:  m.createWSL,
+		newName:    m.newEnvName,
+		wslRootfs:  m.wslRootfs,
 	})
 }
 
@@ -1638,6 +1753,13 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	m.router = m.sess.Router()
 	m.resultCh = make(chan engine.Result, 1)
 	m.envID = cand.ID
+	// A freshly created WSL distro's candidate id is the "create new" sentinel; use
+	// the live handle's real oline- name for the header instead.
+	if m.createWSL {
+		if id := h.Info().ID; id != "" {
+			m.envID = id
+		}
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
@@ -3455,7 +3577,11 @@ func (m *model) viewWizard() string {
 	step(m.step == wEnv, "3. Environment", m.envBodyView())
 	if m.step == wDisk {
 		step(true, "   Disk size for the new VM (GB)",
-			"    "+m.diskIn.View()+"\n    "+styleMuted.Render("how much disk the created VM may use; installing tools fills a small disk fast"))
+			"    "+m.diskIn.View()+"\n    "+styleMuted.Render("how much disk the VM may use; installing tools fills a small disk fast (default 25 GB)"))
+	}
+	if m.step == wWSLRootfs {
+		step(true, "   Debian rootfs tarball for the new WSL distro",
+			"    "+m.wslRootfsIn.View()+"\n    "+styleMuted.Render("your WSL is too old to install by name — point to a Debian rootfs .tar(.gz/.xz) to import as "+m.newEnvName))
 	}
 
 	scopeWord := "Scope"
@@ -3496,7 +3622,10 @@ func (m *model) viewWizard() string {
 
 	if m.preparing {
 		msg := "  preparing environment…"
-		if m.prepCand.Backend == sandbox.BackendQEMU {
+		switch {
+		case m.createWSL:
+			msg = "  creating the WSL distro (installing Debian + the egress toolchain — this can take a few minutes)…"
+		case m.prepCand.Backend == sandbox.BackendQEMU:
 			msg = "  booting QEMU VM (first run downloads the image — this can take a few minutes)…"
 		}
 		b.WriteString(styleAccent.Render(msg) + "\n")
@@ -3567,9 +3696,17 @@ func (m *model) envBodyView() string {
 		if c.Managed {
 			tag = styleMuted.Render("  [oline-managed]")
 		}
-		sb.WriteString(fmt.Sprintf("%s%s  %s%s\n", cur, c.ID, styleMuted.Render(string(c.Backend)), tag))
+		name := c.ID
+		if c.NeedsCreate {
+			name = c.Name // the synthetic "create new …" entries read as a sentence
+		}
+		extra := ""
+		if c.Engagement != "" {
+			extra = styleMuted.Render("  (saved VM — resumes its disk & tooling)")
+		}
+		sb.WriteString(fmt.Sprintf("%s%s  %s%s%s\n", cur, name, styleMuted.Render(string(c.Backend)), tag, extra))
 	}
-	sb.WriteString(styleMuted.Render("    (press r to rescan · creating a fresh sandbox lands in a later build)"))
+	sb.WriteString(styleMuted.Render("    (r to rescan · pick a saved QEMU VM to resume it, or \"Create a new … QEMU VM\" for a fresh disk from the base; saved VMs appear only with qemu.persist on)"))
 	return sb.String()
 }
 

@@ -9,7 +9,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/nihaal-prasad/oline/internal/core"
 )
@@ -18,14 +20,22 @@ import (
 //
 // Scan/Open/Exec/Copy run against an existing distro; SetupEgress provisions the
 // per-agent unprivileged users and root-owned iptables rules (see wslEgress).
-// Create/Destroy (importing/removing a hardened oline- distro, including
-// disabling drive automount) are not implemented yet, so until then oline opens
-// a user-provided distro. Cancellation kills the wsl.exe child (a later pass adds
-// an explicit in-guest PID kill so no remote process orphans).
+// CreateDistro imports or installs a fresh oline- distro and hardens it (no
+// Windows drive automount / interop); Destroy unregisters an oline- distro. Both
+// refuse to touch a distro without the oline- Prefix. Cancellation kills the
+// wsl.exe child (a later pass adds an explicit in-guest PID kill so no remote
+// process orphans).
 type wslSandbox struct{}
 
 // NewWSL returns a WSL-backed Sandbox.
 func NewWSL() Sandbox { return &wslSandbox{} }
+
+// WSLAvailable reports whether wsl.exe is on PATH, so the TUI can offer the WSL
+// backend (and the "create a new distro" entry).
+func WSLAvailable() bool {
+	_, err := exec.LookPath("wsl.exe")
+	return err == nil
+}
 
 func wslEnv() []string { return append(os.Environ(), "WSL_UTF8=1") }
 
@@ -76,15 +86,162 @@ func (w *wslSandbox) Open(ctx context.Context, id string) (Handle, error) {
 	return nil, fmt.Errorf("sandbox/wsl: distro %q not found", id)
 }
 
+// Create provisions a fresh oline-managed Debian distro named spec.Name (the
+// oline- Prefix is added if missing) by installing the official Debian distro
+// under that name. For the tarball-import path use CreateDistro directly.
 func (w *wslSandbox) Create(ctx context.Context, spec Spec) (Handle, error) {
-	return nil, errors.New("sandbox/wsl: Create (import hardened oline- distro) lands in Phase 4")
+	return w.CreateDistro(ctx, prefixed(spec.Name), "")
 }
 
+// CreateDistro provisions a fresh oline-managed Debian distro and returns a live
+// handle. When rootfsTarball is non-empty it is imported with `wsl --import`;
+// otherwise the official Debian distro is installed under name with
+// `wsl --install Debian --name`. The distro is hardened afterward (no Windows
+// drive automount / interop) and the per-agent egress toolchain is installed.
+func (w *wslSandbox) CreateDistro(ctx context.Context, name, rootfsTarball string) (Handle, error) {
+	name = prefixed(name)
+	if !WSLAvailable() {
+		return nil, errors.New("sandbox/wsl: wsl.exe not found — install WSL to create a distro")
+	}
+	// Never clobber an existing distro (oline-managed or not).
+	if cands, err := w.Scan(ctx); err == nil {
+		for _, c := range cands {
+			if strings.EqualFold(c.ID, name) {
+				return nil, fmt.Errorf("sandbox/wsl: a distro named %q already exists — reuse it instead of creating a new one", name)
+			}
+		}
+	}
+
+	if rootfsTarball != "" {
+		st, err := os.Stat(rootfsTarball)
+		if err != nil || st.IsDir() {
+			return nil, fmt.Errorf("sandbox/wsl: rootfs tarball %q not found", rootfsTarball)
+		}
+		installDir := wslInstallDir(name)
+		if err := os.MkdirAll(installDir, 0o755); err != nil {
+			return nil, fmt.Errorf("sandbox/wsl: create install dir: %w", err)
+		}
+		c := exec.CommandContext(ctx, "wsl.exe", "--import", name, installDir, rootfsTarball)
+		c.Env = wslEnv()
+		if out, err := c.CombinedOutput(); err != nil {
+			os.RemoveAll(installDir)
+			return nil, fmt.Errorf("sandbox/wsl: import %q: %w: %s", name, err, strings.TrimSpace(string(out)))
+		}
+	} else {
+		// Install the official Debian distro directly under the oline- name. WSL
+		// manages its storage location, and --unregister removes it on Destroy.
+		c := exec.CommandContext(ctx, "wsl.exe", "--install", "Debian", "--name", name, "--no-launch")
+		c.Env = wslEnv()
+		if out, err := c.CombinedOutput(); err != nil {
+			return nil, fmt.Errorf("sandbox/wsl: install Debian as %q (if your WSL is too old for --name, create from a rootfs tarball instead): %w: %s",
+				name, err, strings.TrimSpace(string(out)))
+		}
+	}
+
+	if err := w.hardenDistro(ctx, name); err != nil {
+		_ = w.Destroy(context.Background(), name) // don't leave a half-provisioned distro behind
+		return nil, err
+	}
+	return &wslHandle{distro: name}, nil
+}
+
+// InstallSupportsName reports whether `wsl --install` accepts --name on this host
+// (added in WSL ~2.5.9, Nov 2024). When it does not, the TUI collects a Debian
+// rootfs tarball and imports instead.
+func (w *wslSandbox) InstallSupportsName(ctx context.Context) bool {
+	if !WSLAvailable() {
+		return false
+	}
+	c := exec.CommandContext(ctx, "wsl.exe", "--install", "--help")
+	c.Env = wslEnv()
+	if out, _ := c.CombinedOutput(); strings.Contains(string(out), "--name") {
+		return true
+	}
+	c2 := exec.CommandContext(ctx, "wsl.exe", "--help")
+	c2.Env = wslEnv()
+	out2, _ := c2.CombinedOutput()
+	return strings.Contains(string(out2), "--name")
+}
+
+// hardenDistro confines a freshly created distro (no Windows drive automount, no
+// interop/PATH bleed), creates the engagement workspace root, and installs the
+// per-agent egress toolchain (iptables) if it is missing. It then terminates the
+// distro so /etc/wsl.conf takes effect on the next start.
+func (w *wslSandbox) hardenDistro(ctx context.Context, distro string) error {
+	if err := waitWSLReady(ctx, distro); err != nil {
+		return err
+	}
+	script := `set -e
+cat > /etc/wsl.conf <<'EOF'
+[automount]
+enabled = false
+[interop]
+enabled = false
+appendWindowsPath = false
+EOF
+mkdir -p /opt/oline/engagements
+chmod 2775 /opt/oline/engagements 2>/dev/null || true
+export DEBIAN_FRONTEND=noninteractive
+if ! command -v iptables >/dev/null 2>&1; then
+  apt-get update -y 2>/dev/null && apt-get install -y --no-install-recommends iptables iproute2 sudo procps ca-certificates 2>/dev/null || true
+fi
+echo HARDENED`
+	out, err := rootRun(ctx, distro, script)
+	if err != nil || !strings.Contains(out, "HARDENED") {
+		return fmt.Errorf("sandbox/wsl: harden %q: %w: %s", distro, err, strings.TrimSpace(out))
+	}
+	_ = exec.CommandContext(ctx, "wsl.exe", "--terminate", distro).Run()
+	return nil
+}
+
+// waitWSLReady blocks until the distro answers a trivial root command, or times out.
+func waitWSLReady(ctx context.Context, distro string) error {
+	deadline := time.Now().Add(90 * time.Second)
+	for {
+		c := exec.CommandContext(ctx, "wsl.exe", "-d", distro, "-u", "root", "--", "true")
+		c.Env = wslEnv()
+		if err := c.Run(); err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("sandbox/wsl: distro %q did not become ready in time", distro)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+// Destroy unregisters an oline-managed distro and removes any install directory
+// oline created for it (imported distros). It refuses anything without the
+// oline- Prefix, so a distro the user keeps for other work is never touched.
 func (w *wslSandbox) Destroy(ctx context.Context, id string) error {
 	if !strings.HasPrefix(id, Prefix) {
 		return fmt.Errorf("sandbox/wsl: refusing to destroy %q — not an oline-managed distro", id)
 	}
-	return errors.New("sandbox/wsl: Destroy lands in Phase 4")
+	c := exec.CommandContext(ctx, "wsl.exe", "--unregister", id)
+	c.Env = wslEnv()
+	if out, err := c.CombinedOutput(); err != nil {
+		return fmt.Errorf("sandbox/wsl: unregister %q: %w: %s", id, err, strings.TrimSpace(string(out)))
+	}
+	_ = os.RemoveAll(wslInstallDir(id))
+	return nil
+}
+
+// wslInstallDir is where oline stores an imported distro's files on the host.
+func wslInstallDir(name string) string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "oline", "wsl", name)
+}
+
+// prefixed ensures a name carries the oline- Prefix exactly once.
+func prefixed(name string) string {
+	if strings.HasPrefix(name, Prefix) {
+		return name
+	}
+	return Prefix + name
 }
 
 // wslHandle is a live WSL distro. user == "" uses the distro's default user

@@ -56,6 +56,7 @@ oline -mode pentester -env <wsl-distro> -scope "10.0.0.5, 10.0.0.0/24" -goal "pr
 | `-goal "<text>"` | engagement goal |
 | `-planner` | planner mode (AI proposes, you approve each step); default is automatic. `-manual` is a deprecated alias |
 | `-edit` | open the model/provider editor and exit |
+| `-destroy` | interactively destroy an oline-managed WSL/QEMU environment and exit (only `oline-` envs; asks you to confirm by name; never touches anything else) |
 | `-init-config` | write the mode's default `config.yml`, `models.yml`, and prompt files to `~/oline/config/<mode>/`, then exit (`-force` overwrites existing) |
 | `-print` | print the resolved roster and exit |
 | `-version` | print the version and exit |

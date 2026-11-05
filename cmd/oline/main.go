@@ -32,6 +32,7 @@ func main() {
 	plannerFlag := flag.Bool("planner", false, "planner mode (direct start): AI proposes, you approve each step; default automatic")
 	manualFlag := flag.Bool("manual", false, "deprecated alias for -planner")
 	editFlag := flag.Bool("edit", false, "open the model/provider editor and exit (no engagement)")
+	destroyFlag := flag.Bool("destroy", false, "interactively destroy an oline-managed WSL/QEMU environment and exit (only oline-created envs; never touches anything else; asks for confirmation)")
 	initFlag := flag.Bool("init-config", false, "write the mode's default config.yml, models.yml and prompt files to ~/oline/config/<mode>/ for editing, then exit")
 	forceFlag := flag.Bool("force", false, "with -init-config: overwrite existing config files instead of keeping them")
 	versionFlag := flag.Bool("version", false, "print version and exit")
@@ -39,6 +40,11 @@ func main() {
 
 	if *versionFlag {
 		fmt.Printf("oline %s\n", version)
+		return
+	}
+
+	if *destroyFlag {
+		runDestroy()
 		return
 	}
 

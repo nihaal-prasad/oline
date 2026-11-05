@@ -40,8 +40,15 @@ Changing scope while running re-applies these rules. See [tui.md](tui.md).
 
 ## WSL backend (Windows)
 
-oline imports or reuses a managed distro. Agents run as the unprivileged `oline-*`
-users in a shared workspace, governed by root-owned iptables rules.
+oline creates a fresh managed distro or reuses an existing one. The environment
+step offers "Create a new oline-managed Debian WSL distro" alongside your existing
+distros. Creating one installs official Debian under an `oline-` name (`wsl
+--install --name`; on older WSL it imports a Debian rootfs tarball you supply),
+disables Windows drive automount and interop, and installs the egress toolchain.
+Reusing a distro keeps whatever it already has (tools, files from a prior run).
+
+Agents run as the unprivileged `oline-*` users in a shared workspace, governed by
+root-owned iptables rules.
 
 The distro persists after oline exits, so at engagement end oline removes its
 firewall rules (the `OLINE_OUT` chain, IPv4 and IPv6) once agents have stopped; the
@@ -58,12 +65,17 @@ Install QEMU (`qemu-system-x86_64` and `qemu-img`; oline also finds the Windows
 installer at `C:\Program Files\qemu`). The environment step of the wizard then
 offers, besides any WSL distros:
 
-- **Debian 13 VM (download on first use)**: oline downloads the official Debian 13
-  cloud image, verifies it against the published `SHA512SUMS`, boots it on a
-  disposable overlay, and provisions the per-agent users and egress. The base image
-  is cached under `<root>/images`. The wizard asks how many GB of disk to give the
-  VM; the overlay is grown to that size (the base stays untouched) and the guest
-  grows its root filesystem to use it on first boot.
+- **Create a new oline-managed Debian QEMU VM**: oline downloads the official Debian
+  13 cloud image once, verifies it against the published `SHA512SUMS`, and caches it
+  under `<root>/images` (the entry says it downloads the base on first use until
+  then). Every new engagement boots a fresh disposable overlay on this one pristine
+  base, so selecting it always creates a brand-new instance — engagements never share
+  state, the base is never written to, and a prior disk is never reused or
+  overwritten (to reuse one, persist it and use Resume). The wizard asks
+  how many GB of disk to give the VM (default 25); the overlay is grown to that size
+  (the base stays untouched) and the guest grows its root filesystem to use it on
+  first boot. Sizing applies to every new engagement, so the guest is not stuck at
+  the base image's few GB.
 - **A qcow2 you supply**: drop a cloud image (with cloud-init) at
   `<root>/images/<name>.qcow2` and it appears as an environment.
 
@@ -78,7 +90,17 @@ QEMU VMs are disposable by default: the overlay is discarded on exit. Set
 `qemu.persist: true` to keep each engagement's disk (and its SSH key) so you can
 resume it with its workspace and installed tooling intact. Resume needs a clean
 shutdown; a crash does not persist the disk (the host workspace backup still does).
-Resumable engagements appear on the wizard's resume step.
+Each saved VM appears as a reusable environment in the wizard's environment step
+(marked "saved VM"), alongside the "create a new Debian QEMU VM" entry — selecting a
+saved VM resumes it, exactly as reusing a WSL distro does.
+
+## Destroying an environment
+
+`oline -destroy` lists only oline-managed environments (WSL distros, QEMU base
+images, and persisted engagement disks whose name starts with `oline-`) and
+destroys the one you pick after you retype its name to confirm. It never lists or
+touches a distro, image, or VM you keep for other purposes, and it never runs
+unless you ask for it.
 
 ## Tool-layer blocks
 

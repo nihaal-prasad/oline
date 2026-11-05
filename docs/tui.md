@@ -20,13 +20,23 @@ The wizard asks each setting in order, skipping steps that don't apply; Enter ad
    are unset). Up/down or Tab move, left/right or Space toggle, Enter saves.
 3. **API key**: shown only when a chosen model's provider has no key. Saved to `secrets.yml`.
 4. **Start**: new engagement or resume.
-5. **Environment**: pick a sandbox. Lists WSL distros and QEMU images, plus "create
-   new". See [sandbox.md](sandbox.md).
-   - **Disk size** (only when creating a new VM): how many GB the new VM's disk may
-     use. Installing offensive tooling fills a small image fast, so the default is
-     generous; the guest grows its root filesystem to the chosen size on first boot.
-6. **Resume / import**: pick an existing engagement or import one from a host
-   archive, then choose whether to load its history.
+5. **Environment**: pick a sandbox. Lists existing environments to reuse — your WSL
+   distros and any saved QEMU VMs from prior engagements (marked "saved VM") — plus two
+   create actions: "Create a new oline-managed Debian WSL distro" and "Create a new
+   oline-managed Debian QEMU VM". Selecting a saved QEMU VM resumes its disk with the
+   workspace and tooling it had; selecting the QEMU create entry boots a brand-new
+   disposable disk from the shared read-only base (it never reuses or overwrites a saved
+   one). Saved QEMU VMs appear only when `qemu.persist` kept them. See
+   [sandbox.md](sandbox.md).
+   - **Disk size** (every new QEMU engagement): how many GB the VM's disk may use.
+     Installing offensive tooling fills a small image fast, so the default is 25 GB;
+     the guest grows its root filesystem to the chosen size on first boot.
+   - **Debian rootfs** (new WSL distro, older WSL only): if `wsl --install` cannot
+     name a distro, point oline at a Debian rootfs tarball to import instead.
+6. **Resume / import** (WSL): pick a saved engagement inside the chosen distro, or
+   import one from a host archive, then choose whether to load its history. (A saved
+   QEMU VM is chosen directly in the Environment step above; it then jumps straight to
+   the history choice.)
 7. **Scope**: pentester, the in-scope targets as free text (IPs, CIDRs, and domains
    parsed out; IPs and CIDRs drive the firewall, domains feed tool checks and
    reporting). Exploiter, the application to analyze (a local path, or a URL/name for

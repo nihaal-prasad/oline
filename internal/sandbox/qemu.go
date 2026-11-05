@@ -178,6 +178,7 @@ type QEMUControl interface {
 	OpenWith(ctx context.Context, id string, opts BootOpts) (Handle, error)
 	Resume(ctx context.Context, engagement string, opts BootOpts) (Handle, error)
 	ResumableEngagements() []string
+	DestroyEngagement(ctx context.Context, engagement string) error
 }
 
 // Destroy removes a managed (oline-) base image and its on-disk state. It never
@@ -190,6 +191,18 @@ func (q *qemuSandbox) Destroy(ctx context.Context, id string) error {
 		return err
 	}
 	return nil
+}
+
+// DestroyEngagement removes a persisted engagement's QEMU state (its disk overlay
+// and SSH key under .state/<engagement>). It only ever removes a directory inside
+// the managed images/.state tree, so it cannot touch anything oline did not create.
+func (q *qemuSandbox) DestroyEngagement(ctx context.Context, engagement string) error {
+	dir := q.stateDir(engagement)
+	base := filepath.Join(q.imagesDir, ".state")
+	if rel, err := filepath.Rel(base, dir); err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("sandbox/qemu: refusing to remove engagement state %q — outside the managed state dir", engagement)
+	}
+	return os.RemoveAll(dir)
 }
 
 func qemuUnavailable() error {

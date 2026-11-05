@@ -65,6 +65,10 @@ type Candidate struct {
 	Running     bool
 	Managed     bool // true if created by oline (name has the "oline-" prefix)
 	NeedsCreate bool // true for a synthetic entry whose image must be built/downloaded on open (QEMU)
+	// Engagement, when non-empty, marks a persisted QEMU VM from a prior engagement
+	// (its disk + SSH key live under images/.state/<engagement>). Selecting such a
+	// candidate reuses that VM by resuming it, the parallel to reusing a WSL distro.
+	Engagement string
 }
 
 // Shutdowner is an optional Handle capability: a backend that must stop a running
@@ -175,6 +179,22 @@ type Sandbox interface {
 	Create(ctx context.Context, spec Spec) (Handle, error)
 	Open(ctx context.Context, id string) (Handle, error)
 	Destroy(ctx context.Context, id string) error
+}
+
+// WSLControl is the WSL backend's extra capability surface the TUI uses beyond the
+// generic Sandbox interface: provision a fresh oline-managed distro, and report
+// whether `wsl --install` can name it directly. NewWSL's result implements it; the
+// TUI type-asserts for it.
+type WSLControl interface {
+	// CreateDistro provisions a fresh oline-managed Debian distro named name (which
+	// must already carry the oline- Prefix) and returns a live handle. When
+	// rootfsTarball is non-empty it is imported with `wsl --import`; otherwise the
+	// official Debian distro is installed under that name with `wsl --install`.
+	CreateDistro(ctx context.Context, name, rootfsTarball string) (Handle, error)
+	// InstallSupportsName reports whether this host's `wsl --install` accepts the
+	// --name flag (so a new distro can be installed directly under an oline- name).
+	// When it does not, the TUI collects a rootfs tarball and imports instead.
+	InstallSupportsName(ctx context.Context) bool
 }
 
 // Prefix is prepended to every environment oline creates, so the harness can
