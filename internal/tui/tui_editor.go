@@ -209,12 +209,11 @@ func (m *model) roleModel(tier string) string {
 	}
 }
 
-// costStr formats a per-1M-token price for a text field: the shortest exact
-// decimal (e.g. 0.3, 0.006), and empty for an unset (zero) price.
+// costStr formats a per-1M-token price for a text field as the shortest exact
+// decimal (e.g. 0.3, 0.006). A zero price renders as "0" (not blank) so a
+// deliberately-set $0 is visible and distinguishable as saved; blank in the field
+// is still read as 0 on save.
 func costStr(v float64) string {
-	if v == 0 {
-		return ""
-	}
 	return strconv.FormatFloat(v, 'f', -1, 64)
 }
 

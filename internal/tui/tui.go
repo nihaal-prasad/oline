@@ -3643,16 +3643,14 @@ func (m *model) enforceSummaryCap() {
 }
 
 // costFor returns the per-1M-token input / output / cache-read USD rates for a
-// model id. A cache-read rate of 0 (unset) falls back to the full input rate.
+// model id, exactly as configured. Prices are literal: a rate of 0 means $0 (free /
+// untracked), including cache-read — set a cache-read rate explicitly if cached
+// tokens should be billed.
 func (m *model) costFor(modelID string) (in, out, cacheRead float64) {
 	for _, p := range m.store.Effective().Providers {
 		for _, md := range p.Models {
 			if md.ID == modelID {
-				cr := md.Cost.CacheRead
-				if cr == 0 {
-					cr = md.Cost.Input
-				}
-				return md.Cost.Input, md.Cost.Output, cr
+				return md.Cost.Input, md.Cost.Output, md.Cost.CacheRead
 			}
 		}
 	}

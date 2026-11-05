@@ -438,6 +438,26 @@ func TestEditorRoleModelChangeWithEditedPricesSaves(t *testing.T) {
 	}
 }
 
+// TestEditorRoleZeroPrice is the regression for the bug where a price couldn't be set
+// to $0.0: in particular a cache-read of 0 used to fall back to the input rate.
+func TestEditorRoleZeroPrice(t *testing.T) {
+	m, _ := tempHomeModel(t)
+	withFireworks(m.store)
+	const deepseek = "accounts/fireworks/models/deepseek-v4p1-flash" // catalog input 0.30
+	m.store.SetModelRoles("fireworks/"+deepseek, "fireworks/accounts/fireworks/models/glm-5p3-flash", "fireworks/accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b")
+	m.openEditor()
+	m.eSel = findItem(m, "role", "big")
+	m.buildFields()
+	// Set every price to 0 — including cache-read, which must NOT fall back to input.
+	for i := 1; i <= 4; i++ {
+		m.eFields[i].SetValue("0")
+	}
+	m.saveItem()
+	if in, out, cr := m.costFor(deepseek); in != 0 || out != 0 || cr != 0 {
+		t.Errorf("costFor after setting all prices to 0 = (%v,%v,%v), want all 0 (cache-read must not fall back to input)", in, out, cr)
+	}
+}
+
 func TestWizardApiKeyStep(t *testing.T) {
 	m, home := tempHomeModel(t)
 	var tm tea.Model = m
