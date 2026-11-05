@@ -450,20 +450,25 @@ type model struct {
 	editing    bool
 	eItems     []eItem
 	eSel       int
-	// eFocus: -1 = navigating the item list; 0..len(eFields)-1 = editing that
-	// text field; len(eFields) = editing the system-prompt box (when ePrompt != nil).
-	eFocus   int
-	eFields  []textinput.Model
-	ePrompt  *textarea.Model // the resizable system-prompt box (nil when the item has no prompt)
-	ePromptH int             // current prompt-box height in rows (user-resizable)
-	eStatus  string
+	// eFocus: -1 = navigating the item list; 0..len(eFields)-1 = editing that text
+	// field; len(eFields)+j = editing prompt box j (when ePrompts has entries). An
+	// item may carry more than one prompt box (the Main section edits both the
+	// orchestrator system prompt and the mode personality).
+	eFocus        int
+	eFields       []textinput.Model
+	ePrompts      []*textarea.Model // resizable multi-line boxes (system prompt, personality, …)
+	ePromptLabels []string          // label shown above each box in ePrompts (parallel slice)
+	ePromptH      int               // current prompt-box height in rows (user-resizable)
+	eStatus       string
 	// Editor mouse hit-testing anchors, recorded by viewEditor each render so clicks
-	// map to what is on screen: the left item list and the right field rows.
+	// map to what is on screen: the left item list, the right text-field rows, and
+	// each prompt box's row span.
 	eLeftItemTop int   // terminal row of the first left-list item
 	eLeftWidth   int   // width (cols) of the left box, from column 0
 	eRightLeft   int   // terminal column where the right box's content starts
-	eFieldRows   []int // terminal row of each focusable field (by focus index: text fields then prompt)
-	ePromptBot   int   // bottom terminal row of the prompt box (for wheel hit-testing)
+	eFieldRows   []int // terminal row of each text field (indexed like eFields)
+	ePromptTops  []int // top (label) terminal row of each prompt box (indexed like ePrompts)
+	ePromptBots  []int // bottom terminal row of each prompt box (indexed like ePrompts)
 }
 
 // configureDirect pre-fills the wizard answers and arms a direct start.

@@ -10,39 +10,41 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// TestEditorSaveOrchestrator checks the single orchestrator section edits the
-// orchestrator like a subagent: its model tier / thinking level / max context save
-// to config.yml, and its system prompt saves to SYSTEM_TEMPLATE.md (in-memory
-// roster updated too).
-func TestEditorSaveOrchestrator(t *testing.T) {
+// TestEditorSaveMain checks the single Main section edits the orchestrator like a
+// subagent: tier / thinking / max context save to config.yml, and BOTH prompt boxes
+// — the system prompt (SYSTEM_TEMPLATE.md) and the personality (PERSONALITY.md) —
+// save together, with the in-memory roster updated.
+func TestEditorSaveMain(t *testing.T) {
 	m, home := tempHomeModel(t)
 	m.openEditor()
-	i := findItem(m, "orchestrator", "")
+	i := findItem(m, "main", "Primary Agent Modifications")
 	if i < 0 {
-		t.Fatal("orchestrator not in editor list")
+		t.Fatal("Main not in editor list")
 	}
 	m.eSel = i
 	m.buildFields()
 	if len(m.eFields) != 3 {
-		t.Fatalf("orchestrator editor should have tier/thinking/context (3 fields), got %d", len(m.eFields))
+		t.Fatalf("Main editor should have tier/thinking/context (3 fields), got %d", len(m.eFields))
 	}
-	if m.ePrompt == nil {
-		t.Fatal("orchestrator has no system-prompt box")
+	if len(m.ePrompts) != 2 {
+		t.Fatalf("Main editor should have system-prompt + personality (2 boxes), got %d", len(m.ePrompts))
 	}
-	m.eFields[0].SetValue("big")  // tier
-	m.eFields[1].SetValue("high") // thinking level
-	m.ePrompt.SetValue("NEW ORCHESTRATOR SYSTEM PROMPT")
+	m.eFields[0].SetValue("Big")  // capitalized input is accepted (lower-cased on save)
+	m.eFields[1].SetValue("High") // thinking level
+	m.ePrompts[0].SetValue("NEW MAIN SYSTEM PROMPT")
+	m.ePrompts[1].SetValue("NEW MAIN PERSONALITY")
 	m.saveItem()
 
-	data, err := os.ReadFile(filepath.Join(home, "oline", "config", "pentester", "SYSTEM_TEMPLATE.md"))
-	if err != nil {
-		t.Fatalf("SYSTEM_TEMPLATE.md not written: %v", err)
+	sys, err := os.ReadFile(filepath.Join(home, "oline", "config", "pentester", "SYSTEM_TEMPLATE.md"))
+	if err != nil || string(sys) != "NEW MAIN SYSTEM PROMPT" {
+		t.Fatalf("SYSTEM_TEMPLATE.md not persisted: %q, %v", sys, err)
 	}
-	if string(data) != "NEW ORCHESTRATOR SYSTEM PROMPT" {
-		t.Errorf("system prompt not persisted verbatim:\n%s", data)
+	pers, err := os.ReadFile(filepath.Join(home, "oline", "config", "pentester", "PERSONALITY.md"))
+	if err != nil || string(pers) != "NEW MAIN PERSONALITY" {
+		t.Fatalf("PERSONALITY.md not persisted: %q, %v", pers, err)
 	}
-	if m.roster.Orchestrator.SystemTemplate != "NEW ORCHESTRATOR SYSTEM PROMPT" {
-		t.Error("in-memory orchestrator system prompt not updated")
+	if m.roster.Orchestrator.SystemTemplate != "NEW MAIN SYSTEM PROMPT" || m.roster.Orchestrator.Personality != "NEW MAIN PERSONALITY" {
+		t.Error("in-memory roster prompts not updated")
 	}
 	cfg, err := os.ReadFile(filepath.Join(home, "oline", "config", "pentester", "config.yml"))
 	if err != nil {
@@ -56,32 +58,50 @@ func TestEditorSaveOrchestrator(t *testing.T) {
 	}
 }
 
-// TestEditorSaveModePersonality checks the separate personality section saves to
-// PERSONALITY.md and updates the in-memory roster.
-func TestEditorSaveModePersonality(t *testing.T) {
+// TestEditorScopeHiddenInEditorOnly checks that `oline -edit` (no engagement) omits
+// the Scope item, and that a normal session includes it.
+func TestEditorScopeHiddenInEditorOnly(t *testing.T) {
+	m := testModel(t)
+	m.editorOnly = true
+	m.openEditor()
+	if findItem(m, "scope", "in-scope targets") >= 0 {
+		t.Error("Scope must not appear under `oline -edit` (no active engagement)")
+	}
+	m.editorOnly = false
+	m.openEditor()
+	if findItem(m, "scope", "in-scope targets") < 0 {
+		t.Error("Scope should appear in a normal session")
+	}
+}
+
+// TestEditorTuiSingleSection checks both TUI toggles live under one section.
+func TestEditorTuiSingleSection(t *testing.T) {
 	m, home := tempHomeModel(t)
 	m.openEditor()
-	i := findItem(m, "personality", "")
-	if i < 0 {
-		t.Fatal("personality not in editor list")
+	n := 0
+	for _, it := range m.eItems {
+		if it.kind == "tui" {
+			n++
+		}
 	}
-	m.eSel = i
+	if n != 1 {
+		t.Fatalf("want exactly one TUI section, got %d", n)
+	}
+	m.eSel = findItem(m, "tui", "preferences")
 	m.buildFields()
-	if m.ePrompt == nil {
-		t.Fatal("personality has no prompt box")
+	if len(m.eFields) != 2 {
+		t.Fatalf("TUI section should edit both toggles (2 fields), got %d", len(m.eFields))
 	}
-	m.ePrompt.SetValue("NEW PERSONALITY")
+	m.eFields[0].SetValue("true")  // customizable panes
+	m.eFields[1].SetValue("false") // close idle subagent panes
 	m.saveItem()
-
-	data, err := os.ReadFile(filepath.Join(home, "oline", "config", "pentester", "PERSONALITY.md"))
-	if err != nil {
-		t.Fatalf("PERSONALITY.md not written: %v", err)
+	eff := m.store.Effective().TUI
+	if !eff.CustomizablePanes || eff.CloseIdleSubagentPanes {
+		t.Errorf("TUI toggles not saved: %+v", eff)
 	}
-	if string(data) != "NEW PERSONALITY" {
-		t.Errorf("personality not persisted verbatim:\n%s", data)
-	}
-	if m.roster.Orchestrator.Personality != "NEW PERSONALITY" {
-		t.Error("in-memory personality not updated")
+	cfg, _ := os.ReadFile(filepath.Join(home, "oline", "config", "pentester", "config.yml"))
+	if !strings.Contains(string(cfg), "customizablePanes: true") {
+		t.Errorf("customizablePanes not persisted:\n%s", cfg)
 	}
 }
 
@@ -102,14 +122,14 @@ func TestEditorSaveAgentPrompt(t *testing.T) {
 	}
 	m.eSel = idx
 	m.buildFields()
-	if m.ePrompt == nil {
+	if len(m.ePrompts) == 0 {
 		t.Fatalf("agent %q has no system-prompt box", name)
 	}
 	origFront := m.roster.Agents[name].Frontmatter
 	if origFront == "" {
 		t.Fatalf("agent %q has no parsed frontmatter", name)
 	}
-	m.ePrompt.SetValue("EDITED AGENT PROMPT BODY")
+	m.ePrompts[0].SetValue("EDITED AGENT PROMPT BODY")
 	m.saveItem()
 
 	data, err := os.ReadFile(filepath.Join(home, "oline", "config", "pentester", "agents", name+".md"))

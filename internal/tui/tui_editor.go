@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,21 +26,20 @@ type eItem struct {
 // openEditor builds the editor item list and enters editing mode.
 func (m *model) openEditor() {
 	m.eItems = m.eItems[:0]
-	// Scope first: it can be changed live while agents run (re-applies the firewall
-	// and tells the orchestrator).
-	scopeName := "in-scope targets"
-	if m.mode == config.ModeExploiter {
-		scopeName = "target application"
+	// Scope can be changed live while agents run (re-applies the firewall and tells
+	// the orchestrator). With `oline -edit` there is no engagement, so it is omitted.
+	if !m.editorOnly {
+		scopeName := "in-scope targets"
+		if m.mode == config.ModeExploiter {
+			scopeName = "target application"
+		}
+		m.eItems = append(m.eItems, eItem{kind: "scope", name: scopeName})
 	}
-	m.eItems = append(m.eItems, eItem{kind: "scope", name: scopeName})
-	// TUI settings: terminal-UI preferences (not engagement behavior).
-	m.eItems = append(m.eItems, eItem{kind: "tui", name: "customizable panes"})
-	m.eItems = append(m.eItems, eItem{kind: "tui", name: "close idle subagent panes"})
-	// The orchestrator, edited like a subagent: one section with its model tier,
-	// thinking level, max context, and its system prompt. Its mode personality is a
-	// separate prompt item (it is shared mode voice, not an orchestrator model knob).
-	m.eItems = append(m.eItems, eItem{kind: "orchestrator", name: ""})
-	m.eItems = append(m.eItems, eItem{kind: "personality", name: ""})
+	// TUI preferences (terminal-UI, not engagement behavior) — one section.
+	m.eItems = append(m.eItems, eItem{kind: "tui", name: "preferences"})
+	// Main: the orchestrator (primary agent). One section holding its model tier,
+	// thinking level, max context, its system prompt, and the mode personality.
+	m.eItems = append(m.eItems, eItem{kind: "main", name: "Primary Agent Modifications"})
 	// The three model tiers: every agent runs on one of these, and compaction uses
 	// small. Configuring them here is the same as the first-run setup.
 	m.eItems = append(m.eItems,
@@ -66,11 +67,11 @@ func (m *model) openEditor() {
 const defaultPromptH = 12
 
 // buildFields creates the inputs for the selected item: zero or more single-line
-// text fields plus, for an agent or the orchestrator, a resizable system-prompt
-// box (m.ePrompt).
+// text fields plus zero or more resizable multi-line prompt boxes (m.ePrompts).
 func (m *model) buildFields() {
 	m.eFields = nil
-	m.ePrompt = nil
+	m.ePrompts = nil
+	m.ePromptLabels = nil
 	if m.eSel < 0 || m.eSel >= len(m.eItems) {
 		return
 	}
@@ -85,6 +86,16 @@ func (m *model) buildFields() {
 		}
 		return ti
 	}
+	addPrompt := func(label, content string) {
+		m.ePrompts = append(m.ePrompts, m.newPromptArea(content))
+		m.ePromptLabels = append(m.ePromptLabels, label)
+	}
+	boolVal := func(b bool) string {
+		if b {
+			return "true"
+		}
+		return "false"
+	}
 	switch it.kind {
 	case "scope":
 		label := "in-scope targets (IPs / CIDRs / domains)"
@@ -95,16 +106,10 @@ func (m *model) buildFields() {
 			mk(label, m.scopeIn.Value(), false),
 		}
 	case "tui":
-		cur := m.store.Effective().TUI.CustomizablePanes
-		if it.name == "close idle subagent panes" {
-			cur = m.store.Effective().TUI.CloseIdleSubagentPanes
-		}
-		val := "false"
-		if cur {
-			val = "true"
-		}
+		eff := m.store.Effective().TUI
 		m.eFields = []textinput.Model{
-			mk(it.name+" (true|false)", val, false),
+			mk("customizable panes (true|false)", boolVal(eff.CustomizablePanes), false),
+			mk("close idle subagent panes (true|false)", boolVal(eff.CloseIdleSubagentPanes), false),
 		}
 	case "role":
 		// A tier's model, plus that model's per-1M-token prices (which feed the live
@@ -133,13 +138,14 @@ func (m *model) buildFields() {
 			ctxVal = strconv.Itoa(cfg.maxContext)
 		}
 		m.eFields = []textinput.Model{
-			mk("model tier (big|medium|small)", cfg.tier, false),
-			mk("thinking-level (low|medium|high)", cfg.effort, false),
+			mk("model tier (Big|Medium|Small)", capitalFirst(cfg.tier), false),
+			mk("thinking-level (Low|Medium|High)", capitalFirst(cfg.effort), false),
 			mk("max context tokens (blank = auto)", ctxVal, false),
 		}
-		m.ePrompt = m.newPromptArea(m.roster.Agents[it.name].Prompt)
-	case "orchestrator":
-		// Edited like a subagent: tier / thinking / max-context fields + system prompt.
+		addPrompt("system prompt", m.roster.Agents[it.name].Prompt)
+	case "main":
+		// The orchestrator (primary agent), edited like a subagent: tier / thinking /
+		// max-context fields + the system prompt AND the mode personality.
 		oc := m.store.Orchestrator()
 		tier := oc.Tier
 		if tier == "" {
@@ -150,13 +156,12 @@ func (m *model) buildFields() {
 			ctxVal = strconv.Itoa(oc.MaxContextTokens)
 		}
 		m.eFields = []textinput.Model{
-			mk("model tier (big|medium|small)", tier, false),
-			mk("thinking-level (low|medium|high)", oc.ThinkingLevel, false),
+			mk("model tier (Big|Medium|Small)", capitalFirst(tier), false),
+			mk("thinking-level (Low|Medium|High)", capitalFirst(oc.ThinkingLevel), false),
 			mk("max context tokens (blank = auto)", ctxVal, false),
 		}
-		m.ePrompt = m.newPromptArea(m.roster.Orchestrator.SystemTemplate)
-	case "personality":
-		m.ePrompt = m.newPromptArea(m.roster.Orchestrator.Personality)
+		addPrompt("system prompt", m.roster.Orchestrator.SystemTemplate)
+		addPrompt("personality", m.roster.Orchestrator.Personality)
 	}
 	if len(m.eFields) > 0 {
 		m.eFields[0].Focus()
@@ -233,49 +238,63 @@ func (m *model) costFromFields(fields []textinput.Model) (config.Cost, error) {
 	return c, nil
 }
 
-// promptIdx is the field index of the system-prompt box (after the text fields),
-// or -1 when the selected item has no prompt.
-func (m *model) promptIdx() int {
-	if m.ePrompt == nil {
-		return -1
+// promptAt returns the index into m.ePrompts for focus index i (a prompt box sits
+// after the text fields), or -1 when i is not a prompt box.
+func (m *model) promptAt(i int) int {
+	j := i - len(m.eFields)
+	if j >= 0 && j < len(m.ePrompts) {
+		return j
 	}
-	return len(m.eFields)
+	return -1
 }
 
-// numFields is the number of focusable inputs: the text fields plus the prompt box.
-func (m *model) numFields() int {
-	n := len(m.eFields)
-	if m.ePrompt != nil {
-		n++
+// focusedPrompt returns the prompt box currently focused, or nil.
+func (m *model) focusedPrompt() *textarea.Model {
+	if j := m.promptAt(m.eFocus); j >= 0 {
+		return m.ePrompts[j]
 	}
-	return n
+	return nil
 }
 
-// setEFocus moves focus to field i (a text field or the prompt box), blurring the rest.
+// numFields is the number of focusable inputs: the text fields plus the prompt boxes.
+func (m *model) numFields() int { return len(m.eFields) + len(m.ePrompts) }
+
+// setEFocus moves focus to focusable i (a text field or a prompt box), blurring the rest.
 func (m *model) setEFocus(i int) {
 	for j := range m.eFields {
 		m.eFields[j].Blur()
 	}
-	if m.ePrompt != nil {
-		m.ePrompt.Blur()
+	for j := range m.ePrompts {
+		m.ePrompts[j].Blur()
 	}
 	m.eFocus = i
 	switch {
-	case i == m.promptIdx() && m.ePrompt != nil:
-		m.ePrompt.Focus()
+	case m.promptAt(i) >= 0:
+		m.ePrompts[m.promptAt(i)].Focus()
 	case i >= 0 && i < len(m.eFields):
 		m.eFields[i].Focus()
 	}
 }
 
-// resizePrompt grows (d>0) or shrinks (d<0) the system-prompt box; the chosen
-// height persists across items. viewEditor clamps the rendered height to the box.
+// resizePrompt grows (d>0) or shrinks (d<0) the prompt boxes; the chosen height
+// persists across items. viewEditor clamps the rendered height to the box.
 func (m *model) resizePrompt(d int) {
-	if m.ePrompt == nil {
+	if len(m.ePrompts) == 0 {
 		return
 	}
 	m.ePromptH = clampInt(m.ePromptH+d, 3, 60)
-	m.ePrompt.SetHeight(m.ePromptH)
+	for _, ta := range m.ePrompts {
+		ta.SetHeight(m.ePromptH)
+	}
+}
+
+// capitalFirst upper-cases the first letter of a word (for display: Big, Medium,
+// High, …). Empty stays empty.
+func capitalFirst(s string) string {
+	if s == "" {
+		return ""
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 // resolveAgent returns the current model, effort, and max-context-tokens override
@@ -304,6 +323,10 @@ func (m *model) resolveAgent(name string) (struct {
 func (m *model) updateEditor(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if mm, ok := msg.(tea.MouseMsg); ok {
 		return m, m.handleEditorMouse(mm)
+	}
+	if done, ok := msg.(editorDoneMsg); ok {
+		m.applyExternalEdit(done)
+		return m, nil
 	}
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
@@ -367,8 +390,9 @@ func (m *model) updateEditor(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cycleField(-1)
 		return m, nil
 	}
-	if m.eFocus == m.promptIdx() {
-		// The multi-line prompt box: arrows/Enter edit text; alt+↑/↓ resize it.
+	if ta := m.focusedPrompt(); ta != nil {
+		// The multi-line prompt box: arrows/Enter edit text; alt+↑/↓ resize it;
+		// Ctrl+E opens the body in the user's $EDITOR (vim) for full modal editing.
 		switch key.String() {
 		case "alt+up", "ctrl+up":
 			m.resizePrompt(1)
@@ -376,9 +400,11 @@ func (m *model) updateEditor(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "alt+down", "ctrl+down":
 			m.resizePrompt(-1)
 			return m, nil
+		case "ctrl+e":
+			return m, m.editPromptInEditor()
 		}
 		var cmd tea.Cmd
-		*m.ePrompt, cmd = m.ePrompt.Update(msg)
+		*ta, cmd = ta.Update(msg)
 		return m, cmd
 	}
 	// A single-line text field: ↑/↓ switch fields, Enter saves.
@@ -403,11 +429,11 @@ func (m *model) updateEditor(msg tea.Msg) (tea.Model, tea.Cmd) {
 // focus it, and wheel over the prompt box to scroll it. Coordinates are matched
 // against the anchors viewEditor recorded for the last render.
 func (m *model) handleEditorMouse(msg tea.MouseMsg) tea.Cmd {
-	// Wheel: scroll the prompt box when the pointer is over the right pane.
+	// Wheel: scroll the focused prompt box when the pointer is over the right pane.
 	if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
-		if m.ePrompt != nil && m.eFocus == m.promptIdx() && msg.X >= m.eRightLeft {
+		if ta := m.focusedPrompt(); ta != nil && msg.X >= m.eRightLeft {
 			var cmd tea.Cmd
-			*m.ePrompt, cmd = m.ePrompt.Update(msg)
+			*ta, cmd = ta.Update(msg)
 			return cmd
 		}
 		return nil
@@ -428,14 +454,12 @@ func (m *model) handleEditorMouse(msg tea.MouseMsg) tea.Cmd {
 		}
 		return nil
 	}
-	// Right pane: focus the clicked field (only meaningful once an item is open).
+	// Right pane: focus the clicked field/prompt (only once an item is open).
 	if msg.X >= m.eRightLeft && m.eFocus >= 0 {
-		if m.ePrompt != nil {
-			if p := m.promptIdx(); p >= 0 && p < len(m.eFieldRows) {
-				if msg.Y >= m.eFieldRows[p] && msg.Y <= m.ePromptBot {
-					m.setEFocus(p)
-					return nil
-				}
+		for j := 0; j < len(m.ePrompts) && j < len(m.ePromptTops); j++ {
+			if msg.Y >= m.ePromptTops[j] && msg.Y <= m.ePromptBots[j] {
+				m.setEFocus(len(m.eFields) + j)
+				return nil
 			}
 		}
 		for i := 0; i < len(m.eFields) && i < len(m.eFieldRows); i++ {
@@ -460,8 +484,8 @@ func (m *model) blurFields() {
 	for i := range m.eFields {
 		m.eFields[i].Blur()
 	}
-	if m.ePrompt != nil {
-		m.ePrompt.Blur()
+	for i := range m.ePrompts {
+		m.ePrompts[i].Blur()
 	}
 }
 
@@ -471,15 +495,15 @@ func (m *model) saveItem() {
 	}
 	it := m.eItems[m.eSel]
 	switch it.kind {
-	case "orchestrator":
+	case "main":
 		tier := strings.ToLower(strings.TrimSpace(m.eFields[0].Value()))
 		if tier != "" && tier != "big" && tier != "medium" && tier != "small" {
-			m.eStatus = styleErr.Render("model tier must be big, medium, or small")
+			m.eStatus = styleErr.Render("model tier must be Big, Medium, or Small")
 			return
 		}
 		eff := strings.ToLower(strings.TrimSpace(m.eFields[1].Value()))
 		if eff != "" && eff != "low" && eff != "medium" && eff != "high" {
-			m.eStatus = styleErr.Render("thinking-level must be low, medium, or high")
+			m.eStatus = styleErr.Render("thinking-level must be Low, Medium, or High")
 			return
 		}
 		oc := config.OrchestratorConfig{Tier: tier, ThinkingLevel: eff}
@@ -495,43 +519,44 @@ func (m *model) saveItem() {
 			m.eStatus = styleErr.Render("save: " + err.Error())
 			return
 		}
-		// Persist the (possibly edited) system prompt alongside the model config.
-		prompt := m.ePrompt.Value()
-		if err := m.store.SaveModeFile("SYSTEM_TEMPLATE.md", prompt); err != nil {
-			m.eStatus = styleErr.Render("save prompt: " + err.Error())
+		// Persist the system prompt (prompt box 0) and the personality (box 1).
+		sysPrompt, personality := m.ePrompts[0].Value(), m.ePrompts[1].Value()
+		if err := m.store.SaveModeFile("SYSTEM_TEMPLATE.md", sysPrompt); err != nil {
+			m.eStatus = styleErr.Render("save system prompt: " + err.Error())
 			return
 		}
-		m.roster.Orchestrator.SystemTemplate = prompt
-		m.eStatus = styleGreenRender("saved orchestrator (model config applies to the next engagement)")
-	case "personality":
-		prompt := m.ePrompt.Value()
-		if err := m.store.SaveModeFile("PERSONALITY.md", prompt); err != nil {
-			m.eStatus = styleErr.Render("save prompt: " + err.Error())
+		if err := m.store.SaveModeFile("PERSONALITY.md", personality); err != nil {
+			m.eStatus = styleErr.Render("save personality: " + err.Error())
 			return
 		}
-		m.roster.Orchestrator.Personality = prompt
-		m.eStatus = styleGreenRender("saved mode personality (applies to the next engagement)")
+		m.roster.Orchestrator.SystemTemplate = sysPrompt
+		m.roster.Orchestrator.Personality = personality
+		m.eStatus = styleGreenRender("saved Main (model config applies to the next engagement)")
 	case "tui":
-		v := strings.ToLower(strings.TrimSpace(m.eFields[0].Value()))
-		var on bool
-		switch v {
-		case "true", "1", "yes", "on":
-			on = true
-		case "false", "0", "no", "off":
-			on = false
-		default:
-			m.eStatus = styleErr.Render("enter true or false")
+		parseBool := func(s string) (bool, bool) {
+			switch strings.ToLower(strings.TrimSpace(s)) {
+			case "true", "1", "yes", "on":
+				return true, true
+			case "false", "0", "no", "off":
+				return false, true
+			}
+			return false, false
+		}
+		cp, ok1 := parseBool(m.eFields[0].Value())
+		cip, ok2 := parseBool(m.eFields[1].Value())
+		if !ok1 || !ok2 {
+			m.eStatus = styleErr.Render("both settings must be true or false")
 			return
 		}
-		save := m.store.SaveTUICustomizablePanes
-		if it.name == "close idle subagent panes" {
-			save = m.store.SaveTUICloseIdleSubagentPanes
-		}
-		if err := save(on); err != nil {
+		if err := m.store.SaveTUICustomizablePanes(cp); err != nil {
 			m.eStatus = styleErr.Render("save: " + err.Error())
 			return
 		}
-		m.eStatus = styleGreenRender(fmt.Sprintf("saved %s = %v (applies to the next engagement)", it.name, on))
+		if err := m.store.SaveTUICloseIdleSubagentPanes(cip); err != nil {
+			m.eStatus = styleErr.Render("save: " + err.Error())
+			return
+		}
+		m.eStatus = styleGreenRender("saved TUI preferences (applies to the next engagement)")
 	case "scope":
 		raw := strings.TrimSpace(m.eFields[0].Value())
 		m.applyScopeLive(raw)
@@ -602,12 +627,12 @@ func (m *model) saveItem() {
 	case "agent":
 		tier := strings.ToLower(strings.TrimSpace(m.eFields[0].Value()))
 		if tier != "" && tier != "big" && tier != "medium" && tier != "small" {
-			m.eStatus = styleErr.Render("model tier must be big, medium, or small")
+			m.eStatus = styleErr.Render("model tier must be Big, Medium, or Small")
 			return
 		}
 		eff := strings.ToLower(strings.TrimSpace(m.eFields[1].Value()))
 		if eff != "" && eff != "low" && eff != "medium" && eff != "high" {
-			m.eStatus = styleErr.Render("thinking-level must be low, medium, or high")
+			m.eStatus = styleErr.Render("thinking-level must be Low, Medium, or High")
 			return
 		}
 		ov := config.AgentOverride{
@@ -637,9 +662,9 @@ func (m *model) saveItem() {
 		}
 		// Persist the (possibly edited) system prompt, preserving the frontmatter
 		// so tier/tools/etc. in the file are untouched.
-		if m.ePrompt != nil {
+		if len(m.ePrompts) > 0 {
 			d := m.roster.Agents[it.name]
-			body := m.ePrompt.Value()
+			body := m.ePrompts[0].Value()
 			full := "---\n" + d.Frontmatter + "---\n\n" + body
 			if !strings.HasSuffix(full, "\n") {
 				full += "\n"
@@ -665,11 +690,7 @@ func (m *model) viewEditor() string {
 		if i == m.eSel {
 			cur = styleAccent.Render("▸ ")
 		}
-		name := it.name
-		if it.kind == "agent" { // show subagent names capitalized (the config key stays lower-case)
-			name = core.CanonRole(it.name)
-		}
-		left.WriteString(fmt.Sprintf("%s%-10s %s\n", cur, it.kind, name))
+		left.WriteString(fmt.Sprintf("%s%-10s %s\n", cur, displayKind(it.kind), displayName(it)))
 	}
 
 	// Size the left box to its widest line (plus the border and a column of slack)
@@ -695,12 +716,26 @@ func (m *model) viewEditor() string {
 	m.eLeftWidth = leftTotal
 	m.eRightLeft = leftTotal + 2 // leftBox (width leftTotal) + the "  " separator
 	m.eFieldRows = m.eFieldRows[:0]
-	m.ePromptBot = -1
+	m.ePromptTops = m.ePromptTops[:0]
+	m.ePromptBots = m.ePromptBots[:0]
 
 	var right strings.Builder
 	if m.eSel >= 0 && m.eSel < len(m.eItems) && m.eFocus >= 0 {
 		it := m.eItems[m.eSel]
-		right.WriteString(styleMuted.Render("editing "+it.kind+" "+it.name) + "\n\n")
+		// Per-prompt height: split the room left after the fixed lines between the
+		// prompt boxes, honouring the user's chosen size but never overflowing.
+		ph := 0
+		if np := len(m.ePrompts); np > 0 {
+			statusLines := 0
+			if m.eStatus != "" {
+				statusLines = 2
+			}
+			fixed := 2 + 3*len(m.eFields) + 2*np + 1 + statusLines // header+blank, fields, per-prompt label+gap, hint, status
+			ph = clampInt((boxH-2-fixed)/np, 3, m.ePromptH)
+		}
+		row := contentTop // absolute terminal row of the next line written to the right pane
+		right.WriteString(styleMuted.Render("editing "+displayKind(it.kind)+" "+it.name) + "\n\n")
+		row += 2
 		labels := m.fieldLabels(it)
 		for i, f := range m.eFields {
 			marker := "  "
@@ -711,32 +746,25 @@ func (m *model) viewEditor() string {
 			if i < len(labels) {
 				lbl = labels[i]
 			}
-			// The input line sits one row below its label: label row = contentTop+2+3i.
-			m.eFieldRows = append(m.eFieldRows, contentTop+2+3*i+1)
+			m.eFieldRows = append(m.eFieldRows, row+1) // the input line sits below its label
 			right.WriteString(marker + lbl + "\n  " + f.View() + "\n\n")
+			row += 3
 		}
-		if m.ePrompt != nil {
-			// Fit the prompt box to the right pane: full usable width, and a height
-			// that honours the user's chosen size but never overflows the box.
-			m.ePrompt.SetWidth(maxInt(rightTotal-4, 16))
-			overhead := 2 + 3*len(m.eFields) + 2 + 1 // header + text fields + prompt label/hint + footer
-			if m.eStatus != "" {
-				overhead += 2
-			}
-			ph := clampInt(boxH-2-overhead, 3, m.ePromptH)
-			m.ePrompt.SetHeight(ph)
-			promptLabelRow := contentTop + 2 + 3*len(m.eFields)
-			m.eFieldRows = append(m.eFieldRows, promptLabelRow) // focus index == len(eFields)
-			m.ePromptBot = promptLabelRow + ph
+		for j, ta := range m.ePrompts {
+			ta.SetWidth(maxInt(rightTotal-4, 16))
+			ta.SetHeight(ph)
 			marker := "  "
-			if m.eFocus == m.promptIdx() {
+			if m.eFocus == len(m.eFields)+j {
 				marker = styleAccent.Render("▸ ")
 			}
-			boxLabel := "system prompt"
-			if it.kind == "personality" {
-				boxLabel = "personality"
+			lbl := "prompt"
+			if j < len(m.ePromptLabels) {
+				lbl = m.ePromptLabels[j]
 			}
-			right.WriteString(marker + boxLabel + "\n" + m.ePrompt.View() + "\n")
+			m.ePromptTops = append(m.ePromptTops, row)
+			m.ePromptBots = append(m.ePromptBots, row+ph)
+			right.WriteString(marker + lbl + "\n" + ta.View() + "\n\n")
+			row += 1 + ph + 1
 		}
 		right.WriteString(styleMuted.Render(m.editHint()))
 	} else {
@@ -760,25 +788,47 @@ func (m *model) fieldLabels(it eItem) []string {
 	case "scope":
 		return []string{"in-scope targets"}
 	case "tui":
-		return []string{it.name + " (true|false)"}
+		return []string{"customizable panes (true|false)", "close idle subagent panes (true|false)"}
 	case "role":
 		return []string{"model (provider/model-id)", "input $/1M", "output $/1M", "cache-read $/1M", "cache-write $/1M"}
-	case "personality":
-		return nil // only the personality prompt box, no text fields
 	}
-	// "agent" and "orchestrator": tier / thinking / max-context.
-	return []string{"model tier (big|medium|small)", "thinking-level", "max context tokens"}
+	// "agent" and "main": tier / thinking / max-context.
+	return []string{"model tier (Big|Medium|Small)", "thinking-level", "max context tokens"}
 }
 
-// editHint is the footer cheat-line for the field editor; it adapts to whether the
-// multi-line prompt box exists and is focused (there Enter inserts a newline, so
-// saving is Ctrl+S and the box resizes with alt+↑/↓).
+// displayKind is the capitalized section label shown in the left list.
+func displayKind(kind string) string {
+	switch kind {
+	case "tui":
+		return "TUI"
+	case "main":
+		return "Main"
+	default:
+		return capitalFirst(kind)
+	}
+}
+
+// displayName is the capitalized right-hand detail shown for an item in the left list.
+func displayName(it eItem) string {
+	switch it.kind {
+	case "agent":
+		return core.CanonRole(it.name) // subagent names capitalized (config key stays lower-case)
+	case "role":
+		return capitalFirst(it.name) // Big / Medium / Small
+	default:
+		return it.name
+	}
+}
+
+// editHint is the footer cheat-line for the field editor; it adapts to whether a
+// multi-line prompt box is focused (there Enter inserts a newline, so saving is
+// Ctrl+S, the box resizes with alt+↑/↓, and Ctrl+E opens the body in $EDITOR/vim).
 func (m *model) editHint() string {
-	if m.ePrompt == nil {
+	if len(m.ePrompts) == 0 {
 		return "Tab/↑↓ switch field · Enter save · Esc back"
 	}
-	if m.eFocus == m.promptIdx() {
-		return "editing prompt · Enter = newline · Ctrl+S save · alt+↑/↓ resize · Tab leave · Esc back"
+	if m.focusedPrompt() != nil {
+		return "editing prompt · Enter = newline · Ctrl+E vim · Ctrl+S save · alt+↑/↓ resize · Tab leave · Esc back"
 	}
 	return "Tab switch field · Enter or Ctrl+S save · Esc back"
 }
@@ -788,4 +838,74 @@ func exitLabel(editorOnly bool) string {
 		return "quit"
 	}
 	return "return"
+}
+
+// editorDoneMsg is delivered after the external editor (vim) process exits; it
+// carries the temp file to read back and which prompt box to load it into.
+type editorDoneMsg struct {
+	path string
+	j    int // index into m.ePrompts to reload
+	err  error
+}
+
+// editPromptInEditor writes the focused prompt box to a temp file and opens it in
+// the user's editor ($VISUAL, $EDITOR, else vim) for full modal editing, suspending
+// the TUI until it exits. The edited file is read back into the box (not yet saved
+// to disk — the user still presses Ctrl+S). This is the "vim" path for large bodies.
+func (m *model) editPromptInEditor() tea.Cmd {
+	ta := m.focusedPrompt()
+	if ta == nil {
+		return nil
+	}
+	j := m.promptAt(m.eFocus)
+	f, err := os.CreateTemp("", "oline-edit-*.md")
+	if err != nil {
+		m.eStatus = styleErr.Render("open editor: " + err.Error())
+		return nil
+	}
+	path := f.Name()
+	_, werr := f.WriteString(ta.Value())
+	if cerr := f.Close(); werr != nil || cerr != nil {
+		os.Remove(path)
+		m.eStatus = styleErr.Render("open editor: could not write the temp file")
+		return nil
+	}
+	name, args := editorCommand()
+	cmd := exec.Command(name, append(args, path)...) // #nosec G204 — operator's own editor
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return editorDoneMsg{path: path, j: j, err: err}
+	})
+}
+
+// applyExternalEdit folds the result of an external editor session back into the
+// prompt box (and always removes the temp file).
+func (m *model) applyExternalEdit(done editorDoneMsg) {
+	defer os.Remove(done.path)
+	if done.err != nil {
+		m.eStatus = styleErr.Render("editor exited with an error: " + done.err.Error())
+		return
+	}
+	data, err := os.ReadFile(done.path)
+	if err != nil {
+		m.eStatus = styleErr.Render("could not read back the edited file: " + err.Error())
+		return
+	}
+	if done.j < 0 || done.j >= len(m.ePrompts) {
+		return // the selection changed while the editor was open
+	}
+	m.ePrompts[done.j].SetValue(string(data))
+	m.eStatus = styleGreenRender("loaded edits from your editor — press Ctrl+S to save")
+}
+
+// editorCommand resolves the external editor: $VISUAL, then $EDITOR, else vim.
+func editorCommand() (string, []string) {
+	ed := strings.TrimSpace(os.Getenv("VISUAL"))
+	if ed == "" {
+		ed = strings.TrimSpace(os.Getenv("EDITOR"))
+	}
+	if ed == "" {
+		ed = "vim"
+	}
+	parts := strings.Fields(ed)
+	return parts[0], parts[1:]
 }
