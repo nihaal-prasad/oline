@@ -107,8 +107,13 @@ func TestBuildDecisionEnabledPrompt(t *testing.T) {
 	if !strings.Contains(on.System, "Automated assignment and gates") {
 		t.Error("decision-enabled orchestrator prompt should explain the automated gates")
 	}
+	// Option A: it keeps a capability summary (so it can plan + write good task
+	// prompts) but not the "spawn one by its name" tier roster.
+	if !strings.Contains(on.System, "Available specialists") {
+		t.Error("decision-enabled orchestrator should keep a capability summary of the specialists")
+	}
 	if strings.Contains(on.System, "Subagent model tiers") {
-		t.Error("decision-enabled orchestrator must NOT see the per-agent tier roster (hide specific agents)")
+		t.Error("decision-enabled orchestrator must not get the spawn-by-name tier roster")
 	}
 	off, _ := wire.Build(config.ModePentester, store, roster, false)
 	if strings.Contains(off.System, "Automated assignment and gates") {

@@ -150,12 +150,13 @@ func Build(mode config.Mode, store *config.Store, roster *agents.Roster, decisio
 	if orchCtx <= 0 {
 		orchCtx = contextForTier(eff, orchModel, orchTier)
 	}
-	// When the decision model is on, the orchestrator does NOT pick specialists (a
-	// router does) and must not see the per-agent roster; instead it is told the
-	// automated gates exist. Otherwise it gets the normal per-tier roster listing.
+	// When the decision model is on, the orchestrator still sees WHAT the specialists
+	// do (a capability summary, for planning and writing good task prompts) but does
+	// NOT pick one — a router assigns it — and is told the automated gates exist.
+	// Otherwise it gets the normal per-tier roster with the spawn-by-name mechanics.
 	sys := orchestratorSystem(roster.Orchestrator)
 	if decisionEnabled {
-		sys += decisionGatesPrompt()
+		sys += capabilityRoster(roster) + decisionGatesPrompt()
 	} else {
 		sys += tierRoster(roster, orchTier)
 	}
@@ -172,14 +173,33 @@ func Build(mode config.Mode, store *config.Store, roster *agents.Roster, decisio
 	return orch, resolver
 }
 
+// capabilityRoster lists the mode's specialists and what each does, so the
+// orchestrator can plan the workflow and write precise task descriptions when the
+// decision router is on. Unlike tierRoster it gives no "spawn one by its name"
+// mechanics and no tier-handoff advice, because the orchestrator does not pick the
+// specialist — the router does.
+func capabilityRoster(roster *agents.Roster) string {
+	var sb strings.Builder
+	sb.WriteString("\n\n# Available specialists\n")
+	sb.WriteString("These specialists exist and can be assigned work. You do NOT pick one — you describe each task and the right specialist is selected automatically — but knowing what they do helps you plan the engagement and write precise task descriptions:\n")
+	for _, name := range roster.Names() {
+		d := roster.Agents[name]
+		entry := core.CanonRole(name)
+		if desc := firstLine(d.Description); desc != "" {
+			entry += " — " + desc
+		}
+		fmt.Fprintf(&sb, "- %s\n", entry)
+	}
+	return sb.String()
+}
+
 // decisionGatesPrompt is appended to the orchestrator's system prompt when the
-// decision model is enabled. It replaces the per-tier roster (so no specialist names
-// are exposed) and tells the orchestrator that routing, finding triage, and judge
-// pre-screening are automatic.
+// decision model is enabled. It tells the orchestrator that specialist assignment,
+// finding triage, and judge pre-screening are automatic.
 func decisionGatesPrompt() string {
 	return "\n\n# Automated assignment and gates\n" +
 		"A fast automated system assists you; rely on it rather than working around it.\n" +
-		"- **Specialist assignment:** You do NOT choose or name specialists. For every `task`, describe the work fully and self-containedly in the prompt; the right specialist is assigned for you automatically. (`reprompt` still targets an agent you already started, by its id.)\n" +
+		"- **Specialist assignment:** You do NOT have to pick or name a specialist when starting a subagent. The `task` tool takes only a task description (no agent/role argument); describe the work fully and self-containedly and the right specialist from the list above is assigned for you automatically. (`reprompt` still targets an agent you already started, by its id.)\n" +
 		"- **Findings:** Findings you or your subagents record are automatically deduplicated, assigned a severity, and noise-filtered. If a finding is dropped as noise or out of scope, you will be told — if you believe that was wrong, have it re-recorded with stronger, concrete evidence.\n" +
 		"- **Verification:** When you `task` a verification of an exploit, it is automatically pre-screened for sufficient evidence before a verifier runs. If it does not meet the bar you will be told to gather stronger, reproducible proof first.\n"
 }
