@@ -2,8 +2,8 @@ package llm
 
 import "strings"
 
-// Some providers (e.g. Fireworks GLM / DeepSeek variants) stream a model's
-// chain-of-thought INLINE in the content, wrapped in <think>…</think> (or
+// Some providers / models stream a model's chain-of-thought INLINE in the
+// content, wrapped in <think>…</think> (or
 // <thinking>…</thinking>), instead of on a separate reasoning channel. Left as
 // plain content it would be indistinguishable from the answer — so the TUI
 // couldn't hide it with the "thoughts" toggle, and it would pollute history.

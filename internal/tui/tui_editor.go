@@ -36,7 +36,7 @@ func (m *model) openEditor() {
 		m.eItems = append(m.eItems, eItem{kind: "scope", name: scopeName})
 	}
 	// TUI preferences (terminal-UI, not engagement behavior) — one section.
-	m.eItems = append(m.eItems, eItem{kind: "tui", name: "preferences"})
+	m.eItems = append(m.eItems, eItem{kind: "tui", name: "User Preferences"})
 	// Main: the orchestrator (primary agent). One section holding its model tier,
 	// thinking level, max context, its system prompt, and the mode personality.
 	m.eItems = append(m.eItems, eItem{kind: "main", name: "Primary Agent Modifications"})

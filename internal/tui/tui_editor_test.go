@@ -87,7 +87,7 @@ func TestEditorTuiSingleSection(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("want exactly one TUI section, got %d", n)
 	}
-	m.eSel = findItem(m, "tui", "preferences")
+	m.eSel = findItem(m, "tui", "User Preferences")
 	m.buildFields()
 	if len(m.eFields) != 2 {
 		t.Fatalf("TUI section should edit both toggles (2 fields), got %d", len(m.eFields))

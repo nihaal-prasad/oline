@@ -71,11 +71,11 @@ type ChatReq struct {
 	ReasoningEffort string // low|medium|high -> reasoning_effort (when the model supports it)
 	MaxTokens       int
 	// SessionAffinity, when set, is sent as the `x-session-affinity` request header.
-	// On multi-replica serverless providers (e.g. Fireworks) prompt caches are
-	// per-replica, so a stable per-agent affinity key pins an agent's successive
-	// turns to the same replica and lets its growing, mostly-unchanged prompt prefix
-	// hit the (far cheaper) prompt cache instead of being reprocessed in full. It is
-	// only a routing hint and never changes the model's output.
+	// On multi-replica serverless providers, prompt caches are per-replica, so a stable
+	// per-agent affinity key pins an agent's successive turns to the same replica and
+	// lets its growing, mostly-unchanged prompt prefix hit the (far cheaper) prompt
+	// cache instead of being reprocessed in full. It is a routing hint honored by
+	// providers that support it, ignored by those that don't, and never changes output.
 	SessionAffinity string
 }
 
