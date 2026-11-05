@@ -57,6 +57,7 @@ make dist                 # cross-compiled binaries into the project root (or: p
 ## Run
 
 ```bash
+oline # Immediately get started. Opens up the engagement setup window.
 oline -mode pentester     # launch the TUI with the setup wizard
 oline -mode exploiter
 oline -edit               # open the model/provider editor and exit
