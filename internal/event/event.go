@@ -59,6 +59,16 @@ type Notice struct {
 	Text  string
 }
 
+// Message is a peer message one agent sent another via send_message. The TUI
+// renders it in the RECIPIENT's transcript so an inbound message is visible there
+// (the sender already sees its own send_message tool call). Delivery into the
+// recipient's mailbox is separate; this event is purely for display.
+type Message struct {
+	From core.AgentID
+	To   core.AgentID
+	Body string
+}
+
 // Usage reports token usage for one completed LLM turn (for cost tracking).
 // CachedPromptTokens is the subset of PromptTokens served from the prompt cache.
 type Usage struct {
@@ -123,6 +133,7 @@ func (AgentState) isEvent()   {}
 func (Spawned) isEvent()      {}
 func (UserQuestion) isEvent() {}
 func (Notice) isEvent()       {}
+func (Message) isEvent()      {}
 func (Usage) isEvent()        {}
 func (Finding) isEvent()      {}
 func (Summary) isEvent()      {}

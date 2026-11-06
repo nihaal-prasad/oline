@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/x/ansi"
@@ -37,6 +38,13 @@ const (
 	// hangs the agent indefinitely.
 	foregroundTimeout = 2 * time.Minute
 )
+
+// streamStallWarn is how long a turn may go with no sign of life from the model
+// (no connect, no token/reasoning/tool delta) before the agent posts a one-time
+// "still waiting" notice, so a slow or stalled provider doesn't look like a frozen
+// agent. It re-arms if output resumes and then stalls again. A var so tests can
+// lower it.
+var streamStallWarn = 30 * time.Second
 
 // LLM is the streaming client contract (satisfied by *llm.Client; mockable).
 type LLM interface {
@@ -928,6 +936,12 @@ type Agent struct {
 	sm      *stateMachine
 	started time.Time
 
+	// streamActivity is the UnixNano time of the last sign of life from the current
+	// LLM stream (connect established, or a token/reasoning/tool delta). The Run loop
+	// watches it to warn when a turn has gone silent, so a stalled provider doesn't
+	// look like a frozen agent. Atomic: written by the stream goroutine, read by Run.
+	streamActivity atomic.Int64
+
 	parent   core.AgentID // who spawned this agent ("" for the orchestrator / a directly-run agent)
 	holdsSem bool         // whether this spawned agent currently holds a concurrency slot
 	affinity string       // prompt-cache session-affinity key (stable for this agent's life)
@@ -1351,22 +1365,49 @@ func (a *Agent) Run(parent context.Context) Result {
 			err   error
 		}
 		sc := make(chan streamRes, 1)
+		a.streamActivity.Store(time.Now().UnixNano()) // start the stall clock at launch
 		go func() {
 			t, f, e := a.stream(streamCtx)
 			sc <- streamRes{t, f, e}
 		}()
+		// Watch for a silent turn: if the model produces nothing for streamStallWarn,
+		// post a one-time notice so a slow/stalled provider doesn't look like a frozen
+		// agent (the turn still runs, bounded by streamCtx). It re-arms if output
+		// resumes and then stalls again.
+		stall := time.NewTicker(streamStallWarn)
+		warnedStall := false
 		var text string
 		var frags []llm.ToolCallDelta
 		var serr error
-		select {
-		case r := <-sc:
-			text, frags, serr = r.text, r.frags, r.err
-			streamCancel()
-		case <-a.nudge:
-			streamCancel() // stop thinking
-			cancel()
-			<-sc // let the stream goroutine unwind
-			a.s.emit(event.Notice{Agent: a.id, Level: "info", Text: string(a.id) + ": stopped to read a new message"})
+		nudged := false
+	streamWait:
+		for {
+			select {
+			case r := <-sc:
+				text, frags, serr = r.text, r.frags, r.err
+				streamCancel()
+				break streamWait
+			case <-a.nudge:
+				streamCancel() // stop thinking
+				cancel()
+				<-sc // let the stream goroutine unwind
+				a.s.emit(event.Notice{Agent: a.id, Level: "info", Text: string(a.id) + ": stopped to read a new message"})
+				nudged = true
+				break streamWait
+			case <-stall.C:
+				if time.Since(time.Unix(0, a.streamActivity.Load())) >= streamStallWarn {
+					if !warnedStall {
+						a.s.emit(event.Notice{Agent: a.id, Level: "info",
+							Text: string(a.id) + ": still waiting for the model to respond (no output yet)…"})
+						warnedStall = true
+					}
+				} else {
+					warnedStall = false // output resumed; re-arm for the next stall
+				}
+			}
+		}
+		stall.Stop()
+		if nudged {
 			continue // re-issue the turn; drainMailbox at the top folds the message in
 		}
 
@@ -1489,6 +1530,7 @@ func (a *Agent) stream(ctx context.Context) (string, []llm.ToolCallDelta, error)
 	var frags []llm.ToolCallDelta
 	var usage *llm.Usage
 	for d := range ch {
+		a.streamActivity.Store(time.Now().UnixNano()) // any delta is a sign of life
 		switch {
 		case d.TextDelta != "":
 			text.WriteString(d.TextDelta)
@@ -1989,6 +2031,16 @@ func (a *Agent) doSendMessage(tc llm.ToolCall) (string, bool) {
 	if !a.s.router.send(Envelope{From: a.id, To: to, Kind: MsgPeer, Body: args.Body}) {
 		return reply(fmt.Sprintf("send_message: no agent %q is live", args.To), true)
 	}
+	// Surface the message in the RECIPIENT's transcript too. Without this the
+	// recipient's pane shows nothing on delivery (the message is folded into its
+	// LLM history silently), so it looks like the message was never received.
+	// Resolve to the target's canonical id so it lands in the right pane even when
+	// the sender used a different case.
+	dest := to
+	if t, ok := a.s.router.get(to); ok {
+		dest = t.id
+	}
+	a.s.emit(event.Message{From: a.id, To: dest, Body: args.Body})
 	return reply("message delivered to "+args.To, false)
 }
 
@@ -2272,6 +2324,18 @@ func (a *Agent) doAsk(ctx context.Context, tc llm.ToolCall) (string, bool) {
 				res := "user answered: " + env.Body
 				if len(meanwhile) > 0 {
 					res += "\n\nmessages that also arrived while waiting:\n" + strings.Join(meanwhile, "\n")
+				}
+				return res, false
+			}
+			// A user STEER supersedes the open question: the user has moved on and is
+			// redirecting rather than answering, so stop waiting and act on it instead
+			// of absorbing it silently (which would leave the agent blocked here until
+			// an answer that may never come — an apparent hang). Peer/result/job notices
+			// are not redirections, so they keep queuing until the question is answered.
+			if env.Kind == MsgSteer {
+				res := fmt.Sprintf("your question was not answered — the user sent this instead, so act on it now (ask again if you still need the answer):\n\n%s", envelopeText(env))
+				if len(meanwhile) > 0 {
+					res += "\n\nother messages that also arrived while waiting:\n" + strings.Join(meanwhile, "\n")
 				}
 				return res, false
 			}

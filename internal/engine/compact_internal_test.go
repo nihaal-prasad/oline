@@ -121,6 +121,31 @@ func TestCompactIfNeeded(t *testing.T) {
 	}
 }
 
+// TestCompactEmitsStartNotice proves compaction announces itself before it starts
+// summarizing. Compaction runs on the agent's goroutine with the agent still marked
+// Running and the summarizer output is not streamed to the pane, so without this
+// notice the agent looks frozen for the duration.
+func TestCompactEmitsStartNotice(t *testing.T) {
+	events := make(chan event.Event, 64)
+	getNotices := noticeCollector(events)
+	s := NewSession(tools.NewRegistry(), nil, nil, func(string) (AgentConfig, bool) { return AgentConfig{}, false }, events, 5)
+	a := newAgent("recon#1", AgentConfig{Role: "recon", MaxContextTokens: 100}, sumMock{text: "DENSE SUMMARY"}, "m", s, "", "")
+	bigHistory(a, 10)
+
+	a.compactIfNeeded(context.Background())
+	close(events)
+
+	var sawStart bool
+	for _, n := range getNotices() {
+		if n.Agent == "recon#1" && strings.Contains(n.Text, "compacting context") {
+			sawStart = true
+		}
+	}
+	if !sawStart {
+		t.Error("compaction emitted no start notice; the agent would look frozen while summarizing")
+	}
+}
+
 // TestCompactFallsBackToOwnModel checks that when the summarizer (small) model
 // fails, compaction retries with the agent's own model and still succeeds.
 func TestCompactFallsBackToOwnModel(t *testing.T) {

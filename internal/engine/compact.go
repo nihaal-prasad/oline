@@ -91,6 +91,14 @@ func (a *Agent) compactIfNeeded(ctx context.Context) {
 	}
 	older, tail := hist[:keepFrom], hist[keepFrom:]
 
+	// Tell the UI compaction is starting. It runs on this agent's goroutine with the
+	// agent still marked Running, and the summarizer's output is NOT streamed to this
+	// agent's transcript, so without this notice the pane shows no thoughts or tokens
+	// for however long summarization takes and looks frozen. A matching notice is
+	// emitted at the end (success or failure).
+	a.s.emit(event.Notice{Agent: a.id, Level: "info",
+		Text: fmt.Sprintf("%s: compacting context to stay within the %d-token limit (summarizing ~%d tokens; no output until this finishes)…", a.id, ceil, before)})
+
 	// Bound the summarize LLM call so a hung stream can't stall the agent loop
 	// indefinitely (the normal turn stream has the same backstop).
 	sctx, cancel := context.WithTimeout(ctx, llmTurnTimeout)

@@ -142,6 +142,17 @@ func (c *collector) countUserQuestions() int {
 	return n
 }
 
+func (c *collector) sawMessage(to core.AgentID, bodySub string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, e := range c.ev {
+		if m, ok := e.(event.Message); ok && m.To == to && containsStr(m.Body, bodySub) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *collector) sawToolOutput(sub string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -508,6 +519,51 @@ func TestMessagingAndAsk(t *testing.T) {
 	if n := c.countUserQuestions(); n != 1 {
 		t.Errorf("expected exactly 1 UserQuestion event (from `ask`; send_message no longer relays), got %d", n)
 	}
+}
+
+// TestAskUnblockedBySteer proves that in planner mode, where `ask` BLOCKS for a
+// user answer, a user STEER (not an answer) unblocks the ask so the agent acts on
+// it — instead of absorbing it silently and leaving the agent hung waiting for an
+// answer that never comes.
+func TestAskUnblockedBySteer(t *testing.T) {
+	mock := &mockLLM{steps: []step{
+		{toolID: "a1", toolName: "ask", toolArgs: `{"question":"Continue with the plan?"}`},
+		{text: "acting on the steer"},
+	}}
+	llmFor := func(string) (engine.LLM, string, error) { return mock, "m", nil }
+	cfgFor := func(string) (engine.AgentConfig, bool) { return engine.AgentConfig{}, false }
+
+	events := make(chan event.Event, 256)
+	c := newCollector()
+	go drain(events, c)
+
+	s := engine.NewSession(tools.NewRegistry(), mockSB{}, llmFor, cfgFor, events, 5)
+	s.Interactive = true
+	s.Mode = core.Planner // planner mode: ask blocks for a user answer
+	mainCfg := engine.AgentConfig{Role: "Main", Model: "mock/main", IsOrchestrator: true,
+		Tools: []string{"ask"}, System: "x"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan engine.Result, 1)
+	go func() { done <- s.Run(ctx, mainCfg, "go") }()
+
+	// Wait until the question has been asked (ask is now blocking).
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && c.countUserQuestions() == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if c.countUserQuestions() == 0 {
+		t.Fatal("ask did not emit a UserQuestion (it did not block as expected)")
+	}
+
+	if !s.Router().Send(engine.Envelope{From: "User", To: core.Main, Kind: engine.MsgSteer, Body: "do X instead"}) {
+		t.Fatal("steer to the asking orchestrator failed")
+	}
+	waitText(t, c, "acting on the steer") // the steer unblocked the ask
+
+	cancel()
+	close(events)
+	<-done
 }
 
 func waitState(s *engine.Session, id core.AgentID, want core.State, timeout time.Duration) bool {

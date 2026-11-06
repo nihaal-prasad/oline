@@ -56,4 +56,11 @@ func TestSendMessageIsAToolCall(t *testing.T) {
 	if !c.sawToolOutput("message delivered") {
 		t.Error("send_message did not emit its delivery result as tool output")
 	}
+	// The recipient must also get a Message event so the message is visible in ITS
+	// pane — otherwise a delivered message looks like it was never received.
+	// The recipient id is canonicalized ("probe" -> "Probe#1"); the Message event
+	// must carry that canonical id so it lands in the right pane.
+	if !c.sawMessage("Probe#1", "what's your status?") {
+		t.Error("send_message did not emit an event.Message to the recipient (inbound message not surfaced in its pane)")
+	}
 }

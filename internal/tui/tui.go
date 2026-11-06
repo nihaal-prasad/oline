@@ -3308,7 +3308,15 @@ func (m *model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.status = "answer sent to " + string(to)
 				}
 			}
-			m.router.Send(engine.Envelope{From: "User", To: to, Kind: kind, Body: text})
+			if !m.router.Send(engine.Envelope{From: "User", To: to, Kind: kind, Body: text}) {
+				// Delivery failed: the target agent is no longer live (finished/killed).
+				// Don't pretend it was delivered — tell the user and keep their text.
+				if kind == engine.MsgUserAnswer {
+					m.awaitingAnswer[to] = true // undo the optimistic clear above
+				}
+				m.status = string(to) + " is no longer live — message not delivered"
+				return m, nil
+			}
 			m.log.userMsg(to, text)
 			m.tr(to).addStyled("you → "+string(to)+": "+text, styleAccent)
 			m.refreshFor(to)
@@ -3939,6 +3947,17 @@ func (m *model) mutate(ev event.Event) {
 			t.finalizeOpen()
 			m.markDirty(e.Child)
 		}
+	case event.Message:
+		// An inbound peer message (send_message from another agent). Show it in the
+		// RECIPIENT's pane as a styled line and render the body as markdown, so a
+		// delivered message is visible instead of silently folded into history.
+		t := m.tr(e.To)
+		t.addStyled("← message from "+string(e.From)+":", styleAccent)
+		if strings.TrimSpace(e.Body) != "" {
+			t.appendText(e.Body)
+			t.finalizeOpen()
+		}
+		m.markDirty(e.To)
 	case event.UserQuestion:
 		// Track this agent as awaiting an answer. Additive (not a reset) so that
 		// several subagents can have open questions at once — each entry is cleared

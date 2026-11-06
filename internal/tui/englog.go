@@ -128,6 +128,9 @@ func (l *englog) log(ev event.Event) {
 			who = core.Main
 		}
 		l.writeEntry(who, "notice:"+e.Level, e.Text)
+	case event.Message:
+		l.flush(e.To)
+		l.writeEntry(e.To, "msg←", string(e.From)+": "+e.Body)
 	case event.Finding:
 		l.flush(e.Agent)
 		detail := e.Title
