@@ -126,16 +126,15 @@ tui:                         # interface preferences (not engagement behavior)
   must exist in `models.yml` with a usable API key, or oline refuses to start. The
   wizard prompts for them on the first run, or use `oline -edit`. **`decision`** is
   optional (blank = disabled): a System-1 decision model that enables finding
-  triage/dedup, judge pre-screening, a subagent progress detector, and task routing —
-  see [AGENTS.md](AGENTS.md#decision-model-optional). It is validated and probed at
-  engagement start; if it is unset or unreachable the features stay off and oline runs
-  exactly as before.
+  triage/dedup, judge pre-screening, a subagent progress detector, and task routing
+  (see [AGENTS.md](AGENTS.md#decision-model-optional)). It is validated and probed at
+  engagement start; if unset or unreachable the features stay off.
 - **maxConcurrency** caps how many agents run at once, the orchestrator included,
   so at the default of 5 up to 4 subagents run alongside it. Background `bash_bg`
   jobs are not counted.
 - **orchestrator** sets the tier, thinking level, and context ceiling for the
-  orchestrator (Main). It defaults to the `medium` tier at `high` thinking —
-  strong planning at a lower cost than `big`. `maxContextTokens: 0` auto-sizes the
+  orchestrator (Main). It defaults to the `medium` tier at `high` thinking: strong
+  planning at a lower cost than `big`. `maxContextTokens: 0` auto-sizes the
   compaction ceiling to a fraction of the model's window.
 - **budget.maxCostUSD** caps engagement spend in US dollars. At the cap, oline
   pauses all agents; raise the value or resume with `Ctrl-b R`. 0 disables it.
@@ -242,7 +241,7 @@ You can resume onto a **brand-new sandbox** (a fresh WSL distro or QEMU VM), not
 the original environment. When you do, oline also restores the prior engagement's
 workspace files into the new sandbox from its host backup bundle
 (`<root>/backups/<engagement>.tar.gz`), so the agents resume with the earlier
-artifacts and loot in place — as long as a backup exists (backups must have been
+artifacts and loot in place, if a backup exists (backups must have been
 enabled). Resuming onto a persisted QEMU VM instead keeps its own on-disk workspace.
 
 Resuming **never overwrites the previous engagement's backup**. Before the resumed
@@ -261,9 +260,9 @@ API keys redacted.
 ## Audit log
 
 Alongside the activity log, oline keeps a tamper-evident command log at
-`<root>/audit/<engagement>.audit.jsonl`. Every command run during the engagement —
+`<root>/audit/<engagement>.audit.jsonl`. Every command run during the engagement,
 by an agent (`bash`, `bash_bg`, `revshell`) or by you in your own shell/terminal
-panes — is appended as one JSON record carrying who ran it, when, and what. Each
+panes, is appended as one JSON record carrying who ran it, when, and what. Each
 record's SHA-256 hash covers the previous record's hash, forming a chain: altering,
 inserting, removing, or reordering any entry breaks the chain from that point on. The
 log lives on the host (never inside the sandbox), so a compromised target cannot

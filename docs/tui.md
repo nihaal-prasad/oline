@@ -20,8 +20,8 @@ The wizard asks each setting in order, skipping steps that don't apply; Enter ad
    are unset). Up/down or Tab move, left/right or Space toggle, Enter saves.
 3. **API key**: shown only when a chosen model's provider has no key. Saved to `secrets.yml`.
 4. **Start**: new engagement or resume.
-5. **Environment**: pick a sandbox. Lists existing environments to reuse — your WSL
-   distros and any saved QEMU VMs from prior engagements (marked "saved VM") — plus two
+5. **Environment**: pick a sandbox. Lists existing environments to reuse (your WSL
+   distros and any saved QEMU VMs from prior engagements, marked "saved VM"), plus two
    create actions: "Create a new oline-managed Debian WSL distro" and "Create a new
    oline-managed Debian QEMU VM". Selecting a saved QEMU VM resumes its disk with the
    workspace and tooling it had; selecting the QEMU create entry boots a brand-new
@@ -38,7 +38,7 @@ The wizard asks each setting in order, skipping steps that don't apply; Enter ad
      name a distro, point oline at a Debian rootfs tarball to import instead.
 6. **Resume / import**: when you chose "resume" at the Start step, pick which saved
    engagement to continue, then choose whether to load its history. This appears for a
-   reused WSL distro and also for a **freshly created** WSL distro or QEMU VM — you can
+   reused WSL distro and also for a **freshly created** WSL distro or QEMU VM: you can
    resume a previous engagement onto a brand-new sandbox, and oline restores its
    workspace files from the host backup bundle so the agents pick up where they left
    off (for WSL you may also import an engagement from a host archive). A saved QEMU VM
@@ -46,7 +46,7 @@ The wizard asks each setting in order, skipping steps that don't apply; Enter ad
 7. **Scope**: pentester, the in-scope targets as free text (IPs, CIDRs, and domains
    parsed out; IPs and CIDRs drive the firewall, domains feed tool checks and
    reporting). Exploiter, the application to analyze (a local path, or a URL/name for
-   the installer to fetch). Programmer, the project/source to work on (optional — the
+   the installer to fetch). Programmer, the project/source to work on (optional; the
    goal can describe what to build); agents stay network-isolated in exploiter and
    programmer modes either way.
 8. **Goal**: what the engagement should achieve. When resuming, the saved goal is

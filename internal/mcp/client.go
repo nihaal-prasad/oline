@@ -272,9 +272,7 @@ func (c *Client) CallTool(ctx context.Context, tool string, args json.RawMessage
 	}
 	var b strings.Builder
 	for _, part := range res.Content {
-		if part.Type == "text" {
-			b.WriteString(part.Text)
-		} else if part.Text != "" {
+		if part.Text != "" { // covers type=="text" and any part that carries text
 			b.WriteString(part.Text)
 		} else {
 			fmt.Fprintf(&b, "[%s content omitted]", part.Type)

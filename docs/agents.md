@@ -60,12 +60,12 @@ Red-team **tool development**: generate new code from scratch, or modify existin
 source the operator copied into the workspace. The orchestrator coordinates 6
 subagents.
 
-The "scope" here is the project/source to work on (optional — the goal can describe
+The "scope" here is the project/source to work on (optional; the goal can describe
 what to build). There is no network target: the code agents are isolated and build
 **offline**, so toolchains and dependencies are provisioned by the installer first.
 Only the installer (install, runs as root) and the researcher (look-ups) reach the
 internet. Existing source is brought in with the "copy a host folder into the
-workspace" step; in this mode that copy is **writable** so agents can edit it — the
+workspace" step; in this mode that copy is **writable** so agents can edit it. The
 operator's original host files are a separate copy and are never changed.
 
 | subagent | role |
@@ -102,8 +102,8 @@ Subagents can also use `send_message` and `ask`.
 ## Tools
 
 Each subagent only sees the tools on its allow-list. You can add your own agents and
-tools via config — a shell-command tool, a Go tool, or an external MCP tool server
-(oline is an MCP client); see [extending.md](extending.md).
+tools via config (a shell-command tool, a Go tool, or an external MCP tool server;
+oline is an MCP client); see [extending.md](extending.md).
 
 Sandbox and file tools (run inside the sandbox):
 
@@ -173,47 +173,50 @@ one, and you choose which model backs each tier (see
 [configuration.md](configuration.md)). All three must be set before an engagement
 starts.
 
-- `big`: the strongest work — exploiters, thinkers, and critiques.
+- `big`: the strongest work (exploiters, thinkers, critiques).
 - `medium`: balanced work (for example recon, enumerator, installer, reporter).
-- `small`: summarizers, and context compaction.
+- `small`: summarizers and context compaction.
 
 Set an agent's tier in its frontmatter (`tier:`), in `config.yml`
 (`agents.<name>.tier`), or in the editor.
 
-The orchestrator (Main) runs on a configurable tier too — **by default the `medium`
-tier at a high thinking level**, strong planning at a lower cost than `big`. Change
+The orchestrator (Main) runs on a configurable tier too, by default the `medium`
+tier at a high thinking level: strong planning at a lower cost than `big`. Change
 it with the `orchestrator:` block in `config.yml` or the editor's **Main** section
 (see [configuration.md](configuration.md)).
 
 ## Decision model (optional)
 
-A fourth, **optional** tier — `decision` — is a System-1 decision model: it reads a
+A fourth, **optional** tier, `decision`, is a System-1 decision model: it reads a
 document and answers typed questions (multiple-choice, yes/no, graded-scale) with
 calibrated probabilities and generates no prose. It is model- and provider-agnostic
 (any OpenAI-compatible `/decisions` endpoint). Leave it blank to disable it.
 
-It is validated and probed once at engagement start. **If it is set and reachable**,
-four behaviors switch on and the orchestrator is told they exist:
+When set and valid, four behaviors switch on and the orchestrator is told they exist:
 
-1. **Finding triage + dedup** — each `record_finding` is assigned a severity,
+1. **Finding triage + dedup**: each `record_finding` is assigned a severity,
    duplicates are merged into the existing finding, and noise is dropped (a dropped
    finding is reported to the orchestrator).
-2. **Judge pre-screen** — a verification task is screened for sufficient evidence
+2. **Judge pre-screen**: a verification task is screened for sufficient evidence
    before the `judge` runs; the decision model, not the orchestrator, decides whether
    the judge is called, and the judge is never aware of the gate.
-3. **Progress detector** — a subagent's progress toward the goal is graded after 1/3
+3. **Progress detector**: a subagent's progress toward the goal is graded after 1/3
    and 2/3 of its time budget; if it looks stuck, the orchestrator is notified and the
    subagent is nudged to refocus.
-4. **Task routing** — the orchestrator no longer names a specialist; it describes the
+4. **Task routing**: the orchestrator no longer names a specialist; it describes the
    task and the decision model assigns the right subagent (constrained to the current
    mode's roster).
 
-**If it is unset or unreachable**, none of this is active, the orchestrator is never
-told these features exist, and oline behaves exactly as it does without a decision
-model. All four gates also fail open at runtime: a transient decision-model outage
-never drops a finding, blocks the judge, or kills an agent. Documents too large for
-the decision model's context window are compacted (by the `small`-tier summarizer)
-first.
+It is probed once at engagement start. A definitive failure (the provider does not
+serve `/decisions`, or rejects the model or key) disables the features; a transient
+or cold-start probe failure does not, since the model warms up on first use and every
+gate fails open if it stays unreachable.
+
+When it is unset (or disabled by a definitive probe failure), none of this is active
+and the orchestrator is never told these features exist. At runtime all four gates
+fail open: a decision-model outage never drops a finding, blocks the judge, or kills
+an agent. A document too large for the decision model's context window is compacted
+first (by the `small`-tier summarizer).
 
 ## Context auto-compaction
 

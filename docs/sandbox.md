@@ -72,7 +72,7 @@ offers, besides any WSL distros:
   13 cloud image once, verifies it against the published `SHA512SUMS`, and caches it
   under `<root>/images` (the entry says it downloads the base on first use until
   then). Every new engagement boots a fresh disposable overlay on this one pristine
-  base, so selecting it always creates a brand-new instance — engagements never share
+  base, so selecting it always creates a brand-new instance; engagements never share
   state, the base is never written to, and a prior disk is never reused or
   overwritten (to reuse one, persist it and use Resume). The wizard asks how many GB
   of disk to give the VM (default 25), how many virtual CPUs (default 4), and how much
@@ -97,7 +97,7 @@ tooling intact. Resume needs a clean stop; a crash or force-kill cannot persist 
 disk (the host workspace backup still does). Set `qemu.disposable: true` if you want
 a throwaway VM whose overlay is discarded when the engagement stops.
 Each saved VM appears as a reusable environment in the wizard's environment step
-(marked "saved VM"), alongside the "create a new Debian QEMU VM" entry — selecting a
+(marked "saved VM"), alongside the "create a new Debian QEMU VM" entry; selecting a
 saved VM resumes it, exactly as reusing a WSL distro does.
 
 ## Destroying an environment
@@ -132,7 +132,7 @@ yourself or point a resume at an existing one.
 
 The setup wizard's optional **Data folder** step copies a host folder into the
 workspace (as a read-only subdirectory) before agents start, so they can read
-supplied inputs. Only a copy enters the guest — the original host files are never
+supplied inputs. Only a copy enters the guest; the original host files are never
 exposed, so agents cannot modify them.
 
 ## VPN

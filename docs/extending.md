@@ -45,16 +45,15 @@ A tool is a capability an agent calls. Grant a tool to an agent by listing its n
 in that agent's `tools:` frontmatter (a built-in agent or your own). There are three
 ways to add one:
 
-- a **command tool** — a shell command, declared in config, that runs inside the
+- a **command tool**: a shell command, declared in config, that runs inside the
   sandbox (no rebuild);
-- a **Go tool** — the `tools.Tool` interface implemented in the extension package
+- a **Go tool**: the `tools.Tool` interface implemented in the extension package
   (rebuild), for logic beyond a single command;
-- an **MCP tool server** — an external [Model Context Protocol](https://modelcontextprotocol.io)
+- an **MCP tool server**: an external [Model Context Protocol](https://modelcontextprotocol.io)
   server, declared in config, whose tools oline connects to and exposes (no rebuild).
 
 The first two run **inside the sandbox** under the calling agent's egress policy. MCP
-servers run **on the host**, outside the sandbox — see the trust note in that
-section.
+servers run **on the host**, outside the sandbox (see the trust note below).
 
 ### Command tools (config files, no rebuild)
 
@@ -133,8 +132,8 @@ the sandbox handle, and the agent's egress policy. Run any command work through
 
 oline is a [Model Context Protocol](https://modelcontextprotocol.io) **client**: it
 can connect to external MCP tool servers and expose their tools to agents. This plugs
-oline into the whole MCP ecosystem — filesystem, git, HTTP, ticketing, and your
-organization's own internal MCP servers — without writing any code.
+oline into the whole MCP ecosystem (filesystem, git, HTTP, ticketing, and your
+organization's own internal MCP servers) without writing any code.
 
 Declare servers in `~/oline/config/<mode>/config.yml` under `mcpServers:`. oline
 spawns each server at engagement start (stdio transport), runs the MCP handshake,
@@ -163,14 +162,14 @@ for all), and `timeoutSeconds` (per tool call; default 120).
 At engagement start, oline prints each connected server and the exact tool names it
 exposes (for example `fs__read_file`, `jira__search_issues`) to the orchestrator's
 transcript. **Grant a tool to an agent by listing that `<server>__<tool>` name in the
-agent's `tools:` frontmatter** — only agents that list it can call it. A server that
+agent's `tools:` frontmatter**: only agents that list it can call it. A server that
 fails to connect is reported and skipped; the engagement proceeds without it. The
 server processes are shut down when the engagement ends.
 
-> **Trust boundary — read this.** Unlike command and Go tools, an MCP server runs on
+> **Trust boundary (read this).** Unlike command and Go tools, an MCP server runs on
 > the **host**, outside the sandbox and its per-agent egress firewall (the same place
 > `web_search`/`web_fetch` run). A granted MCP tool can therefore reach whatever the
-> server can reach — the host filesystem, internal networks, third-party APIs —
+> server can reach (the host filesystem, internal networks, third-party APIs),
 > regardless of an agent's scope restrictions. Treat an MCP server as an
 > operator-trusted integration: only configure servers you trust, and grant their
 > tools only to the agents that genuinely need them. In **watcher mode** MCP tools are

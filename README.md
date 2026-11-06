@@ -11,7 +11,7 @@ Three modes:
 
 - **Pentester**: Run a penetration test against a network using AI agents.
 - **Exploiter**: Develop fully-weaponized exploits using AI agents.
-- **Programmer**: Develop red-team tooling — generate new code or modify existing source — using AI agents.
+- **Programmer**: Develop red-team tooling (generate new code or modify existing source) using AI agents.
 
 > **Authorized use only.** Run oline only against systems you own or have written
 > permission to test. The author is not responsible for illegal use.

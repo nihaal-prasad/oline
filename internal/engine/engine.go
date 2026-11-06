@@ -1249,7 +1249,11 @@ func (a *Agent) checkBudget() {
 		}
 		a.mu.Unlock()
 		if spiral >= 0 {
-			go a.progressCheck()
+			// Track it in the router wg: progressCheck can emit (a Notice / a peer
+			// message), and Session.Run waits on wg before the caller closes Events, so
+			// an untracked emitter could send on a closed channel and panic.
+			a.s.router.wg.Add(1)
+			go func() { defer a.s.router.wg.Done(); a.progressCheck() }()
 		}
 	}
 
@@ -1360,10 +1364,12 @@ func (a *Agent) Run(parent context.Context) Result {
 			return Result{Agent: a.id, Killed: true}
 		}
 		a.drainMailbox()
-		a.compactIfNeeded(parent) // keep the conversation under this agent's context ceiling
 
 		stepCtx, cancel := context.WithCancel(parent)
 		a.setCancel(cancel)
+		// Compact under stepCtx (not parent) so Pause/Kill, which cancel the step,
+		// interrupt a long summarizer call instead of letting it run to its timeout.
+		a.compactIfNeeded(stepCtx) // keep the conversation under this agent's context ceiling
 
 		// Drop any stale nudge so only a message arriving DURING this turn interrupts it.
 		select {
@@ -1515,6 +1521,12 @@ func (a *Agent) Run(parent context.Context) Result {
 
 		for i, tc := range calls {
 			if a.gate() {
+				// Killed at the gate: pair this and every remaining unrun tool_call with
+				// an aborted result so the assistant's tool_calls turn is never left with
+				// missing results (which a provider 400s on if the history is reused).
+				for _, rem := range calls[i:] {
+					a.appendHistory(toolMessage(rem, "[aborted: agent stopped before this tool ran]"))
+				}
 				cancel()
 				a.emitState(core.Killed)
 				return Result{Agent: a.id, Killed: true}
@@ -1649,6 +1661,13 @@ func (a *Agent) dispatchWatched(ctx context.Context, tc llm.ToolCall) (content s
 		select {
 		case r := <-done:
 			return r.content, r.isErr
+		case <-ctx.Done():
+			// The step was cancelled (kill / pause / engagement end). A well-behaved
+			// tool observes ctx and returns on its own (the next select picks up `done`);
+			// but if one ignores ctx, stop waiting on it so Run can return and release
+			// the agent's concurrency slot rather than wedging here forever. The dispatch
+			// goroutine finishes into the buffered `done` channel and is GC'd.
+			return "[aborted: agent stopped before this tool finished]", true
 		case <-t.C:
 			a.s.notifyLive(event.Notice{Agent: a.id, Level: "info",
 				Text: fmt.Sprintf("%s: %s still running (%ds elapsed)…", a.id, tc.Name, int(time.Since(start).Seconds()))})
@@ -1989,12 +2008,14 @@ func (a *Agent) doBash(tc llm.ToolCall) (string, bool) {
 	default:
 	}
 
+	fgTimer := time.NewTimer(foregroundTimeout)
+	defer fgTimer.Stop()
 	select {
 	case r := <-inline:
 		return fin(r)
 	case <-a.nudge:
 		return promote(fmt.Sprintf("a message arrived, so you were woken early. The command is still running in the background as %s (its output streams live; call wait or you'll be notified when it finishes, and stop it with StopCommands). Read the new message now, then continue.", jobID))
-	case <-time.After(foregroundTimeout):
+	case <-fgTimer.C:
 		return promote(fmt.Sprintf("command still running after %s — moved to background %s (it keeps running; its output streams live, and you'll be notified when it finishes or can call wait). Stop it explicitly with StopCommands.",
 			foregroundTimeout, jobID))
 	}

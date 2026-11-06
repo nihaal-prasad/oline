@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
@@ -275,6 +276,12 @@ type AgentOverride struct {
 // Store holds the merged effective config plus the resolved on-disk locations
 // and the loaded secrets, so later Save* calls persist to the right place.
 type Store struct {
+	// mu guards eff and secrets, which the TUI editor mutates (Save*/Set*) while the
+	// engine reads them concurrently — the wire resolver calls Effective() on every
+	// spawn and ResolveKey() on every LLM-client build, and the editor can change a
+	// provider/key/tier mid-engagement (an intended feature). Without this, a concurrent
+	// map read+write is a fatal "concurrent map read and map write" that aborts the run.
+	mu        sync.RWMutex
 	mode      Mode
 	eff       Root
 	root      string            // host oline root ($OLINE_HOME or ~/oline)
@@ -629,8 +636,35 @@ func (s *Store) editSharedModels(mutate func(root map[string]any)) error {
 	return s.editYAMLFile(s.sharedModelsPath(), mutate)
 }
 
-// Effective returns the merged configuration.
-func (s *Store) Effective() Root { return s.eff }
+// Effective returns the merged configuration. The returned Root is a snapshot safe
+// to read from another goroutine: the two maps that Save*/Set* mutate (Providers,
+// Agents) are copied under the read lock, and each provider's Models slice is copied
+// too (SaveModelCost edits a model's Cost in place). Every other field is a value
+// field copied by the struct assignment, so a concurrent editor write never races a
+// reader (the wire resolver calls this on every spawn).
+func (s *Store) Effective() Root {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	r := s.eff
+	if s.eff.Providers != nil {
+		pm := make(map[string]Provider, len(s.eff.Providers))
+		for k, p := range s.eff.Providers {
+			if p.Models != nil {
+				p.Models = append([]ModelDef(nil), p.Models...)
+			}
+			pm[k] = p
+		}
+		r.Providers = pm
+	}
+	if s.eff.Agents != nil {
+		am := make(map[string]AgentOverride, len(s.eff.Agents))
+		for k, v := range s.eff.Agents {
+			am[k] = v
+		}
+		r.Agents = am
+	}
+	return r
+}
 
 // Mode returns the store's mode.
 func (s *Store) Mode() Mode { return s.mode }
@@ -648,6 +682,16 @@ func (s *Store) BackupDir() string { return filepath.Join(s.root, "backups") }
 // (env:NAME or secret:NAME) and falling back to a key saved for that provider
 // in secrets.yml. It never logs or returns the key as part of an error.
 func (s *Store) ResolveKey(provider string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.resolveKeyLocked(provider)
+}
+
+// resolveKeyLocked is ResolveKey's body; the caller must hold s.mu (R or W). It
+// exists so KnownSecrets can resolve keys while already holding the read lock
+// without re-entering it (a non-reentrant RWMutex would deadlock against a waiting
+// writer).
+func (s *Store) resolveKeyLocked(provider string) (string, error) {
 	p, ok := s.eff.Providers[provider]
 	if !ok {
 		return "", fmt.Errorf("config: unknown provider %q", provider)
@@ -687,6 +731,8 @@ func (s *Store) ResolveKey(provider string) (string, error) {
 // resolve (from secrets.yml and env refs), for scrubbing from host-side logs.
 // Best-effort and deduplicated; it never returns empty or trivially short values.
 func (s *Store) KnownSecrets() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	seen := map[string]bool{}
 	var out []string
 	add := func(v string) {
@@ -699,7 +745,7 @@ func (s *Store) KnownSecrets() []string {
 		add(v)
 	}
 	for name := range s.eff.Providers {
-		if v, err := s.ResolveKey(name); err == nil {
+		if v, err := s.resolveKeyLocked(name); err == nil {
 			add(v)
 		}
 	}
@@ -709,6 +755,8 @@ func (s *Store) KnownSecrets() []string {
 // SaveSecret persists an API key for a provider to ~/oline/config/secrets.yml
 // (mode 0600) and updates the in-memory store.
 func (s *Store) SaveSecret(provider, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.secrets == nil {
 		s.secrets = map[string]string{}
 	}
@@ -724,6 +772,8 @@ func (s *Store) SaveSecret(provider, key string) error {
 // (~/oline/config/models.yml) and updates the in-memory store. It never writes an
 // API key — keys go to secrets.yml via SaveSecret.
 func (s *Store) SaveProvider(name, baseURL string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	p, ok := s.eff.Providers[name]
 	if !ok {
 		return fmt.Errorf("config: unknown provider %q", name)
@@ -742,6 +792,8 @@ func (s *Store) SaveProvider(name, baseURL string) error {
 // updated cost — keeping every other model and all of this model's other fields
 // (id, name, context window, thinking spec) intact.
 func (s *Store) SaveModelCost(provider, modelID string, cost Cost) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	p, ok := s.eff.Providers[provider]
 	if !ok {
 		return fmt.Errorf("config: unknown provider %q", provider)
@@ -770,6 +822,8 @@ func (s *Store) SaveModelCost(provider, modelID string, cost Cost) error {
 // gets conservative empty defaults (the engine then uses its fallbacks). It
 // persists to the shared models.yml and reports whether it added the model.
 func (s *Store) EnsureModel(provider, modelID string) (added bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	p, ok := s.eff.Providers[provider]
 	if !ok {
 		return false, fmt.Errorf("config: unknown provider %q", provider)
@@ -829,6 +883,8 @@ func (s *Store) writeProviderEntry(provider string, fields map[string]any) error
 // DefineProvider sets a provider in the in-memory store only (no disk write). Used
 // by the setup wizard before it persists, and by tests.
 func (s *Store) DefineProvider(name string, p Provider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.eff.Providers == nil {
 		s.eff.Providers = map[string]Provider{}
 	}
@@ -840,6 +896,8 @@ func (s *Store) DefineProvider(name string, p Provider) {
 // is how a provider is configured: oline ships none by default. The name is the
 // selector prefix, so it must be non-empty with no space or '/'.
 func (s *Store) AddProvider(name, baseURL, apiKeyRef string, models []ModelDef) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	name = strings.TrimSpace(name)
 	if name == "" || strings.ContainsAny(name, "/ \t") {
 		return fmt.Errorf("config: provider name must be non-empty with no spaces or '/'")
@@ -851,7 +909,10 @@ func (s *Store) AddProvider(name, baseURL, apiKeyRef string, models []ModelDef) 
 	}
 	p.APIKeyRef = strings.TrimSpace(apiKeyRef)
 	p.Models = models
-	s.DefineProvider(name, p)
+	if s.eff.Providers == nil {
+		s.eff.Providers = map[string]Provider{}
+	}
+	s.eff.Providers[name] = p // inline of DefineProvider: avoid re-taking the write lock
 	return s.writeProviderEntry(name, map[string]any{
 		"baseUrl":   p.BaseURL,
 		"api":       p.API,
@@ -888,6 +949,8 @@ func (s *Store) ModelRoles() ModelRoles { return s.eff.ModelRoles }
 // SetModelRoles sets the in-memory tier->model mapping without persisting it
 // (used by the setup wizard before it saves, and by tests).
 func (s *Store) SetModelRoles(big, medium, small string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.eff.ModelRoles = ModelRoles{Big: big, Medium: medium, Small: small}
 }
 
@@ -901,6 +964,8 @@ func (s *Store) ModelsConfigured() bool {
 // (~/oline/config/models.yml) and updates the in-memory store. Tier roles are
 // global to the user's setup, so they apply to every mode.
 func (s *Store) SaveModelRole(tier, selector string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	switch strings.ToLower(tier) {
 	case "big":
 		s.eff.ModelRoles.Big = selector
@@ -926,6 +991,8 @@ func (s *Store) SaveModelRole(tier, selector string) error {
 // SaveTUICustomizablePanes persists the Customizable Panes TUI setting into the
 // user config layer (~/oline/config/<mode>/config.yml) and applies it in memory.
 func (s *Store) SaveTUICustomizablePanes(v bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.eff.TUI.CustomizablePanes = v
 	return s.editYAMLFile(filepath.Join(s.userDir, "config.yml"), func(root map[string]any) {
 		tui, _ := root["tui"].(map[string]any)
@@ -939,12 +1006,18 @@ func (s *Store) SaveTUICustomizablePanes(v bool) error {
 
 // SetTUICloseIdleSubagentPanes applies the close-idle-panes setting in memory only
 // (no disk write), for callers/tests that just need the effective value changed.
-func (s *Store) SetTUICloseIdleSubagentPanes(v bool) { s.eff.TUI.CloseIdleSubagentPanes = v }
+func (s *Store) SetTUICloseIdleSubagentPanes(v bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.eff.TUI.CloseIdleSubagentPanes = v
+}
 
 // SaveTUICloseIdleSubagentPanes persists the close-idle-subagent-panes TUI setting
 // into the user config layer (~/oline/config/<mode>/config.yml) and applies it in
 // memory. Mirrors SaveTUICustomizablePanes.
 func (s *Store) SaveTUICloseIdleSubagentPanes(v bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.eff.TUI.CloseIdleSubagentPanes = v
 	return s.editYAMLFile(filepath.Join(s.userDir, "config.yml"), func(root map[string]any) {
 		tui, _ := root["tui"].(map[string]any)
@@ -962,6 +1035,8 @@ func (s *Store) Orchestrator() OrchestratorConfig { return s.eff.Orchestrator }
 // SaveOrchestrator persists the orchestrator's model config (tier / thinking level
 // / max context tokens) into the user config layer and applies it in memory.
 func (s *Store) SaveOrchestrator(oc OrchestratorConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.eff.Orchestrator = oc
 	return s.editYAMLFile(filepath.Join(s.userDir, "config.yml"), func(root map[string]any) {
 		orch := map[string]any{
@@ -1045,6 +1120,8 @@ func (s *Store) ValidateDecisionModel() error {
 // SaveAgent persists a per-agent override into the user config layer
 // (~/oline/config/<mode>/config.yml) and applies it to the in-memory store.
 func (s *Store) SaveAgent(name string, ov AgentOverride) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.eff.Agents == nil {
 		s.eff.Agents = map[string]AgentOverride{}
 	}
