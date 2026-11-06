@@ -289,6 +289,38 @@ func TestWizardResumeImportAndVPN(t *testing.T) {
 	}
 }
 
+// TestWizardInputsFitTerminal: wizard text inputs size to the terminal width (so long
+// values aren't truncated to a fixed window on a wide screen) and clamp to a floor on
+// a narrow one — never stuck at their fixed creation width.
+func TestWizardInputsFitTerminal(t *testing.T) {
+	m := testModel(t)
+	var tm tea.Model = m
+
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: 200, Height: 50})
+	mm := tm.(*model)
+	for _, tc := range []struct {
+		name  string
+		width int
+	}{
+		{"scope", mm.scopeIn.Width},
+		{"goal", mm.goalIn.Width},
+		{"import", mm.importIn.Width},
+		{"vpn", mm.vpnIn.Width},
+		{"data", mm.dataDirIn.Width},
+		{"key", mm.keyIn.Width},
+	} {
+		if tc.width != 200-14 {
+			t.Errorf("%s input width = %d on a 200-col terminal, want %d (fit to width)", tc.name, tc.width, 200-14)
+		}
+	}
+
+	// A narrow terminal clamps to the floor rather than keeping a fixed 64.
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: 24, Height: 50})
+	if w := tm.(*model).scopeIn.Width; w != 20 {
+		t.Errorf("narrow terminal: scope width = %d, want floor 20", w)
+	}
+}
+
 func transcriptText(t *transcript) string {
 	if t == nil {
 		return ""

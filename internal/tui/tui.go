@@ -699,7 +699,35 @@ func (m *model) resize() {
 	} else {
 		m.input.Width = 1
 	}
+	m.sizeWizardInputs()
 	m.relayout()
+}
+
+// sizeWizardInputs fits the setup-wizard text inputs to the terminal width so long
+// values (paths, scope lists, provider URLs, API keys) are shown in full instead of
+// being truncated to a fixed window on a wide screen. Each input is drawn inside the
+// wizard's Padding(1,2) with a few spaces of indent plus the input's own "> " prompt
+// and cursor cell, so reserve for all of that to keep the composed line within m.w
+// (otherwise the outer screen style would wrap it). Short numeric fields (disk / CPUs
+// / RAM) are left narrow on purpose.
+func (m *model) sizeWizardInputs() {
+	w := m.w - 14
+	if w < 20 {
+		w = 20
+	}
+	for _, ti := range []*textinput.Model{&m.scopeIn, &m.goalIn, &m.wslRootfsIn, &m.importIn, &m.vpnIn, &m.dataDirIn, &m.keyIn} {
+		ti.Width = w
+	}
+	// The first-run provider/model form indents its inputs two columns deeper.
+	sw := m.w - 16
+	if sw < 20 {
+		sw = 20
+	}
+	for _, r := range m.setupRows {
+		if !r.toggle {
+			r.ti.Width = sw
+		}
+	}
 }
 
 // relayout recomputes pane rectangles and refreshes their content.
@@ -1587,6 +1615,7 @@ func (m *model) initSetupForm() {
 	rows = append(rows, modelRows("small", "", "gpt-4o-mini")...)
 	m.setupRows = rows
 	m.setupFocus = 0
+	m.sizeWizardInputs() // fit the just-built form fields to the current terminal width
 	m.syncSetupFocus()
 }
 
