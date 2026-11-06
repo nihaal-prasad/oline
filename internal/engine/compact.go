@@ -58,12 +58,30 @@ func (a *Agent) compactIfNeeded(ctx context.Context) {
 		return
 	}
 	a.mu.Lock()
-	hist := append([]llm.Message(nil), a.history...)
-	before := a.tokensEst // O(1) cached estimate
+	est := a.tokensEst // O(1) cached estimate
 	a.mu.Unlock()
-	if before < ceil {
+	if est < ceil {
 		return
 	}
+	a.compact(ctx)
+}
+
+// compact summarizes the agent's older conversation into one message and keeps a
+// recent tail intact, bringing the context down to roughly compactKeepFraction of
+// the ceiling. It no-ops when there is no ceiling or nothing old enough to
+// summarize, and a failure leaves the history unchanged. compactIfNeeded calls it
+// when the context crosses the ceiling; resume calls it directly to pre-shrink a
+// restored transcript so a large prior conversation is not re-sent in full on every
+// turn (the display transcript keeps the full history regardless).
+func (a *Agent) compact(ctx context.Context) {
+	ceil := a.cfg.MaxContextTokens
+	if ceil <= 0 {
+		return
+	}
+	a.mu.Lock()
+	hist := append([]llm.Message(nil), a.history...)
+	before := a.tokensEst
+	a.mu.Unlock()
 
 	// Keep the most recent messages up to compactKeepFraction of the ceiling;
 	// summarize everything before that.

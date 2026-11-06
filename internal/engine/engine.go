@@ -583,6 +583,12 @@ func (s *Session) Run(ctx context.Context, orch AgentConfig, userPrompt string) 
 		// (already appended by newAgent as the trailing user turn) follow it.
 		a.history = append(append([]llm.Message(nil), s.SeedHistory...), a.history...)
 		a.tokensEst = estimateTokens(orch.System, a.history) // recount after prepending the restored history
+		// Pre-shrink the restored transcript to a summary + recent tail so a large
+		// prior conversation is not re-sent in full on every turn (a restored history
+		// sitting just under the ceiling would otherwise never compact and inflate
+		// every turn's cost). No-ops for a small history; the pane still shows the full
+		// transcript (the TUI rebuilds it separately from this seeded context).
+		a.compact(baseCtx)
 	}
 	s.router.register(a)
 	defer s.router.unregister(core.Main)

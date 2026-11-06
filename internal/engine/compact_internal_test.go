@@ -146,6 +146,37 @@ func TestCompactEmitsStartNotice(t *testing.T) {
 	}
 }
 
+// TestCompactShrinksUnderCeiling proves the resume pre-compaction path: compact()
+// summarizes a large-but-under-ceiling history (which the normal over-ceiling
+// trigger, compactIfNeeded, deliberately leaves alone), so a resumed transcript is
+// not re-sent in full on every turn.
+func TestCompactShrinksUnderCeiling(t *testing.T) {
+	events := make(chan event.Event, 64)
+	go func() {
+		for range events {
+		}
+	}()
+	s := NewSession(tools.NewRegistry(), nil, nil, func(string) (AgentConfig, bool) { return AgentConfig{}, false }, events, 5)
+	a := newAgent("recon#1", AgentConfig{Role: "recon", MaxContextTokens: 8000}, sumMock{text: "DENSE SUMMARY"}, "m", s, "", "")
+	bigHistory(a, 6) // ~6k tokens: under the 8k ceiling but well over the keep budget
+	before := len(a.history)
+
+	// The normal trigger must NOT compact an under-ceiling history.
+	a.compactIfNeeded(context.Background())
+	if len(a.history) != before {
+		t.Fatalf("compactIfNeeded compacted an under-ceiling history (%d -> %d)", before, len(a.history))
+	}
+
+	// compact() (what resume calls) shrinks it anyway, to a summary + recent tail.
+	a.compact(context.Background())
+	if len(a.history) >= before {
+		t.Fatalf("compact did not shrink the restored history: %d -> %d", before, len(a.history))
+	}
+	if a.history[0].Role != llm.RoleUser || !strings.Contains(a.history[0].Content, "DENSE SUMMARY") {
+		t.Errorf("first message after compact should be the summary, got %q / %q", a.history[0].Role, a.history[0].Content)
+	}
+}
+
 // TestCompactFallsBackToOwnModel checks that when the summarizer (small) model
 // fails, compaction retries with the agent's own model and still succeeds.
 func TestCompactFallsBackToOwnModel(t *testing.T) {
