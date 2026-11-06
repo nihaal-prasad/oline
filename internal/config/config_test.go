@@ -2,9 +2,11 @@ package config_test
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/nihaal-prasad/oline/assets"
@@ -118,6 +120,55 @@ func TestSaveModeFile(t *testing.T) {
 			t.Errorf("SaveModeFile(%q) should have been refused", bad)
 		}
 	}
+}
+
+// TestStoreConcurrentAccess hammers the Store from many goroutines at once — readers
+// (Effective/ResolveKey/KnownSecrets/ModelRoles, the paths the engine hits on every
+// spawn and LLM-client build) against writers (DefineProvider/SetModelRoles, the
+// paths the in-app editor hits mid-engagement). Without the Store mutex this is a
+// concurrent map read+write, which the Go runtime turns into a FATAL error (crashing
+// the whole engagement) even without the race detector. Passing means the lock holds.
+func TestStoreConcurrentAccess(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("OLINE_HOME", home)
+	t.Setenv("CK", "key-value-12345")
+	s, err := config.Load(config.ModePentester, assets.PentesterFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.DefineProvider("cprov", config.Provider{
+		BaseURL: "http://127.0.0.1:1", API: "openai", APIKeyRef: "env:CK",
+		Models: []config.ModelDef{{ID: "m1", Name: "m1", ContextWindow: 8000, MaxTokens: 1024, Cost: config.Cost{Input: 1}}},
+	})
+	s.SetModelRoles("cprov/m1", "cprov/m1", "cprov/m1")
+
+	const workers, iters = 8, 2000
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	work := func(f func(i int)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for i := 0; i < iters; i++ {
+				f(i)
+			}
+		}()
+	}
+	for w := 0; w < workers; w++ {
+		// Readers (engine-goroutine paths).
+		work(func(int) { _ = s.Effective().Providers })
+		work(func(int) { _, _ = s.ResolveKey("cprov") })
+		work(func(int) { _ = s.KnownSecrets() })
+		work(func(int) { _ = s.ModelRoles() })
+		// Writers (editor-goroutine paths, in-memory so the loop stays fast).
+		work(func(i int) {
+			s.DefineProvider(fmt.Sprintf("p%d", i%4), config.Provider{BaseURL: "x", API: "openai", Models: []config.ModelDef{{ID: "z"}}})
+		})
+		work(func(int) { s.SetModelRoles("cprov/m1", "cprov/m1", "cprov/m1") })
+	}
+	close(start)
+	wg.Wait() // a concurrent map read+write would have crashed the process before here
 }
 
 // TestAddProviderRoundTrips: a provider defined with AddProvider (oline ships none)

@@ -118,3 +118,50 @@ func TestToolDispatchHeartbeat(t *testing.T) {
 		t.Error("no liveness heartbeat was emitted for a slow tool dispatch")
 	}
 }
+
+// hangTool ignores its context and blocks until released — a stand-in for a
+// misbehaving registry/MCP tool that never honors cancellation.
+type hangTool struct{ release chan struct{} }
+
+func (hangTool) Name() string { return "hang" }
+func (hangTool) Schema() tools.Schema {
+	return tools.Schema{Name: "hang", Description: "hangs", Parameters: json.RawMessage(`{"type":"object","properties":{},"required":[]}`)}
+}
+func (h hangTool) Execute(_ context.Context, _ tools.Call) (tools.Result, error) {
+	<-h.release // deliberately ignores ctx
+	return tools.Result{Content: "done"}, nil
+}
+
+// TestDispatchWatchedCtxEscape: a tool that ignores ctx must not wedge the agent. On
+// kill/engagement-end, dispatchWatched returns via its ctx.Done escape so Run unwinds
+// (and the subagent's slot is freed) rather than blocking forever on the stuck tool.
+func TestDispatchWatchedCtxEscape(t *testing.T) {
+	events := make(chan event.Event, 64)
+	go func() {
+		for range events {
+		}
+	}()
+	rel := make(chan struct{})
+	reg := tools.NewRegistry()
+	reg.Register(hangTool{release: rel})
+
+	mock := &scriptLLM{steps: []scriptStep{{tool: "hang", toolArg: "{}"}}}
+	llmFor := func(string) (LLM, string, error) { return mock, "m", nil }
+	cfgFor := func(string) (AgentConfig, bool) { return AgentConfig{}, false }
+	s := NewSession(reg, nil, llmFor, cfgFor, events, 5)
+	orch := AgentConfig{Role: "Main", Model: "m", IsOrchestrator: true, System: "x", Tools: []string{"hang"}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan Result, 1)
+	go func() { done <- s.Run(ctx, orch, "go") }()
+
+	time.Sleep(150 * time.Millisecond) // let the agent reach the hanging tool
+	cancel()                           // engagement ends while the tool is stuck
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		close(rel)
+		t.Fatal("Run wedged on a ctx-ignoring tool — dispatchWatched escape regression")
+	}
+	close(rel) // let the orphaned tool goroutine finish
+}

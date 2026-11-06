@@ -4,14 +4,60 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/nihaal-prasad/oline/internal/tools"
 )
+
+// blockWriter is a server stdin that blocks every Write until the connection is
+// closed — simulating an MCP server that stopped reading its stdin.
+type blockWriter struct{ closed chan struct{} }
+
+func (w *blockWriter) Write(p []byte) (int, error) {
+	<-w.closed
+	return 0, errors.New("closed")
+}
+func (w *blockWriter) Close() error {
+	close(w.closed)
+	return nil
+}
+
+// TestClientWriteDoesNotHangOnStuckServer verifies the bounded write: if the server
+// stops reading its stdin (Encode blocks forever in the writer goroutine), callers
+// still return on their own context instead of wedging the whole fleet.
+func TestClientWriteDoesNotHangOnStuckServer(t *testing.T) {
+	bw := &blockWriter{closed: make(chan struct{})}
+	bR, bW := io.Pipe() // server -> client; nothing is ever sent
+	defer bW.Close()
+	c := newClient("stuck", bw, bR)
+	defer c.Close()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 3; i++ { // several concurrent callers: none may block the others
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			if _, _, err := c.CallTool(ctx, "echo", nil); err == nil {
+				t.Error("expected a context/timeout error from a stuck server write, got nil")
+			}
+		}()
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("CallTool hung on a stuck server write — bounded-write regression")
+	}
+}
 
 // TestHelperMCPServer is not a real test: when re-executed as a subprocess (with
 // OLINE_MCP_HELPER=1) it behaves as a stdio MCP server, so TestConnectSpawnsProcess
