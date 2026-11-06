@@ -54,7 +54,7 @@ func TestLiveReverseShellRoundTrip(t *testing.T) {
 	}()
 	s := NewSession(tools.NewRegistry(), h, nil, func(string) (AgentConfig, bool) { return AgentConfig{}, false }, events, 5)
 	s.Workspace = ws
-	s.baseCtx = ctx
+	s.setBase(ctx)
 	a := newAgent("recon#1", AgentConfig{Role: "recon", Tools: []string{"bash", "revshell"}, Policy: sandbox.InScopeOnly}, nil, "m", s, "", "")
 	s.router.register(a)
 

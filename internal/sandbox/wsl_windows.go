@@ -11,10 +11,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/nihaal-prasad/oline/internal/core"
 )
+
+// execSeq makes each Exec's in-guest tag unique within this process.
+var execSeq atomic.Uint64
 
 // wslSandbox drives Windows Subsystem for Linux distros via wsl.exe.
 //
@@ -80,6 +84,15 @@ func (w *wslSandbox) Open(ctx context.Context, id string) (Handle, error) {
 	}
 	for _, c := range cands {
 		if c.ID == id {
+			// Re-harden an oline-managed distro on reuse: ensure automount/interop stay
+			// disabled (no Windows /mnt drives, no interop) even if it was created by an
+			// older oline or left in a stale state. Non-managed (the operator's own)
+			// distros are NOT reconfigured here — their wsl.conf is left alone, and the
+			// engine's host-escape backstop plus the file-tool /mnt guard still confine
+			// agents. Best-effort: a harden failure doesn't block reuse.
+			if c.Managed {
+				_ = w.hardenDistro(ctx, id)
+			}
 			return &wslHandle{distro: id}, nil
 		}
 	}
@@ -294,7 +307,7 @@ func (h *wslHandle) Shutdown(ctx context.Context) error {
 		return nil
 	}
 	_, err := h.egress.rootExec(ctx, buildEgressTeardown())
-	h.egress.applied = false
+	h.egress.markTornDown()
 	return err
 }
 
@@ -349,8 +362,27 @@ func (h *wslHandle) Exec(ctx context.Context, agent core.AgentID, cmd Cmd, out i
 	if len(cmd.Argv) == 0 {
 		return ExitStatus{}, errors.New("sandbox/wsl: empty command")
 	}
+	// Fail closed: never run an UNPRIVILEGED (agent) command before the per-agent
+	// egress firewall is applied, or it would run as the default distro user with no
+	// network confinement. Privileged commands (root: egress setup, the installer,
+	// workspace prep) are exempt. The TUI applies egress before any agent runs, so
+	// this only ever trips a buggy/unordered path, not the normal flow.
+	if cmd.Policy != Privileged {
+		if h.egress == nil || !h.egress.Applied() {
+			return ExitStatus{}, errors.New("sandbox/wsl: refusing to run an unprivileged command before per-agent egress is applied")
+		}
+		// Re-assert the firewall if the distro restarted and dropped the in-memory
+		// iptables (throttled), so an agent never runs under a silently-vanished chain.
+		h.egress.EnsureApplied()
+	}
+	// Tag the guest process with a unique env var (inherited by every descendant), so
+	// that if ctx is cancelled we can reap the whole in-guest process tree below —
+	// killing wsl.exe alone orphans the Linux-side processes, which would keep running
+	// (and keep using the network) under a "stopped" agent.
+	tag := fmt.Sprintf("oline-exec-%d", execSeq.Add(1))
+	gargv := append([]string{"env", "OLINE_EXEC=" + tag}, cmd.Argv...)
 	args := append(h.baseArgs(cmd.Dir, h.execUser(agent, cmd.Policy)), "--")
-	args = append(args, cmd.Argv...)
+	args = append(args, gargv...)
 
 	c := exec.CommandContext(ctx, "wsl.exe", args...)
 	c.Env = wslEnv()
@@ -363,6 +395,7 @@ func (h *wslHandle) Exec(ctx context.Context, agent core.AgentID, cmd Cmd, out i
 		code = c.ProcessState.ExitCode()
 	}
 	if ctx.Err() != nil {
+		h.killGuestByTag(tag) // wsl.exe is dead; kill the orphaned Linux process tree
 		return ExitStatus{Code: code}, ctx.Err()
 	}
 	var ee *exec.ExitError
@@ -373,6 +406,20 @@ func (h *wslHandle) Exec(ctx context.Context, agent core.AgentID, cmd Cmd, out i
 		return ExitStatus{Code: code}, fmt.Errorf("sandbox/wsl: exec: %w", err)
 	}
 	return ExitStatus{Code: code}, nil
+}
+
+// killGuestByTag reaps every guest process whose environment carries tag (the exec
+// and all its descendants, which inherit it), as root, best-effort and bounded. Used
+// after ctx cancellation, where killing wsl.exe left the Linux process tree running.
+// tag is oline-generated ([a-z0-9-] only), so it is safe to interpolate into the grep.
+func (h *wslHandle) killGuestByTag(tag string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	script := `for p in /proc/[0-9]*; do tr '\0' '\n' < "$p/environ" 2>/dev/null | ` +
+		`grep -qx "OLINE_EXEC=` + tag + `" && kill -KILL "${p#/proc/}" 2>/dev/null; done; true`
+	c := exec.CommandContext(ctx, "wsl.exe", "-d", h.distro, "-u", "root", "--", "bash", "-c", script)
+	c.Env = wslEnv()
+	_ = c.Run()
 }
 
 // OpenTerminal runs cmd under a pseudo-terminal inside WSL so full-screen programs

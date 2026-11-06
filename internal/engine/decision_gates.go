@@ -30,7 +30,7 @@ var severityChoices = []decide.Choice{
 // decisionCtx returns a bounded context for one decision call, derived from the
 // engagement context so engagement-end cancels it.
 func (a *Agent) decisionCtx() (context.Context, context.CancelFunc) {
-	base := a.s.baseCtx
+	base := a.s.base()
 	if base == nil {
 		base = context.Background()
 	}

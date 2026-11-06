@@ -167,6 +167,28 @@ type sandboxReadyMsg struct {
 	err error
 }
 
+// sessionPrep1 carries the results of the off-UI-thread preparation (the decision
+// model probe and MCP server connection — the two slowest, universal startup
+// steps). beginSession consumes it instead of doing that network I/O on the UI
+// goroutine. Delivered as a message so the model mutation it drives stays on the
+// Update goroutine.
+type sessionPrep1 struct {
+	h          sandbox.Handle
+	decEnabled bool
+	decClient  engine.Decider
+	decModel   string
+	decCtx     int
+	decNotices []string // pre-styled lines to write to Main's transcript
+	mcpMgr     *mcp.Manager
+	mcpTools   []tools.Tool
+	mcpWarns   []string
+}
+
+// workspaceReadyMsg signals that prepareWorkspaceCmd finished the off-thread sandbox
+// I/O (workspace dir, resume restore, data copy, VPN); its handler launches the
+// orchestrator and the host backup/history loops on the UI goroutine.
+type workspaceReadyMsg struct{}
+
 // sandboxPrep bundles everything prepareSandboxCmd needs to open or resume an
 // environment off the UI goroutine.
 type sandboxPrep struct {
@@ -260,6 +282,7 @@ const (
 	wHistory // resume only: load the prior conversation, or start from a clean slate
 	wScope
 	wGoal
+	wName // new engagement only: the operator types a unique engagement name
 	wVPN
 	wVPNInput
 	wData // optional: a host folder to copy into the workspace for agents to read
@@ -316,6 +339,10 @@ type model struct {
 	// goroutine (a QEMU first boot can take minutes); prepCand is the chosen env.
 	preparing bool
 	prepCand  sandbox.Candidate
+	// starting: the engagement is being built (workspace restore, MCP connect, history
+	// load). It renders a progress frame before that work runs, so the setup screen
+	// doesn't appear frozen while it happens.
+	starting bool
 
 	// resume
 	selDistro   string
@@ -328,6 +355,9 @@ type model struct {
 	vpnSel  int
 	vpnMode string // none | running | envfile | hostfile
 	vpnIn   textinput.Model
+
+	// operator-typed engagement name (new engagements only)
+	nameIn textinput.Model
 
 	// optional host data folder copied (read-only) into the workspace before start
 	dataDirIn textinput.Model
@@ -343,6 +373,8 @@ type model struct {
 	events         chan event.Event
 	funnel         *funnel // drains events off the goroutine, decoupled from Update
 	cancel         context.CancelFunc
+	engCtx         context.Context    // engagement context; held so workspaceReadyMsg can launch Run/loops under it
+	pendingOrch    engine.AgentConfig // the orchestrator config, built in beginSession, launched in workspaceReadyMsg
 	resultCh       chan engine.Result
 	transcripts    map[core.AgentID]*transcript
 	order          []core.AgentID
@@ -601,6 +633,10 @@ func newModel(mode config.Mode, store *config.Store, roster *agents.Roster) *mod
 	xi.Placeholder = "host folder to copy into the workspace (optional — Enter to skip)"
 	xi.CharLimit = 1024
 	xi.Width = 64
+	ni := textinput.New()
+	ni.Placeholder = "a name for this engagement (letters, digits, - _ .)"
+	ni.CharLimit = 128
+	ni.Width = 64
 	ki := textinput.New()
 	ki.Placeholder = "paste your API key (stored only in ~/oline/config/secrets.yml)"
 	ki.CharLimit = 512
@@ -619,6 +655,7 @@ func newModel(mode config.Mode, store *config.Store, roster *agents.Roster) *mod
 		input:          ci,
 		importIn:       ii,
 		vpnIn:          vi,
+		nameIn:         ni,
 		dataDirIn:      xi,
 		keyIn:          ki,
 		transcripts:    map[core.AgentID]*transcript{},
@@ -669,6 +706,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case startMsg:
 		return m.startEngagement()
+	case workspaceReadyMsg:
+		// The off-thread workspace prep finished; this fires after m.running is set, so
+		// it is handled here (not in updateWizard/updateRunning) to launch the orchestrator.
+		return m.launchOrchestrator()
 	}
 	if m.editing {
 		return m.updateEditor(msg)
@@ -734,7 +775,7 @@ func (m *model) sizeWizardInputs() {
 	if w < 20 {
 		w = 20
 	}
-	for _, ti := range []*textinput.Model{&m.scopeIn, &m.goalIn, &m.wslRootfsIn, &m.importIn, &m.vpnIn, &m.dataDirIn, &m.keyIn} {
+	for _, ti := range []*textinput.Model{&m.scopeIn, &m.goalIn, &m.wslRootfsIn, &m.importIn, &m.vpnIn, &m.nameIn, &m.dataDirIn, &m.keyIn} {
 		ti.Width = w
 	}
 	// The first-run provider/model form indents its inputs two columns deeper.
@@ -879,6 +920,13 @@ func (m *model) focusInfoPane() bool {
 	return m.focusPane != nil && (m.focusPane.summary || m.focusPane.diagram)
 }
 
+// focusSyntheticPane reports whether the focused pane is a non-agent pane (Summary,
+// Diagram, or an empty slot), so agent controls (pause/resume/kill/stop/budget) can
+// no-op cleanly instead of acting on a synthetic id.
+func (m *model) focusSyntheticPane() bool {
+	return m.focusPane != nil && (m.focusPane.summary || m.focusPane.diagram || m.focusPane.empty)
+}
+
 // ---- wizard --------------------------------------------------------------
 
 func (m *model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -906,10 +954,18 @@ func (m *model) updateWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.wizErr = msg.err.Error()
 			return m, nil
 		}
-		return m.beginSession(msg.h)
+		// Show a "starting…" frame and run the slow startup I/O (decision-model probe,
+		// MCP connect) OFF the UI goroutine; the result comes back as a sessionPrep1,
+		// which beginSession then consumes on the UI thread. The frame renders because
+		// this Update returns before the goroutine finishes.
+		m.starting = true
+		return m, m.prepareSession1Cmd(msg.h)
+	case sessionPrep1:
+		m.starting = false
+		return m.beginSession(msg)
 	case tea.KeyMsg:
-		if m.preparing {
-			return m, nil // ignore input while the sandbox is being prepared
+		if m.preparing || m.starting {
+			return m, nil // ignore input while the sandbox is prepared / the engagement starts
 		}
 		// Esc goes back to the previous setup question (no-op on the first one).
 		if msg.String() == "esc" {
@@ -942,7 +998,7 @@ func (m *model) wizardBack() (tea.Model, tea.Cmd) {
 // focusWizardStep focuses the text input (or form) a setup step edits, so returning
 // to it with Esc lands the cursor in the right field.
 func (m *model) focusWizardStep(s wizStep) {
-	for _, ti := range []*textinput.Model{&m.scopeIn, &m.goalIn, &m.diskIn, &m.cpusIn, &m.memIn, &m.wslRootfsIn, &m.importIn, &m.vpnIn, &m.dataDirIn, &m.keyIn} {
+	for _, ti := range []*textinput.Model{&m.scopeIn, &m.goalIn, &m.diskIn, &m.cpusIn, &m.memIn, &m.wslRootfsIn, &m.importIn, &m.vpnIn, &m.nameIn, &m.dataDirIn, &m.keyIn} {
 		ti.Blur()
 	}
 	switch s {
@@ -1401,11 +1457,43 @@ func (m *model) wizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case wGoal:
 		if k == "enter" {
 			m.goalIn.Blur()
-			m.step = wVPN
+			if m.resume {
+				// A resumed engagement keeps its existing name; don't prompt for a new one.
+				m.step = wVPN
+				return m, nil
+			}
+			// New engagement: let the operator name it. Pre-fill a unique default so
+			// Enter-through still works, and refresh it each time this step opens.
+			if strings.TrimSpace(m.nameIn.Value()) == "" {
+				m.nameIn.SetValue("engagement-" + time.Now().Format("20060102-150405"))
+			}
+			m.step = wName
+			m.nameIn.Focus()
 			return m, nil
 		}
 		var cmd tea.Cmd
 		m.goalIn, cmd = m.goalIn.Update(msg)
+		return m, cmd
+
+	case wName:
+		if k == "enter" {
+			name := sandbox.SafeEngagementName(m.nameIn.Value())
+			switch {
+			case strings.TrimSpace(m.nameIn.Value()) == "":
+				m.wizErr = "enter a name for this engagement"
+				return m, nil
+			case m.engagementNameTaken(name):
+				m.wizErr = fmt.Sprintf("an engagement named %q already exists (it would overwrite its logs/history/backup) — choose another name, or go back and Resume it", name)
+				return m, nil
+			}
+			m.wizErr = ""
+			m.engagement = name
+			m.nameIn.Blur()
+			m.step = wVPN
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.nameIn, cmd = m.nameIn.Update(msg)
 		return m, cmd
 
 	case wVPN:
@@ -1992,73 +2080,78 @@ func (m *model) startEngagement() (tea.Model, tea.Cmd) {
 	})
 }
 
-// beginSession builds and launches the engagement once the sandbox handle is
-// ready (egress already applied in prepareSandboxCmd).
-func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
+// prepareSession1Cmd runs the slow, universal startup I/O OFF the UI goroutine: the
+// decision-model reachability probe (up to ~10s on a cold model) and the MCP server
+// connections (a network handshake per server). It only READS the store (which is
+// mutex-guarded) and never touches the model; its result returns as a sessionPrep1
+// that beginSession consumes on the Update goroutine. The "starting…" frame stays up
+// and the UI stays responsive while this runs.
+func (m *model) prepareSession1Cmd(h sandbox.Handle) tea.Cmd {
+	store := m.store
+	return func() tea.Msg {
+		prep := sessionPrep1{h: h}
+		// Decision model: enabled when configured + valid; a transient/cold-start probe
+		// failure enables it anyway (gates fail open), only a definitive rejection keeps
+		// it off. Notices are collected (not written) so the write happens on the UI thread.
+		if sel := strings.TrimSpace(store.Effective().ModelRoles.Decision); sel != "" {
+			if verr := store.ValidateDecisionModel(); verr != nil {
+				prep.decNotices = append(prep.decNotices, styleWarn.Render("decision model not usable — decision features disabled: "+verr.Error()))
+			} else if cl, mid, ctxTok, err := wire.DecisionClient(store, sel); err != nil {
+				prep.decNotices = append(prep.decNotices, styleWarn.Render("decision model setup failed — decision features disabled: "+err.Error()))
+			} else {
+				pctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				perr := cl.Ping(pctx)
+				cancel()
+				if perr != nil && !decide.IsTransient(perr) {
+					prep.decNotices = append(prep.decNotices, styleWarn.Render("decision model unreachable — decision features disabled: "+perr.Error()))
+				} else {
+					prep.decClient, prep.decModel, prep.decCtx, prep.decEnabled = cl, mid, ctxTok, true
+					if perr != nil {
+						prep.decNotices = append(prep.decNotices, styleWarn.Render("decision model slow to respond at startup ("+perr.Error()+") — enabling it anyway; it warms up on first use (every decision gate fails open if it stays unreachable)"))
+					}
+				}
+			}
+		}
+		// MCP servers (host-side integrations): spawn + handshake each. A server that
+		// fails to connect is skipped with a warning; tools are registered in beginSession.
+		if cfgs := wire.MCPServerConfigs(store); len(cfgs) > 0 {
+			prep.mcpMgr, prep.mcpTools, prep.mcpWarns = mcp.ConnectAll(context.Background(), cfgs)
+		}
+		return prep
+	}
+}
+
+// beginSession builds and launches the engagement on the UI goroutine, consuming the
+// off-thread preparation (decision probe + MCP connect) from prepareSession1Cmd.
+// Egress was already applied in prepareSandboxCmd.
+func (m *model) beginSession(prep sessionPrep1) (tea.Model, tea.Cmd) {
+	h := prep.h
 	cand := m.prepCand
 	pol := scope.Parse(m.egressScope())
 
 	reg := wire.BuildRegistry(m.store)
 	llmFor := wire.NewLLMResolver(m.store)
 
-	// Optional System-1 decision model: enabled when it is configured and valid. It is
-	// also probed now, but a probe that only fails TRANSIENTLY (a timeout — common for
-	// a cold decision model that has not warmed up yet — or a network/5xx blip) does
-	// NOT disable it: the config is valid and every runtime gate fails open, so the
-	// model simply warms up on first real use instead of the feature being lost for the
-	// whole engagement over a slow first call. Only a definitive rejection (a provider
-	// that does not actually serve /decisions: a 4xx or a non-decisions response) keeps
-	// it off. Otherwise the decision features stay off and the orchestrator is never
-	// told they exist.
-	decisionEnabled := false
-	var decClient engine.Decider
-	var decModel string
-	var decCtx int
-	if sel := strings.TrimSpace(m.store.Effective().ModelRoles.Decision); sel != "" {
-		if verr := m.store.ValidateDecisionModel(); verr != nil {
-			m.writeln(core.Main, styleWarn.Render("decision model not usable — decision features disabled: "+verr.Error()))
-		} else if cl, mid, ctxTok, err := wire.DecisionClient(m.store, sel); err != nil {
-			m.writeln(core.Main, styleWarn.Render("decision model setup failed — decision features disabled: "+err.Error()))
-		} else {
-			// A short probe (the optimistic path below means it need not wait out a full
-			// cold start). It runs on the UI goroutine, but the event funnel keeps
-			// draining meanwhile, so nothing is lost.
-			pctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			perr := cl.Ping(pctx)
-			cancel()
-			if perr != nil && !decide.IsTransient(perr) {
-				// Definitive rejection (not a /decisions endpoint, bad model or auth): stay off.
-				m.writeln(core.Main, styleWarn.Render("decision model unreachable — decision features disabled: "+perr.Error()))
-			} else {
-				// Reachable, or only a transient/cold-start failure: enable (gates fail open).
-				decClient, decModel, decCtx = cl, mid, ctxTok
-				decisionEnabled = true
-				if perr != nil {
-					m.writeln(core.Main, styleWarn.Render("decision model slow to respond at startup ("+perr.Error()+") — enabling it anyway; it warms up on first use (every decision gate fails open if it stays unreachable)"))
-				}
-			}
-		}
+	// Decision model: probed off-thread above; replay its notices and use its result.
+	for _, n := range prep.decNotices {
+		m.writeln(core.Main, n)
 	}
+	decisionEnabled, decClient, decModel, decCtx := prep.decEnabled, prep.decClient, prep.decModel, prep.decCtx
 
 	orch, resolver := wire.Build(m.mode, m.store, m.roster, decisionEnabled)
 
-	// Connect operator-configured MCP servers (host-side integrations) and register
-	// their tools into the registry, so an agent granted <server>__<tool> can call it.
-	// A server that fails to connect is skipped with a warning (non-fatal). Reported to
-	// Main's transcript in the startup block below; closed at shutdown.
-	var mcpWarns []string
-	if cfgs := wire.MCPServerConfigs(m.store); len(cfgs) > 0 {
-		var mcpTools []tools.Tool
-		m.mcp, mcpTools, mcpWarns = mcp.ConnectAll(context.Background(), cfgs)
-		for _, t := range mcpTools {
-			reg.Register(t)
-		}
+	// MCP servers connected off-thread above; register their tools into the registry so
+	// an agent granted <server>__<tool> can call it. Reported in the startup block below.
+	m.mcp = prep.mcpMgr
+	mcpWarns := prep.mcpWarns
+	for _, t := range prep.mcpTools {
+		reg.Register(t)
 	}
 
 	m.events = make(chan event.Event, 4096) // generous buffer; a goroutine keeps it drained
 	m.funnel = newFunnel(m.events)          // decouple draining from the Update/render loop
 	m.sess = engine.NewSession(reg, h, llmFor, resolver, m.events, m.store.Effective().MaxConcurrency)
-	m.sess.Mode = runModeFromSel(m.autoSel)
+	m.sess.SetMode(runModeFromSel(m.autoSel))
 	// Custom tools (config command tools, Go extension tools, and MCP tools) execute,
 	// so watcher mode must block them along with bash/bash_bg/revshell.
 	execTools := wire.CustomToolNames(m.store)
@@ -2113,6 +2206,8 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
+	m.engCtx = ctx
+	m.pendingOrch = orch
 
 	m.addAgent(core.Main)
 	// Default layout: the orchestrator on the left, and a stacked Summary (top) and
@@ -2151,23 +2246,10 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	if !m.resume && m.engagement == "" {
 		m.engagement = "engagement-" + time.Now().Format("20060102-150405")
 	}
-	// Confine the agents' file writes to this engagement's workspace: file-tool
-	// relative paths resolve against it, and write/edit refuse any path outside it
-	// (the Privileged installer excepted). Matches the workspace path the
-	// orchestrator is told about in composePrompt.
-	// Point the sandbox's working directory at this engagement's workspace (creating
-	// it) so a relative path resolves there for every agent command, then confine
-	// file writes to it. Only confine once the cwd is actually set, so a failure
-	// falls back to the default cwd (and the broader workspace-root confinement)
-	// rather than a mismatched state.
-	engWorkspace := sandbox.WSLWorkspace + "/" + m.engagement
-	if wsr, ok := m.sess.Sandbox.(sandbox.WorkspaceSetter); ok {
-		if err := wsr.SetWorkspace(ctx, engWorkspace); err != nil {
-			m.writeln(core.Main, styleWarn.Render("could not set the engagement workspace directory: "+err.Error()))
-		} else {
-			m.sess.Workspace = engWorkspace
-		}
-	}
+	// The workspace directory, the resume-file restore, the operator data copy, and
+	// VPN setup are all SANDBOX I/O: they run off the UI goroutine in
+	// prepareWorkspaceCmd below (launched after this fast model setup), so the running
+	// view appears immediately and stays responsive while they happen.
 	// Per-engagement activity log on the host (what every agent does/thinks/runs).
 	m.log = openEngLog(m.engagement)
 	m.log.setRedact(m.store.KnownSecrets()) // scrub any API keys an agent echoes
@@ -2176,7 +2258,7 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	m.audit = openAuditLog(m.engagement)
 	m.sess.SetAudit(m.audit)
 	m.log.banner(fmt.Sprintf("%s · %s · env=%s · scope=%q · goal=%q", m.engagement,
-		m.sess.Mode.String(), cand.ID, strings.TrimSpace(m.scopeIn.Value()), strings.TrimSpace(m.goalIn.Value())))
+		m.sess.Mode().String(), cand.ID, strings.TrimSpace(m.scopeIn.Value()), strings.TrimSpace(m.goalIn.Value())))
 	// Resume with history: restore the prior conversation (seed Main live, rebuild
 	// every agent's transcript) before the "resuming" notice, so the old
 	// conversation appears first. If loading fails, fall back to a clean start.
@@ -2211,7 +2293,7 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	if m.resume {
 		start = "resuming engagement " + m.engagement
 	}
-	m.writeln(core.Main, styleMuted.Render(start+" in "+cand.ID+" — "+m.sess.Mode.String()))
+	m.writeln(core.Main, styleMuted.Render(start+" in "+cand.ID+" — "+m.sess.Mode().String()))
 	if p := m.log.Path(); p != "" {
 		m.writeln(core.Main, styleMuted.Render("activity log → "+p))
 	}
@@ -2233,33 +2315,6 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Resume: make sure the engagement's files are in the canonical workspace.
-	//   - A brand-new sandbox (fresh WSL distro or fresh QEMU VM) holds none of the
-	//     prior workspace, so when loading history, restore it from the host backup
-	//     bundle. An explicit host archive/in-env path (the WSL import option) wins.
-	//   - A reused WSL distro may already hold the files (or an import points at them).
-	//   - A resumed QEMU VM carries its workspace on the persisted disk — nothing to do.
-	if m.resume {
-		switch {
-		case m.freshSandbox(cand):
-			if cand.Backend == sandbox.BackendWSL && strings.TrimSpace(m.importIn.Value()) != "" {
-				m.placeResumeFiles(cand.ID)
-			} else if m.loadHist {
-				m.restoreWorkspaceFromBackup(m.engagement)
-			}
-		case cand.Backend != sandbox.BackendQEMU:
-			m.placeResumeFiles(cand.ID)
-		}
-	}
-
-	// Optional operator-provided data: copy a host folder into the workspace (read-only
-	// reference data, or writable working source in programmer mode) so agents can use
-	// it. No-op unless a folder was chosen in setup.
-	m.copyHostDataToWorkspace()
-
-	// VPN to reach the target, if requested.
-	m.setupVPN(cand.ID)
-
 	// Egress was established (fail-closed) above; report the resulting policy.
 	switch {
 	case m.mode == config.ModeExploiter:
@@ -2277,7 +2332,64 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 		m.writeln(core.Main, styleMuted.Render(fmt.Sprintf("domain targets %v resolved to IPs and firewall-enforced (a snapshot at apply time — re-apply scope with Ctrl-b e if a target's address changes)", pol.Domains())))
 	}
 
-	// Host-side backups (done by the program, not the agents). 0 disables.
+	// The running view is live now. Do the remaining SANDBOX I/O (workspace dir,
+	// resume-file restore, operator-data copy, VPN) off the UI goroutine; when it
+	// finishes, workspaceReadyMsg launches the orchestrator. The event pumps start now
+	// so the view stays responsive and streams the setup notices as they happen.
+	m.status = "preparing the workspace…"
+	return m, tea.Batch(
+		listen(m.funnel), waitResult(m.resultCh), listenShell(m.shellCh), listenTerm(m.termCh), tickCmd(), textinput.Blink,
+		m.prepareWorkspaceCmd(ctx, cand),
+	)
+}
+
+// prepareWorkspaceCmd runs the per-engagement sandbox I/O OFF the UI goroutine: it
+// pins the workspace directory, restores a resumed engagement's files, copies in an
+// operator data folder, and brings up a VPN. Each step talks only to the sandbox
+// handle (goroutine-safe) and reports via emitNotice (also goroutine-safe); the only
+// model field it writes is m.sess.Workspace, read later via the returned message. When
+// it completes, workspaceReadyMsg launches the orchestrator on the UI goroutine.
+func (m *model) prepareWorkspaceCmd(ctx context.Context, cand sandbox.Candidate) tea.Cmd {
+	return func() tea.Msg {
+		// Pin the engagement workspace (creating it) so relative agent paths resolve
+		// there and file writes are confined to it; falls back to the default cwd if it
+		// can't be set.
+		engWorkspace := sandbox.WSLWorkspace + "/" + m.engagement
+		if wsr, ok := m.sess.Sandbox.(sandbox.WorkspaceSetter); ok {
+			if err := wsr.SetWorkspace(ctx, engWorkspace); err != nil {
+				m.emitNotice("warn", "could not set the engagement workspace directory: "+err.Error())
+			} else {
+				m.sess.Workspace = engWorkspace
+			}
+		}
+		// Resume: bring the prior engagement's files into the (possibly fresh) sandbox.
+		//   - fresh sandbox: restore from the host backup bundle (or an explicit import).
+		//   - reused non-QEMU: the files may need copying into the canonical workspace.
+		//   - resumed QEMU VM: its persisted disk already carries the workspace.
+		if m.resume {
+			switch {
+			case m.freshSandbox(cand):
+				if cand.Backend == sandbox.BackendWSL && strings.TrimSpace(m.importIn.Value()) != "" {
+					m.placeResumeFiles(cand.ID)
+				} else if m.loadHist {
+					m.restoreWorkspaceFromBackup(m.engagement)
+				}
+			case cand.Backend != sandbox.BackendQEMU:
+				m.placeResumeFiles(cand.ID)
+			}
+		}
+		m.copyHostDataToWorkspace() // no-op unless the operator chose a data folder
+		m.setupVPN(cand.ID)         // no-op unless a VPN was configured
+		return workspaceReadyMsg{}
+	}
+}
+
+// launchOrchestrator finishes the engagement launch on the UI goroutine once the
+// off-thread workspace preparation (workspaceReadyMsg) has completed: it starts the
+// host backup/history loops and the orchestrator under the engagement context.
+func (m *model) launchOrchestrator() (tea.Model, tea.Cmd) {
+	m.status = ""
+	// Host-side backups (program-side; 0 disables).
 	if min := m.store.Effective().Backup.IntervalMinutes; min > 0 {
 		// On resume, move any existing bundle aside FIRST so a previous engagement's
 		// backup is never overwritten by this session's backups.
@@ -2286,28 +2398,21 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 		}
 		m.writeln(core.Main, styleMuted.Render(fmt.Sprintf("host backups: every %d min + at end → %s (full engagement export bundle: workspace, transcripts, findings, logs, report when produced; overwritten)",
 			min, m.backupBundlePath())))
-		go m.backupLoop(ctx, m.engagement, min)
+		go m.backupLoop(m.engCtx, m.engagement, min)
 	} else {
 		m.writeln(core.Main, styleMuted.Render("host backups: disabled (backup.intervalMinutes = 0)"))
 	}
-
-	// Persist the conversation to the host on a timer so it can be reloaded after a
-	// restart (program-written, like the activity log; agents never touch it).
 	m.writeln(core.Main, styleMuted.Render("conversation history → "+historyPath(m.engagement)+" (reload it on resume)"))
 	m.refreshLayoutSnapshot() // seed the layout snapshot so even an early save persists it
-	go m.historyLoop(ctx)
-
-	// The operator's reverse-shell catcher pane (Ctrl-b L) needs socat in the
-	// sandbox. In pentester mode, best-effort install it if missing so the feature
-	// is ready; non-fatal (the catcher otherwise reports socat is needed).
+	go m.historyLoop(m.engCtx)
+	// The reverse-shell catcher pane needs socat; best-effort install in pentester mode.
 	if m.mode == config.ModePentester {
-		go m.ensureSocat(ctx)
+		go m.ensureSocat(m.engCtx)
 	}
-
 	prompt := m.composePrompt()
-	go func() { m.resultCh <- m.sess.Run(ctx, orch, prompt) }()
-
-	return m, tea.Batch(listen(m.funnel), waitResult(m.resultCh), listenShell(m.shellCh), listenTerm(m.termCh), tickCmd(), textinput.Blink)
+	orch := m.pendingOrch
+	go func() { m.resultCh <- m.sess.Run(m.engCtx, orch, prompt) }()
+	return m, nil
 }
 
 // backupLoop periodically backs up the engagement workspace to the host until
@@ -2329,6 +2434,26 @@ func (m *model) backupLoop(ctx context.Context, engagement string, minutes int) 
 // normally <BackupDir>/<engagement>.tar.gz, but a resume that could not preserve a
 // prior engagement's bundle falls back to a distinct name (backupName) so the
 // previous engagement's backup is never overwritten.
+// engagementNameTaken reports whether a NEW engagement called name would collide
+// with an existing one on the host — i.e. starting it would overwrite that
+// engagement's backup, saved history, activity log, or audit log. The wizard uses
+// it to refuse a duplicate name (the operator can pick another or Resume instead).
+// name is the already-canonicalized engagement name (sandbox.SafeEngagementName).
+func (m *model) engagementNameTaken(name string) bool {
+	fn := safeFileName(name)
+	for _, p := range []string{
+		filepath.Join(m.store.BackupDir(), name+".tar.gz"),
+		historyPath(name),
+		filepath.Join(config.LogDir(), fn+".log"),
+		auditPath(name),
+	} {
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *model) backupBundlePath() string {
 	name := m.backupName
 	if strings.TrimSpace(name) == "" {
@@ -2507,31 +2632,31 @@ func (m *model) placeResumeFiles(distro string) {
 		if _, err := os.Stat(p); err == nil {
 			// a host path -> import (folder or .tar.gz)
 			if err := sandbox.ImportWSLEngagement(ctx, distro, p, m.engagement); err != nil {
-				m.writeln(core.Main, styleErr.Render("import failed: "+err.Error()))
+				m.emitNotice("error", "import failed: "+err.Error())
 			} else {
-				m.writeln(core.Main, styleMuted.Render("imported (host) "+p+" → "+canonical))
+				m.emitNotice("info", "imported (host) "+p+" → "+canonical)
 			}
 			return
 		}
 		// not a host path -> treat it as a path already inside the environment
 		if err := sandbox.CopyWSLDirToWorkspace(ctx, distro, p, m.engagement); err != nil {
-			m.writeln(core.Main, styleErr.Render("could not use environment path "+p+": "+err.Error()))
+			m.emitNotice("error", "could not use environment path "+p+": "+err.Error())
 		} else {
-			m.writeln(core.Main, styleMuted.Render("restored from environment path "+p+" → "+canonical))
+			m.emitNotice("info", "restored from environment path "+p+" → "+canonical)
 		}
 		return
 	}
 	// picked from the list: find its real location and copy into canonical if needed
 	src, err := sandbox.ResolveWSLEngagementPath(ctx, distro, m.engagement)
 	if err != nil {
-		m.writeln(core.Main, styleWarn.Render("note: no existing files found for "+m.engagement+"; the orchestrator will start it fresh"))
+		m.emitNotice("warn", "note: no existing files found for "+m.engagement+"; the orchestrator will start it fresh")
 		return
 	}
 	if src != canonical {
 		if err := sandbox.CopyWSLDirToWorkspace(ctx, distro, src, m.engagement); err != nil {
-			m.writeln(core.Main, styleErr.Render("restore failed: "+err.Error()))
+			m.emitNotice("error", "restore failed: "+err.Error())
 		} else {
-			m.writeln(core.Main, styleMuted.Render("restored "+m.engagement+" from "+src+" → "+canonical))
+			m.emitNotice("info", "restored "+m.engagement+" from "+src+" → "+canonical)
 		}
 	}
 }
@@ -2562,7 +2687,7 @@ func (m *model) restoreWorkspaceFromBackup(engagement string) {
 	bundle := filepath.Join(m.store.BackupDir(), engagement+".tar.gz")
 	wsTgz, err := extractWorkspaceTar(bundle)
 	if err != nil {
-		m.writeln(core.Main, styleWarn.Render("note: no saved workspace to restore for "+engagement+" ("+err.Error()+"); starting with an empty workspace"))
+		m.emitNotice("warn", "note: no saved workspace to restore for "+engagement+" ("+err.Error()+"); starting with an empty workspace")
 		return
 	}
 	defer os.Remove(wsTgz)
@@ -2570,7 +2695,7 @@ func (m *model) restoreWorkspaceFromBackup(engagement string) {
 	ctx := context.Background()
 	const guestTgz = "/tmp/.oline-ws-restore.tgz"
 	if err := m.sess.Sandbox.CopyIn(ctx, wsTgz, guestTgz); err != nil {
-		m.writeln(core.Main, styleErr.Render("workspace restore: could not copy files into the sandbox: "+err.Error()))
+		m.emitNotice("error", "workspace restore: could not copy files into the sandbox: "+err.Error())
 		return
 	}
 	ws := strings.TrimSpace(m.sess.Workspace)
@@ -2604,10 +2729,10 @@ echo RESTORED`,
 		if err != nil {
 			detail = err.Error() + " " + detail
 		}
-		m.writeln(core.Main, styleErr.Render("workspace restore failed: "+strings.TrimSpace(detail)))
+		m.emitNotice("error", "workspace restore failed: "+strings.TrimSpace(detail))
 		return
 	}
-	m.writeln(core.Main, styleMuted.Render("restored previous workspace files for "+engagement+" → "+ws))
+	m.emitNotice("info", "restored previous workspace files for "+engagement+" → "+ws)
 }
 
 // dataSubdirName is the workspace subdirectory the operator-provided data folder is
@@ -2643,7 +2768,7 @@ func (m *model) copyHostDataToWorkspace() {
 	}
 	tgz, err := tarHostDirToTemp(m.dataDir)
 	if err != nil {
-		m.writeln(core.Main, styleErr.Render("could not read the provided data folder "+m.dataDir+": "+err.Error()))
+		m.emitNotice("error", "could not read the provided data folder "+m.dataDir+": "+err.Error())
 		return
 	}
 	defer os.Remove(tgz)
@@ -2651,7 +2776,7 @@ func (m *model) copyHostDataToWorkspace() {
 	ctx := context.Background()
 	const guestTgz = "/tmp/.oline-data.tgz"
 	if err := m.sess.Sandbox.CopyIn(ctx, tgz, guestTgz); err != nil {
-		m.writeln(core.Main, styleErr.Render("provided data: copy into the sandbox failed: "+err.Error()))
+		m.emitNotice("error", "provided data: copy into the sandbox failed: "+err.Error())
 		return
 	}
 	ws := strings.TrimSpace(m.sess.Workspace)
@@ -2689,10 +2814,10 @@ echo COPIED`,
 		if err != nil {
 			detail = err.Error() + " " + detail
 		}
-		m.writeln(core.Main, styleErr.Render("provided data: unpack failed: "+strings.TrimSpace(detail)))
+		m.emitNotice("error", "provided data: unpack failed: "+strings.TrimSpace(detail))
 		return
 	}
-	m.writeln(core.Main, styleMuted.Render("copied provided data (read-only) → "+dest))
+	m.emitNotice("info", "copied provided data → "+dest)
 }
 
 // setupVPN brings up (or confirms) the OpenVPN tunnel per the wizard choice.
@@ -2703,9 +2828,9 @@ func (m *model) setupVPN(distro string) {
 		return
 	case "running":
 		if up, info := sandbox.VPNStatus(ctx, distro); up {
-			m.writeln(core.Main, styleMuted.Render("VPN already up in environment: "+info))
+			m.emitNotice("info", "VPN already up in environment: "+info)
 		} else {
-			m.writeln(core.Main, styleWarn.Render("no VPN tunnel detected in the environment, but you selected 'already running' — continuing"))
+			m.emitNotice("warn", "no VPN tunnel detected in the environment, but you selected 'already running' — continuing")
 		}
 	case "envfile":
 		out, err := sandbox.StartWSLVPN(ctx, distro, strings.TrimSpace(m.vpnIn.Value()))
@@ -2714,10 +2839,10 @@ func (m *model) setupVPN(distro string) {
 		host := strings.TrimSpace(m.vpnIn.Value())
 		guest := "/opt/oline/vpn/" + filepath.Base(host)
 		if err := sandbox.CopyFileToWSL(ctx, distro, host, guest); err != nil {
-			m.writeln(core.Main, styleErr.Render("VPN config upload failed: "+err.Error()))
+			m.emitNotice("error", "VPN config upload failed: "+err.Error())
 			return
 		}
-		m.writeln(core.Main, styleMuted.Render("uploaded VPN config → "+guest))
+		m.emitNotice("info", "uploaded VPN config → "+guest)
 		out, err := sandbox.StartWSLVPN(ctx, distro, guest)
 		m.vpnStatusLine(out, err)
 	}
@@ -2725,21 +2850,21 @@ func (m *model) setupVPN(distro string) {
 
 func (m *model) vpnStatusLine(out string, err error) {
 	if err != nil {
-		m.writeln(core.Main, styleErr.Render("VPN: "+err.Error()))
+		m.emitNotice("error", "VPN: "+err.Error())
 		if out != "" {
-			m.writeln(core.Main, styleMuted.Render(out))
+			m.emitNotice("info", out)
 		}
 		return
 	}
-	m.writeln(core.Main, styleGreenRender("VPN: "+out))
+	m.emitNotice("info", "VPN: "+out)
 }
 
 func (m *model) composePrompt() string {
 	var b strings.Builder
 	b.WriteString("AUTHORIZED ENGAGEMENT. The user has confirmed written authorization to test the target.\n")
-	fmt.Fprintf(&b, "Mode: %s.\n", m.sess.Mode.String())
+	fmt.Fprintf(&b, "Mode: %s.\n", m.sess.Mode().String())
 	b.WriteString(m.sandboxBoundaryLine())
-	if m.sess.Mode == core.Watcher {
+	if m.sess.Mode() == core.Watcher {
 		b.WriteString("WATCHER mode: the operator runs every command themselves in the terminal panes; you do NOT execute anything (the harness blocks bash, bash_bg and revshell). Your job is to WATCH and ADVISE: read and write files in the workspace, track the state of play, and give concise, concrete guidance. The operator shares terminal output with you when they want your read on it; ask (with `ask`) if you need more.\n")
 	}
 	if m.vpnMode != "" && m.vpnMode != "none" {
@@ -3191,6 +3316,8 @@ func (m *model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "p":
 			if m.focusCommandPane() {
 				m.status = "this pane is a command pane, not an agent"
+			} else if m.focusSyntheticPane() {
+				m.status = "this pane isn't an agent"
 			} else {
 				m.router.Pause(focus)
 				m.status = "paused " + string(focus)
@@ -3201,6 +3328,8 @@ func (m *model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "r":
 			if m.focusCommandPane() {
 				m.status = "this pane is a command pane, not an agent"
+			} else if m.focusSyntheticPane() {
+				m.status = "this pane isn't an agent"
 			} else {
 				m.router.Resume(focus)
 				m.status = "resumed " + string(focus)
@@ -3224,6 +3353,8 @@ func (m *model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			} else if m.focusRev() != nil {
 				m.status = "a reverse-shell channel's listener is managed by agents (revshell close)"
+			} else if m.focusSyntheticPane() {
+				m.status = "this pane isn't an agent"
 			} else {
 				n := m.router.StopCommands(focus)
 				m.status = fmt.Sprintf("stopped %d running command(s) for %s", n, focus)
@@ -3257,6 +3388,8 @@ func (m *model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Set / change / remove the focused agent's time budget.
 			if m.focusCommandPane() {
 				m.status = "this pane is a command pane, not an agent"
+			} else if m.focusSyntheticPane() {
+				m.status = "this pane isn't an agent"
 			} else if focus == core.Main {
 				m.status = "the orchestrator (Main) has no time budget"
 			} else {
@@ -3465,6 +3598,8 @@ func (m *model) killFocused(focus core.AgentID) {
 		id := m.focusPane.agent
 		m.closePaneCmd() // reapShell stops the running command and closes the pane
 		m.status = "killed shell " + string(id)
+	case m.focusSyntheticPane():
+		m.status = "this pane isn't an agent"
 	default:
 		m.router.Kill(focus)
 		m.status = "killed " + string(focus)
@@ -3904,6 +4039,13 @@ func (m *model) shutdown() {
 	if m.cancel != nil {
 		m.cancel()
 	}
+	// Wait for any in-flight backup to finish before tearing down the sandbox and
+	// logs, so a running backup never reads a half-closed log/audit or hits a
+	// powered-off sandbox. ctx is already cancelled, so backupLoop starts no new one;
+	// we take (and keep) the backup gate, which runBackup holds for its whole run.
+	if m.sess != nil {
+		m.sess.FreezeWrites()
+	}
 	for _, sh := range m.shells { // cancel any user shell commands still running
 		sh.stop()
 	}
@@ -4192,6 +4334,13 @@ func (m *model) addAgent(id core.AgentID) {
 		return
 	}
 	m.transcripts[id] = &transcript{}
+	// The synthetic info panes (Summary / Diagram / empty) get a transcript so tr()
+	// never returns nil, but must NOT enter the roster order/states — otherwise
+	// focusing one and copying/sharing it (which calls tr()) would register a phantom
+	// "agent" that shows in the roster and the running count and is never reaped.
+	if id == summaryPaneID || id == diagramPaneID || id == emptyPaneID {
+		return
+	}
 	m.order = append(m.order, id)
 	if _, ok := m.states[id]; !ok {
 		m.states[id] = core.Running
@@ -4341,6 +4490,9 @@ func (m *model) viewWizard() string {
 		step(m.step == wScope, "4. "+scopeWord, "    "+m.scopeIn.View())
 		step(m.step == wGoal, "5. Goal", "    "+m.goalIn.View())
 	}
+	if !m.resume {
+		step(m.step == wName, "6. Engagement name (must be unique)", "    "+m.nameIn.View()+"\n    "+styleMuted.Render("names its logs, history, and backup; a duplicate is refused so it can't overwrite an earlier engagement"))
+	}
 
 	step(m.step == wVPN, "6. VPN (optional)", radio(m.vpnSel,
 		"No VPN",
@@ -4372,6 +4524,9 @@ func (m *model) viewWizard() string {
 			msg = "  booting QEMU VM (first run downloads the image — this can take a few minutes)…"
 		}
 		b.WriteString(styleAccent.Render(msg) + "\n")
+	}
+	if m.starting {
+		b.WriteString(styleAccent.Render("  starting the engagement (restoring workspace, connecting integrations, loading history)…") + "\n")
 	}
 	if m.wizErr != "" {
 		b.WriteString(styleErr.Render("  "+m.wizErr) + "\n")
@@ -4515,7 +4670,7 @@ func (m *model) viewRunning() string {
 	}
 	mode := "automatic"
 	if m.sess != nil {
-		mode = m.sess.Mode.String()
+		mode = m.sess.Mode().String()
 	}
 	th := "thoughts:on"
 	if !m.showThoughts {

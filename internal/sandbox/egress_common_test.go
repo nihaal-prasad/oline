@@ -22,7 +22,7 @@ func TestEgressUsersScriptEnablesLowPorts(t *testing.T) {
 // TestResolveScopeCIDRs checks IP/CIDR targets are kept and domain targets are
 // resolved to IPv4 so they get firewall-enforced.
 func TestResolveScopeCIDRs(t *testing.T) {
-	v4, _ := resolveScope([]string{"10.0.0.0/24", "192.168.1.5", "localhost"})
+	v4, _, _ := resolveScope([]string{"10.0.0.0/24", "192.168.1.5", "localhost"})
 	has := func(s string) bool {
 		for _, g := range v4 {
 			if g == s {
@@ -41,7 +41,7 @@ func TestResolveScopeCIDRs(t *testing.T) {
 
 // TestResolveScopeSplitsFamilies checks IPv6 targets land in the v6 list, not v4.
 func TestResolveScopeSplitsFamilies(t *testing.T) {
-	v4, v6 := resolveScope([]string{"10.0.0.5", "2001:db8::1", "fd00::/8"})
+	v4, v6, _ := resolveScope([]string{"10.0.0.5", "2001:db8::1", "fd00::/8"})
 	if len(v4) != 1 || v4[0] != "10.0.0.5" {
 		t.Errorf("v4 = %v, want [10.0.0.5]", v4)
 	}

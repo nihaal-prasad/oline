@@ -63,9 +63,9 @@ type ToolDesc struct {
 type Client struct {
 	name string
 
-	w   io.WriteCloser // the server's stdin
-	enc *json.Encoder
-	wmu sync.Mutex // serializes writes
+	w       io.WriteCloser // the server's stdin
+	enc     *json.Encoder
+	writeCh chan writeReq // owned by writeLoop, which is the only writer to enc
 
 	mu      sync.Mutex
 	nextID  int64
@@ -87,12 +87,37 @@ func newClient(name string, w io.WriteCloser, r io.Reader) *Client {
 		name:     name,
 		w:        w,
 		enc:      json.NewEncoder(w),
+		writeCh:  make(chan writeReq),
 		pending:  map[int64]chan rpcResponse{},
 		closed:   make(chan struct{}),
 		readDone: make(chan struct{}),
 	}
 	go c.readLoop(r)
+	go c.writeLoop()
 	return c
+}
+
+// writeReq is one message to serialize; writeLoop replies on done with the encode
+// error (nil on success).
+type writeReq struct {
+	req  rpcRequest
+	done chan error
+}
+
+// writeLoop is the ONLY goroutine that touches enc, so writes are serialized without
+// a lock. If the server stops reading its stdin, Encode blocks here (and only here);
+// callers in write() are not stuck, because they bound their enqueue/wait on ctx. A
+// blocked Encode unblocks when the transport is closed (fail/Close close c.w), after
+// which this loop sees c.closed and returns.
+func (c *Client) writeLoop() {
+	for {
+		select {
+		case <-c.closed:
+			return
+		case wr := <-c.writeCh:
+			wr.done <- c.enc.Encode(wr.req)
+		}
+	}
 }
 
 // Name is the server's configured name.
@@ -134,6 +159,7 @@ func (c *Client) readLoop(r io.Reader) {
 func (c *Client) fail() {
 	c.closeOnce.Do(func() {
 		close(c.closed)
+		_ = c.w.Close() // unblock a writeLoop stuck in Encode on a server that stopped reading
 		if c.onClose != nil {
 			c.onClose()
 		}
@@ -161,7 +187,7 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 	c.pending[id] = ch
 	c.mu.Unlock()
 
-	if err := c.write(rpcRequest{JSONRPC: "2.0", ID: &id, Method: method, Params: params}); err != nil {
+	if err := c.write(ctx, rpcRequest{JSONRPC: "2.0", ID: &id, Method: method, Params: params}); err != nil {
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
@@ -186,20 +212,35 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 	}
 }
 
-// notify sends a notification (no id, no reply expected).
-func (c *Client) notify(method string, params any) error {
-	return c.write(rpcRequest{JSONRPC: "2.0", Method: method, Params: params})
+// notify sends a notification (no id, no reply expected), bounded by ctx.
+func (c *Client) notify(ctx context.Context, method string, params any) error {
+	return c.write(ctx, rpcRequest{JSONRPC: "2.0", Method: method, Params: params})
 }
 
-// write serializes one message to the transport as a single newline-delimited line.
-func (c *Client) write(req rpcRequest) error {
-	c.wmu.Lock()
-	defer c.wmu.Unlock()
-	// json.Encoder.Encode appends a newline, which is exactly the stdio framing.
-	if err := c.enc.Encode(req); err != nil {
-		return fmt.Errorf("mcp %q: write %s: %w", c.name, req.Method, err)
+// write hands one message to writeLoop and waits for it to be encoded, bounded by
+// ctx and the connection's lifetime. It never blocks indefinitely on a server that
+// has stopped reading its stdin: a stuck Encode is confined to writeLoop, and this
+// caller returns ctx.Err() instead of wedging (and so never blocks other callers).
+func (c *Client) write(ctx context.Context, req rpcRequest) error {
+	done := make(chan error, 1)
+	select {
+	case c.writeCh <- writeReq{req: req, done: done}:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.closed:
+		return fmt.Errorf("mcp %q: connection closed", c.name)
 	}
-	return nil
+	select {
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("mcp %q: write %s: %w", c.name, req.Method, err)
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.closed:
+		return fmt.Errorf("mcp %q: connection closed", c.name)
+	}
 }
 
 // initialize performs the MCP handshake: initialize request, then the initialized
@@ -213,7 +254,7 @@ func (c *Client) initialize(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return c.notify("notifications/initialized", map[string]any{})
+	return c.notify(ctx, "notifications/initialized", map[string]any{})
 }
 
 // listTools fetches every tool the server advertises, following pagination cursors.

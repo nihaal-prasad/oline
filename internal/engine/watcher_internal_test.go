@@ -36,7 +36,7 @@ func TestWatcherModeBlocksBashInDispatch(t *testing.T) {
 	sb := &revSB{}
 	a, s, _, cancel := newRevAgent(t, sb) // agent has bash + revshell
 	defer cancel()
-	s.Mode = core.Watcher
+	s.SetMode(core.Watcher)
 
 	out, isErr := a.dispatch(context.Background(), llm.ToolCall{Name: "bash", Arguments: `{"cmd":"id"}`})
 	if !isErr || !strings.Contains(out, "watcher mode") {
@@ -51,7 +51,7 @@ func TestWatcherModeBlocksBashInDispatch(t *testing.T) {
 	}
 
 	// Back in automatic mode, bash is not watcher-blocked.
-	s.Mode = core.Automatic
+	s.SetMode(core.Automatic)
 	out, _ = a.dispatch(context.Background(), llm.ToolCall{Name: "bash", Arguments: `{"cmd":"true"}`})
 	if strings.Contains(out, "watcher mode") {
 		t.Errorf("bash must not be watcher-blocked in automatic mode, got: %s", out)
@@ -62,7 +62,7 @@ func TestWatcherBlocksCustomExecTool(t *testing.T) {
 	sb := &revSB{}
 	a, s, _, cancel := newRevAgent(t, sb)
 	defer cancel()
-	s.Mode = core.Watcher
+	s.SetMode(core.Watcher)
 	s.ExecTools = map[string]bool{"my_custom_tool": true}
 	out, isErr := a.dispatch(context.Background(), llm.ToolCall{Name: "my_custom_tool", Arguments: `{}`})
 	if !isErr || !strings.Contains(out, "watcher mode") {

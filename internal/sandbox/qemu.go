@@ -255,8 +255,18 @@ func BuildQemuArgs(overlay, seedISO string, memMB, cpus, sshPort int, tap string
 	if seedISO != "" {
 		args = append(args, "-drive", "file="+seedISO+",media=cdrom")
 	}
+	n0 := fmt.Sprintf("user,id=n0,hostfwd=tcp:127.0.0.1:%d-:22", sshPort)
+	if tap != "" {
+		// With the host firewall active, the tap (n1) is the only path for guest-
+		// initiated egress (host nftables filters it). Restrict the SLIRP NIC to its
+		// hostfwd (SSH) only: without restrict=on a root agent could route general
+		// traffic through SLIRP's 10.0.2.2 gateway, which never traverses the tap or the
+		// host nftables, defeating the whole-guest cap. hostfwd (host->guest SSH) keeps
+		// working under restrict=on; real networking goes over the tap.
+		n0 += ",restrict=on"
+	}
 	args = append(args,
-		"-netdev", fmt.Sprintf("user,id=n0,hostfwd=tcp:127.0.0.1:%d-:22", sshPort),
+		"-netdev", n0,
 		"-device", "virtio-net-pci,netdev=n0",
 	)
 	if tap != "" {

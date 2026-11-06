@@ -18,7 +18,7 @@ func TestEmitDeliversLifecycleDropsStream(t *testing.T) {
 	s := &Session{Events: ch}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s.baseCtx = ctx
+	s.setBase(ctx)
 
 	// A stream delta with no reader is dropped (emit returns immediately).
 	done := make(chan struct{})

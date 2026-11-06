@@ -230,7 +230,7 @@ func (h *qemuHandle) Backup(ctx context.Context, engagement, destPath string) er
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 
-	guestDir := WSLWorkspace + "/" + sanitizeHostname(engagement)
+	guestDir := WSLWorkspace + "/" + SafeEngagementName(engagement) // same canonical name as the workspace/backups
 	// --warning flags quiet tar's benign notes so they don't look like failures:
 	// IPC sockets/fifos in the workspace (which tar can't archive and skips) and
 	// files the live agents change mid-read. Those still make tar exit 1; see
@@ -358,7 +358,7 @@ func (h *qemuHandle) persistDisk() error {
 	if h.workdir == "" || eng == "." || eng == string(filepath.Separator) {
 		return fmt.Errorf("sandbox/qemu: cannot persist: engagement workspace unknown")
 	}
-	dir := filepath.Join(h.imagesDir, ".state", sanitizeHostname(eng))
+	dir := filepath.Join(h.imagesDir, ".state", SafeEngagementName(eng))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -552,7 +552,7 @@ func (q *qemuSandbox) bootResume(ctx context.Context, engagement string, opts Bo
 		signer: signer, cmd: cmd, client: client,
 		imagesDir: q.imagesDir, persist: true, keyPEM: keyPEM,
 		hostNet: hn, allowInternet: opts.AllowInternet,
-		workdir: WSLWorkspace + "/" + sanitizeHostname(engagement),
+		workdir: WSLWorkspace + "/" + SafeEngagementName(engagement),
 	}, nil
 }
 

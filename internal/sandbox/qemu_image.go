@@ -48,7 +48,7 @@ const (
 
 // stateDir is where a persisted engagement's disk + key live.
 func (q *qemuSandbox) stateDir(engagement string) string {
-	return filepath.Join(q.imagesDir, ".state", sanitizeHostname(engagement))
+	return filepath.Join(q.imagesDir, ".state", SafeEngagementName(engagement))
 }
 
 // ResumableEngagements lists engagements with a persisted QEMU disk (sorted), so

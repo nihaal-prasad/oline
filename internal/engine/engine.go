@@ -46,6 +46,12 @@ const (
 // lower it.
 var streamStallWarn = 30 * time.Second
 
+// subagentIdleTTL bounds how long a finished persistent subagent waits idle to be
+// reprompted before it is reaped (its goroutine ends and its transcript is dropped),
+// so a long engagement that never re-tasks it doesn't accumulate blocked goroutines.
+// The orchestrator (Main) is never reaped. A var so tests can lower it.
+var subagentIdleTTL = 15 * time.Minute
+
 // LLM is the streaming client contract (satisfied by *llm.Client; mockable).
 type LLM interface {
 	Stream(ctx context.Context, req llm.ChatReq, ch chan<- llm.Delta) error
@@ -149,7 +155,10 @@ type Session struct {
 	LLMFor    LLMResolver
 	ConfigFor ConfigResolver
 	Events    chan event.Event
-	Mode      core.RunMode // automatic | planner | watcher; drives `ask` blocking and the watcher execution block. May change mid-engagement.
+	// runMode (automatic | planner | watcher) drives `ask` blocking and the watcher
+	// execution block. The TUI changes it mid-engagement from its own goroutine while
+	// agent goroutines read it, so it is an atomic accessed via Mode()/SetMode().
+	runMode atomic.Int32
 	// ExecTools names custom tools that execute inside the sandbox (config command
 	// tools and Go extension tools). Watcher mode blocks these alongside
 	// bash/bash_bg/revshell, so "the operator runs everything" stays a guarantee.
@@ -223,7 +232,7 @@ type Session struct {
 	DiagramWidth func() int
 
 	router     *Router
-	baseCtx    context.Context  // engagement-lifetime context; subagents run under this, NOT a parent's per-turn context
+	baseCtx    atomic.Value     // holds ctxHolder: engagement-lifetime context; subagents run under this, NOT a parent's per-turn context. atomic because TUI control ops can read it before/as Run sets it.
 	fileLocks  *tools.FileLocks // cross-agent file-write locks
 	backupGate backupGate       // pauses write/edit while a workspace backup runs
 	// affinityBase is a per-session nonce; each agent's prompt-cache affinity key is
@@ -256,6 +265,27 @@ type Session struct {
 	findings []Finding
 	summary  string
 }
+
+// Mode returns the engagement's current run mode (automatic | planner | watcher).
+func (s *Session) Mode() core.RunMode { return core.RunMode(s.runMode.Load()) }
+
+// SetMode changes the run mode. Safe from any goroutine (the TUI switches it live).
+func (s *Session) SetMode(m core.RunMode) { s.runMode.Store(int32(m)) }
+
+// ctxHolder wraps a context so baseCtx (an atomic.Value) always stores one concrete
+// type; storing bare context.Context values of differing dynamic types would panic.
+type ctxHolder struct{ ctx context.Context }
+
+// base returns the engagement-lifetime context, or nil before Run sets it.
+func (s *Session) base() context.Context {
+	if v := s.baseCtx.Load(); v != nil {
+		return v.(ctxHolder).ctx
+	}
+	return nil
+}
+
+// setBase records the engagement-lifetime context (Run sets it once at start).
+func (s *Session) setBase(ctx context.Context) { s.baseCtx.Store(ctxHolder{ctx}) }
 
 // Finding is one confirmed security finding (recorded via the record_finding tool),
 // retained for the engagement export bundle and the final report.
@@ -442,17 +472,24 @@ func watcherBlocks(name, argsJSON string) bool {
 	}
 }
 
-// bashDenied reports whether a bash/bash_bg tool-call's command matches a deny
-// pattern.
+// hostEscapeRe matches a command reaching the Windows host through a WSL drive mount
+// (/mnt/<drive-letter>) or a Windows-interop binary. It is a config-independent
+// backstop: it blocks ALL drive letters (the config default only covers /mnt/c), so a
+// reused distro whose automount is still on can't be read/written from any drive.
+var hostEscapeRe = regexp.MustCompile(`(?i)(/mnt/[a-z0-9](/|\s|"|'|$)|\b(cmd|powershell|pwsh|wsl|explorer)\.exe\b)`)
+
+// bashDenied reports whether a bash/bash_bg tool-call's command is blocked: either a
+// config deny pattern, or the config-independent host-escape backstop (WSL /mnt
+// mounts and Windows interop).
 func (s *Session) bashDenied(argsJSON string) bool {
-	if len(s.BashDeny) == 0 {
-		return false
-	}
 	var a struct {
 		Cmd string `json:"cmd"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &a); err != nil || a.Cmd == "" {
 		return false
+	}
+	if hostEscapeRe.MatchString(a.Cmd) {
+		return true
 	}
 	for _, re := range s.BashDeny {
 		if re.MatchString(a.Cmd) {
@@ -509,7 +546,7 @@ func (s *Session) emit(ev event.Event) {
 	if !mustDeliver(ev) {
 		return
 	}
-	base := s.baseCtx
+	base := s.base()
 	if base == nil {
 		s.Events <- ev // no engagement context (tests): the reader always drains
 		return
@@ -537,7 +574,7 @@ func (s *Session) emitAsync(ev event.Event) {
 		return
 	default:
 	}
-	base := s.baseCtx
+	base := s.base()
 	go func() {
 		if base == nil {
 			s.Events <- ev
@@ -584,7 +621,7 @@ func (s *Session) Run(ctx context.Context, orch AgentConfig, userPrompt string) 
 	}
 	baseCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	s.baseCtx = baseCtx
+	s.setBase(baseCtx)
 
 	s.router.wg.Add(1)
 	go s.router.budgetMonitor(baseCtx) // engine-enforced per-subagent time budgets
@@ -681,7 +718,7 @@ func (r *Router) send(env Envelope) bool {
 	// Mailbox full (rare — mailboxes are generously buffered): deliver from a
 	// goroutine rather than drop, but don't leak it forever if the target has
 	// stopped draining (killed/finished). Give up when the engagement ends.
-	base := r.sess.baseCtx
+	base := r.sess.base()
 	go func() {
 		if base == nil {
 			a.box <- env
@@ -731,7 +768,7 @@ func (r *Router) spawn(parent core.AgentID, role, prompt string) (core.AgentID, 
 	if err != nil {
 		return "", err
 	}
-	base := r.sess.baseCtx
+	base := r.sess.base()
 	if base == nil {
 		base = context.Background()
 	}
@@ -1330,18 +1367,25 @@ func (a *Agent) Kill() {
 }
 
 // gate blocks while paused. Returns true if the agent has been killed.
-func (a *Agent) gate() (killed bool) {
+func (a *Agent) gate(ctx context.Context) (killed bool) {
 	for {
 		st, ch := a.sm.snapshot()
 		switch st {
 		case core.Killed:
 			return true
 		case core.Paused:
-			// Wait for resume/kill only. Any steering that arrives stays queued in the
-			// mailbox and is folded at the loop top AFTER this tool batch's results are
-			// appended — folding it here would insert a user message between the
-			// assistant tool_calls turn and its tool_results (a provider 400).
-			<-ch
+			// Wait for resume/kill — but ALSO for the engagement context ending, or a
+			// paused agent would block here forever when the engagement is torn down
+			// (or times out) with nothing to resume/kill it, hanging Session.Run's
+			// wg.Wait(). On ctx end, exit as if killed so Run returns. Any steering that
+			// arrives stays queued in the mailbox and is folded at the loop top AFTER
+			// this tool batch's results are appended (folding it here would wedge a user
+			// message between an assistant tool_calls turn and its tool_results).
+			select {
+			case <-ch:
+			case <-ctx.Done():
+				return true
+			}
 		default:
 			return false
 		}
@@ -1359,7 +1403,7 @@ func (a *Agent) Run(parent context.Context) Result {
 		if parent.Err() != nil {
 			return Result{Agent: a.id, Err: parent.Err(), Text: "[aborted]"}
 		}
-		if a.gate() {
+		if a.gate(parent) {
 			a.emitState(core.Killed)
 			return Result{Agent: a.id, Killed: true}
 		}
@@ -1470,7 +1514,7 @@ func (a *Agent) Run(parent context.Context) Result {
 				// The orchestrator stays alive between turns: wait for the next
 				// message (user or peer) and continue rather than ending the run.
 				a.emitState(core.Idle)
-				if !a.awaitInput(parent) {
+				if !a.awaitInput(parent, 0) { // Main never reaps: it waits for the user indefinitely
 					return Result{Agent: a.id, Killed: a.sm.State() == core.Killed, Text: text}
 				}
 				a.sm.setRunning()
@@ -1493,7 +1537,12 @@ func (a *Agent) Run(parent context.Context) Result {
 				a.s.router.send(Envelope{From: a.id, To: a.parent, Kind: MsgResult, Body: a.finalBody(text)})
 				a.releaseSem()
 				a.emitState(core.Idle)
-				if !a.awaitInput(parent) {
+				// A finished subagent idles waiting to be reprompted, but is REAPED after
+				// subagentIdleTTL so a long engagement that never re-tasks it doesn't
+				// accumulate blocked goroutines and retained transcripts. Its slot is
+				// already released; reaping just ends the goroutine (the orchestrator can
+				// spawn a fresh one). Main is never reaped (it waits for the user).
+				if !a.awaitInput(parent, subagentIdleTTL) {
 					return Result{Agent: a.id, Killed: a.sm.State() == core.Killed, Text: text}
 				}
 				if !a.acquireSem(parent) {
@@ -1520,7 +1569,7 @@ func (a *Agent) Run(parent context.Context) Result {
 		}
 
 		for i, tc := range calls {
-			if a.gate() {
+			if a.gate(parent) {
 				// Killed at the gate: pair this and every remaining unrun tool_call with
 				// an aborted result so the assistant's tool_calls turn is never left with
 				// missing results (which a provider 400s on if the history is reused).
@@ -1693,7 +1742,7 @@ func (a *Agent) dispatch(ctx context.Context, tc llm.ToolCall) (content string, 
 	// tools regardless of the per-agent allow-list; file I/O, research and advisory
 	// coordination stay available so agents can still read/write the workspace and
 	// advise. Read live, so a mid-engagement switch takes effect on the next call.
-	if a.s.Mode == core.Watcher && (watcherBlocks(tc.Name, tc.Arguments) || a.s.ExecTools[tc.Name]) {
+	if a.s.Mode() == core.Watcher && (watcherBlocks(tc.Name, tc.Arguments) || a.s.ExecTools[tc.Name]) {
 		a.s.emit(event.Notice{Agent: a.id, Level: "warn", Text: string(a.id) + ": blocked " + tc.Name + " (watcher mode — the operator runs commands)"})
 		return "watcher mode is active: the operator runs all commands themselves, so you cannot execute. This " + tc.Name + " call was blocked. You may still read and write files in the workspace and advise the operator — do that instead.", true
 	}
@@ -2384,7 +2433,7 @@ func (a *Agent) doAsk(ctx context.Context, tc llm.ToolCall) (string, bool) {
 		return "ask: 'question' is required", true
 	}
 	a.s.emit(event.UserQuestion{From: a.id, Text: args.Question, Options: args.Options})
-	if a.s.Mode == core.Automatic {
+	if a.s.Mode() == core.Automatic {
 		return "Automatic mode: no interactive user is available right now. Proceed using your best judgment, strictly within the authorized scope; do not block waiting on this.", false
 	}
 	// Planner/watcher mode: block for a user answer relayed into the mailbox. Any
@@ -2467,10 +2516,18 @@ func (a *Agent) doHeartbeat(ctx context.Context, tc llm.ToolCall) (string, bool)
 	}
 }
 
-// awaitInput blocks an idle interactive orchestrator until the next message
-// arrives (folded into history), returning true to continue. It returns false
-// if the agent is killed or the engagement context ends.
-func (a *Agent) awaitInput(parent context.Context) bool {
+// awaitInput blocks an idle agent until the next message arrives (folded into
+// history), returning true to continue. It returns false if the agent is killed,
+// the engagement context ends, or (when reapAfter > 0) it stays idle that long with
+// no new message — the reap path that bounds finished persistent subagents. A
+// reapAfter of 0 waits forever (the interactive orchestrator).
+func (a *Agent) awaitInput(parent context.Context, reapAfter time.Duration) bool {
+	var reap <-chan time.Time
+	if reapAfter > 0 {
+		t := time.NewTimer(reapAfter)
+		defer t.Stop()
+		reap = t.C
+	}
 	for {
 		if a.sm.State() == core.Killed {
 			return false
@@ -2482,6 +2539,10 @@ func (a *Agent) awaitInput(parent context.Context) bool {
 			return true
 		case <-ch:
 			continue // state changed (e.g. killed) — re-check at the top
+		case <-reap:
+			a.s.notifyLive(event.Notice{Agent: a.id, Level: "info",
+				Text: fmt.Sprintf("%s: idle %s with no new task — reclaiming it (the orchestrator can spawn a fresh one if needed)", a.id, reapAfter)})
+			return false
 		case <-parent.Done():
 			return false
 		}

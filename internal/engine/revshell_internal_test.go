@@ -78,7 +78,7 @@ func newRevAgent(t *testing.T, sb sandbox.Handle) (*Agent, *Session, chan event.
 	s := NewSession(tools.NewRegistry(), sb, nil, func(string) (AgentConfig, bool) { return AgentConfig{}, false }, events, 5)
 	s.Workspace = "/opt/oline/engagements/test"
 	ctx, cancel := context.WithCancel(context.Background())
-	s.baseCtx = ctx
+	s.setBase(ctx)
 	a := newAgent("recon#1", AgentConfig{Role: "recon", Tools: []string{"bash", "revshell"}}, nil, "m", s, "", "")
 	s.router.register(a)
 	return a, s, events, cancel

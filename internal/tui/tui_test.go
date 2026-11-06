@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -143,8 +145,13 @@ func TestWizardNewFlow(t *testing.T) {
 	}
 	tm, _ = tm.Update(key("prove recon"))
 	tm, _ = tm.Update(enter())
-	if tm.(*model).step != wVPN {
-		t.Fatalf("after goal: step=%v, want wVPN", tm.(*model).step)
+	// Goal -> Name (new engagement): a unique default is pre-filled, so Enter accepts it.
+	if tm.(*model).step != wName {
+		t.Fatalf("after goal: step=%v, want wName", tm.(*model).step)
+	}
+	tm, _ = tm.Update(enter())
+	if mm := tm.(*model); mm.step != wVPN || mm.engagement == "" {
+		t.Fatalf("after name: step=%v engagement=%q, want wVPN and a name", mm.step, mm.engagement)
 	}
 	// VPN=none -> optional data folder
 	tm, _ = tm.Update(enter())
@@ -244,6 +251,26 @@ func TestWizardDiskStep(t *testing.T) {
 	tm, _ = tm.Update(enter())
 	if tm.(*model).step != wMem {
 		t.Errorf("invalid RAM should stay on wMem, got step=%v", tm.(*model).step)
+	}
+}
+
+// TestEngagementNameUniqueness: the guard refuses a name whose host artifacts (here a
+// backup bundle) already exist, so a new engagement can't overwrite an earlier one.
+func TestEngagementNameUniqueness(t *testing.T) {
+	m, _ := tempHomeModel(t)
+	if m.engagementNameTaken("brand-new") {
+		t.Error("a fresh name must be available")
+	}
+	// Create a colliding backup bundle, then the same name must be refused.
+	bdir := m.store.BackupDir()
+	if err := os.MkdirAll(bdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bdir, "taken.tar.gz"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !m.engagementNameTaken("taken") {
+		t.Error("a name with an existing backup bundle must be refused")
 	}
 }
 

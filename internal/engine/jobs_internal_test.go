@@ -60,7 +60,7 @@ func newJobAgent(t *testing.T, sb sandbox.Handle) (*Agent, *Session, context.Can
 	}()
 	s := NewSession(tools.NewRegistry(), sb, nil, func(string) (AgentConfig, bool) { return AgentConfig{}, false }, events, 5)
 	ctx, cancel := context.WithCancel(context.Background())
-	s.baseCtx = ctx
+	s.setBase(ctx)
 	a := newAgent("recon#1", AgentConfig{Role: "recon", Tools: []string{"bash", "bash_bg"}}, nil, "m", s, "", "")
 	s.router.register(a)
 	return a, s, cancel

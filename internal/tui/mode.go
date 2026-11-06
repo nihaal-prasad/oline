@@ -25,7 +25,7 @@ func (m *model) cycleMode() {
 		m.status = "no engagement yet"
 		return
 	}
-	m.setRunMode((m.sess.Mode + 1) % 3)
+	m.setRunMode((m.sess.Mode() + 1) % 3)
 }
 
 // setRunMode switches the engagement mode and notifies the orchestrator so it (and,
@@ -35,8 +35,8 @@ func (m *model) setRunMode(mode core.RunMode) {
 	if m.sess == nil {
 		return
 	}
-	prev := m.sess.Mode
-	m.sess.Mode = mode
+	prev := m.sess.Mode()
+	m.sess.SetMode(mode)
 	m.status = "mode: " + mode.String()
 	if m.router != nil {
 		body := fmt.Sprintf("OPERATOR SWITCHED THE ENGAGEMENT MODE: %s -> %s. %s", prev, mode, modeBrief(mode))

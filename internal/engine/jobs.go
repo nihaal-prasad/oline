@@ -38,8 +38,8 @@ type cmdResult struct {
 }
 
 func (a *Agent) jobBaseCtx() context.Context {
-	if a.s.baseCtx != nil {
-		return a.s.baseCtx
+	if base := a.s.base(); base != nil {
+		return base
 	}
 	return context.Background()
 }

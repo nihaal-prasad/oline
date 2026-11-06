@@ -166,13 +166,15 @@ func (m *model) buildExportBundle(engagement, dest string) error {
 	meta := bundleMeta{
 		Engagement: engagement,
 		Mode:       string(m.mode),
-		Scope:      strings.TrimSpace(m.scopeIn.Value()),
-		Goal:       strings.TrimSpace(m.goalIn.Value()),
-		EnvID:      m.envID,
-		CreatedAt:  time.Now(),
-		Findings:   len(findings),
-		Reports:    reportNames,
-		OlineVer:   Version,
+		// Read the scope/goal the engine snapshotted at engagement start, not the live
+		// text inputs — those belong to the UI goroutine and the backup runs on its own.
+		Scope:     strings.TrimSpace(m.sess.Target),
+		Goal:      strings.TrimSpace(m.sess.Goal),
+		EnvID:     m.envID,
+		CreatedAt: time.Now(),
+		Findings:  len(findings),
+		Reports:   reportNames,
+		OlineVer:  Version,
 	}
 	if data, err := json.MarshalIndent(meta, "", "  "); err == nil {
 		_ = add("metadata.json", data)

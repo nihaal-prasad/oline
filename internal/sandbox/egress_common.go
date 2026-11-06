@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nihaal-prasad/oline/internal/core"
@@ -60,13 +61,63 @@ type rootExecFn func(ctx context.Context, script string) (string, error)
 // users, and firewall rules are identical across backends; only the transport
 // (rootExec) differs. It satisfies EgressController.
 type egressCore struct {
-	root    rootExecFn
-	uids    map[string]int
-	applied bool
+	root rootExecFn
+	uids map[string]int
+
+	mu         sync.Mutex
+	applied    bool
+	lastScope  Scope     // the scope of the last successful ApplyBaseline (for re-apply)
+	lastVerify time.Time // last time EnsureApplied confirmed the chain is installed
 }
+
+// egressVerifyInterval throttles the pre-command health check so it costs at most one
+// cheap in-guest check per interval, not one per agent command.
+const egressVerifyInterval = 15 * time.Second
 
 func newEgressCore(root rootExecFn) *egressCore {
 	return &egressCore{root: root, uids: map[string]int{}}
+}
+
+// Applied reports whether the egress baseline has been applied (guarded).
+func (e *egressCore) Applied() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.applied
+}
+
+// markTornDown records that the baseline was removed (Teardown/Shutdown).
+func (e *egressCore) markTornDown() {
+	e.mu.Lock()
+	e.applied = false
+	e.mu.Unlock()
+}
+
+// EnsureApplied re-asserts the egress rules if the dedicated chain has vanished —
+// e.g. after the WSL distro restarted mid-engagement, which drops the in-memory
+// iptables while this process still thinks the firewall is up. Throttled to one
+// in-guest check per egressVerifyInterval. A no-op until the baseline is first
+// applied, and when another check ran recently. Safe for concurrent callers.
+func (e *egressCore) EnsureApplied() {
+	e.mu.Lock()
+	if !e.applied || time.Since(e.lastVerify) < egressVerifyInterval {
+		e.mu.Unlock()
+		return
+	}
+	scope := e.lastScope
+	e.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), egressVerifyInterval)
+	defer cancel()
+	out, err := e.root(ctx, "iptables -C OUTPUT -j "+egChain+" >/dev/null 2>&1 && echo OK || echo GONE")
+	if err == nil && strings.Contains(out, "OK") {
+		e.mu.Lock()
+		e.lastVerify = time.Now()
+		e.mu.Unlock()
+		return
+	}
+	// The chain is gone (or we couldn't check): re-apply the stored baseline so agents
+	// never run under a dropped firewall. ApplyBaseline refreshes lastVerify on success.
+	_ = e.ApplyBaseline(scope)
 }
 
 // ensureUsers creates the unprivileged users (idempotent) and records their uids.
@@ -103,7 +154,10 @@ func (e *egressCore) ensureUsers(ctx context.Context) error {
 // dedicated OLINE_OUT chain; Teardown removes that chain. (It does not snapshot or
 // restore the host's other rules — the policy lives entirely in its own chain.)
 func (e *egressCore) ApplyBaseline(scope Scope) error {
-	ctx := context.Background()
+	// Bound the rule apply so a hung transport (e.g. a stuck wsl.exe) can't hang
+	// engagement start indefinitely; applying iptables rules is quick.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 	if len(e.uids) == 0 {
 		if err := e.ensureUsers(ctx); err != nil {
 			return err
@@ -122,12 +176,23 @@ func (e *egressCore) ApplyBaseline(scope Scope) error {
 	// firewall-enforced the same as one given as an IP (in-scope agents can reach
 	// it; internet-only agents cannot). buildEgressRules also opens DNS to the
 	// guest's resolver so agents can resolve names in the first place.
-	v4, v6 := resolveScope(scope.Targets)
+	v4, v6, unresolved := resolveScope(scope.Targets)
+	if len(unresolved) > 0 {
+		// Fail closed: a target we couldn't resolve can't be excluded from the
+		// internet-no-target class, so applying anyway would silently let that class
+		// reach it. Refuse instead (the caller aborts the engagement); fix DNS or the
+		// target and retry.
+		return fmt.Errorf("sandbox egress: refusing to apply rules — could not resolve scope target(s) %v (the internet-no-target class would not exclude them)", unresolved)
+	}
 	out, err := e.root(ctx, buildEgressRules(us, un, ui, v4, v6, scope.AllowIPv6))
 	if err != nil || !strings.Contains(out, "APPLIED") {
 		return fmt.Errorf("sandbox egress: apply rules: %w: %s", err, strings.TrimSpace(out))
 	}
+	e.mu.Lock()
 	e.applied = true
+	e.lastScope = scope // remembered so EnsureApplied can re-assert after a distro restart
+	e.lastVerify = time.Now()
+	e.mu.Unlock()
 	return nil
 }
 
@@ -149,11 +214,13 @@ func (e *egressCore) PathFor(_ core.AgentID, policy EgressPolicy) (NetPath, erro
 // Teardown removes the dedicated OLINE_OUT chain installed by ApplyBaseline (it
 // takes no snapshot, so there is nothing to restore — only its own chain to delete).
 func (e *egressCore) Teardown() error {
-	if !e.applied {
+	if !e.Applied() {
 		return nil
 	}
-	_, err := e.root(context.Background(), buildEgressTeardown())
-	e.applied = false
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	_, err := e.root(ctx, buildEgressTeardown())
+	e.markTornDown()
 	return err
 }
 
@@ -220,6 +287,16 @@ func buildEgressRules(us, un, ui int, v4, v6 []string, allowIPv6 bool) string {
 		}
 	}
 	b.WriteString("fi\n")
+	if !allowIPv6 {
+		// Fail CLOSED even without ip6tables: a user-supplied guest may lack it, in which
+		// case the ip6tables DROP above never runs and an agent with v6 connectivity could
+		// egress over IPv6, bypassing the v4 scope rules. Disable IPv6 at the kernel as a
+		// backstop so there is no v6 path at all. Best-effort (|| true); harmless when the
+		// ip6tables rules already cover v6. Loopback over ::1 is lost in this mode (agents
+		// use 127.0.0.1), the accepted tradeoff for "no IPv6 egress".
+		b.WriteString("sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true\n")
+		b.WriteString("sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true\n")
+	}
 	b.WriteString("echo APPLIED\n")
 	return b.String()
 }
@@ -257,7 +334,7 @@ func buildEgressTeardown() string {
 // and IPv6 addresses, each added as a host route. Each list is deduplicated. The v6
 // list is only used when the operator enabled IPv6 egress; otherwise v6 is dropped
 // wholesale and the list is harmless.
-func resolveScope(in []string) (v4, v6 []string) {
+func resolveScope(in []string) (v4, v6, unresolved []string) {
 	seen := map[string]bool{}
 	add := func(dst *[]string, s string) {
 		if !seen[s] {
@@ -291,7 +368,11 @@ func resolveScope(in []string) (v4, v6 []string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		ips, err := net.DefaultResolver.LookupIP(ctx, "ip", s)
 		cancel()
-		if err != nil {
+		if err != nil || len(ips) == 0 {
+			// Can't enforce a target we can't resolve: the internet-no-target class is
+			// built by EXCLUDING the resolved IPs, so an unresolved target would silently
+			// leak (that class could reach it). Report it so ApplyBaseline fails closed.
+			add(&unresolved, s)
 			continue
 		}
 		for _, ip := range ips {
@@ -302,7 +383,7 @@ func resolveScope(in []string) (v4, v6 []string) {
 			}
 		}
 	}
-	return v4, v6
+	return v4, v6, unresolved
 }
 
 // sanitizeOneCIDR canonicalizes a single IPv4 address or prefix for safe

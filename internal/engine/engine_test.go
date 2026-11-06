@@ -500,7 +500,7 @@ func TestMessagingAndAsk(t *testing.T) {
 
 	s := engine.NewSession(tools.NewRegistry(), mockSB{}, llmFor, cfgFor, events, 5)
 	// Automatic mode: ask must NOT block; it records the question and proceeds.
-	s.Mode = core.Automatic
+	s.SetMode(core.Automatic)
 	mainCfg := engine.AgentConfig{Role: "Main", Model: "mock/main", IsOrchestrator: true,
 		Tools: []string{"send_message", "ask"}}
 
@@ -539,7 +539,7 @@ func TestAskUnblockedBySteer(t *testing.T) {
 
 	s := engine.NewSession(tools.NewRegistry(), mockSB{}, llmFor, cfgFor, events, 5)
 	s.Interactive = true
-	s.Mode = core.Planner // planner mode: ask blocks for a user answer
+	s.SetMode(core.Planner) // planner mode: ask blocks for a user answer
 	mainCfg := engine.AgentConfig{Role: "Main", Model: "mock/main", IsOrchestrator: true,
 		Tools: []string{"ask"}, System: "x"}
 
