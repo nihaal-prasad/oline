@@ -71,15 +71,17 @@ func (f *funnel) take() (batch []event.Event, ok bool) {
 		case <-f.done:
 		}
 		f.mu.Lock()
-		n := len(f.buf)
-		if n > maxFunnelBatch {
-			n = maxFunnelBatch
-		}
-		batch = f.buf[:n]
-		f.buf = f.buf[n:]
-		more := len(f.buf) > 0
-		if !more {
-			f.buf = nil // release the backing array once fully drained
+		more := false
+		if n := len(f.buf); n <= maxFunnelBatch {
+			// Hand off the whole buffer and start a fresh one; the returned slice shares
+			// no memory with future appends (drain appends into the new nil-backed buf).
+			batch, f.buf = f.buf, nil
+		} else {
+			// Backlog: hand off a capped slice (its own cap, via the 3-index form) and
+			// copy the remainder into a fresh buffer, so neither aliases the other.
+			batch = f.buf[:maxFunnelBatch:maxFunnelBatch]
+			f.buf = append([]event.Event(nil), f.buf[maxFunnelBatch:]...)
+			more = true
 		}
 		closed := f.closed
 		f.mu.Unlock()

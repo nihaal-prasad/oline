@@ -1651,7 +1651,7 @@ func (a *Agent) dispatchWatched(ctx context.Context, tc llm.ToolCall) (content s
 			return r.content, r.isErr
 		case <-t.C:
 			a.s.notifyLive(event.Notice{Agent: a.id, Level: "info",
-				Text: fmt.Sprintf("%s: %s still running (%ds elapsed, no result yet)…", a.id, tc.Name, int(time.Since(start).Seconds()))})
+				Text: fmt.Sprintf("%s: %s still running (%ds elapsed)…", a.id, tc.Name, int(time.Since(start).Seconds()))})
 		}
 	}
 }

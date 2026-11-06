@@ -2015,27 +2015,26 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	var decModel string
 	var decCtx int
 	if sel := strings.TrimSpace(m.store.Effective().ModelRoles.Decision); sel != "" {
-		switch {
-		case m.store.ValidateDecisionModel() != nil:
-			m.writeln(core.Main, styleWarn.Render("decision model not usable — decision features disabled: "+m.store.ValidateDecisionModel().Error()))
-		default:
-			if cl, mid, ctxTok, err := wire.DecisionClient(m.store, sel); err != nil {
-				m.writeln(core.Main, styleWarn.Render("decision model setup failed — decision features disabled: "+err.Error()))
+		if verr := m.store.ValidateDecisionModel(); verr != nil {
+			m.writeln(core.Main, styleWarn.Render("decision model not usable — decision features disabled: "+verr.Error()))
+		} else if cl, mid, ctxTok, err := wire.DecisionClient(m.store, sel); err != nil {
+			m.writeln(core.Main, styleWarn.Render("decision model setup failed — decision features disabled: "+err.Error()))
+		} else {
+			// A short probe (the optimistic path below means it need not wait out a full
+			// cold start). It runs on the UI goroutine, but the event funnel keeps
+			// draining meanwhile, so nothing is lost.
+			pctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			perr := cl.Ping(pctx)
+			cancel()
+			if perr != nil && !decide.IsTransient(perr) {
+				// Definitive rejection (not a /decisions endpoint, bad model or auth): stay off.
+				m.writeln(core.Main, styleWarn.Render("decision model unreachable — decision features disabled: "+perr.Error()))
 			} else {
-				pctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-				perr := cl.Ping(pctx)
-				cancel()
-				switch {
-				case perr == nil:
-					decClient, decModel, decCtx = cl, mid, ctxTok
-					decisionEnabled = true
-				case decide.IsTransient(perr):
-					// Valid config, slow/transient probe: enable anyway (warms up on first use).
-					decClient, decModel, decCtx = cl, mid, ctxTok
-					decisionEnabled = true
-					m.writeln(core.Main, styleWarn.Render("decision model slow to respond at startup ("+perr.Error()+") — enabling it anyway; it will warm up on first use (every decision gate fails open if it stays unreachable)"))
-				default:
-					m.writeln(core.Main, styleWarn.Render("decision model unreachable — decision features disabled: "+perr.Error()))
+				// Reachable, or only a transient/cold-start failure: enable (gates fail open).
+				decClient, decModel, decCtx = cl, mid, ctxTok
+				decisionEnabled = true
+				if perr != nil {
+					m.writeln(core.Main, styleWarn.Render("decision model slow to respond at startup ("+perr.Error()+") — enabling it anyway; it warms up on first use (every decision gate fails open if it stays unreachable)"))
 				}
 			}
 		}
@@ -2253,20 +2252,24 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Optional operator-provided data: copy a host folder into the workspace (read-only)
-	// so agents can read it. No-op unless a folder was chosen in setup.
+	// Optional operator-provided data: copy a host folder into the workspace (read-only
+	// reference data, or writable working source in programmer mode) so agents can use
+	// it. No-op unless a folder was chosen in setup.
 	m.copyHostDataToWorkspace()
 
 	// VPN to reach the target, if requested.
 	m.setupVPN(cand.ID)
 
 	// Egress was established (fail-closed) above; report the resulting policy.
-	if m.mode == config.ModeExploiter {
+	switch {
+	case m.mode == config.ModeExploiter:
 		m.writeln(core.Main, styleMuted.Render("egress enforced: agents are network-isolated (local target only); internet for installer (download) and judge/skeptic (research) only"))
-	} else if pol.Empty() && len(pol.Domains()) == 0 {
-		m.writeln(core.Main, styleWarn.Render("no targets parsed from scope — in-scope agents can reach NO network (strict). researcher/installer/judge/skeptic still get internet."))
-	} else {
-		m.writeln(core.Main, styleMuted.Render(fmt.Sprintf("egress enforced: in-scope IP/CIDR=%v · internet-minus-target for researcher/installer/judge/skeptic", pol.CIDRs())))
+	case m.mode == config.ModeProgrammer:
+		m.writeln(core.Main, styleMuted.Render("egress enforced: code agents are network-isolated (offline tool development); internet for installer (install) and researcher (lookups) only"))
+	case pol.Empty() && len(pol.Domains()) == 0:
+		m.writeln(core.Main, styleWarn.Render("no targets parsed from scope — in-scope agents can reach NO network (strict). researcher/installer still get internet."))
+	default:
+		m.writeln(core.Main, styleMuted.Render(fmt.Sprintf("egress enforced: in-scope IP/CIDR=%v · internet-minus-target for researcher/installer", pol.CIDRs())))
 	}
 	// Domain targets are resolved to IPs at apply time and firewall-enforced like any
 	// other target; agents resolve names via the sandbox's DNS resolver (now allowed).
@@ -2756,7 +2759,11 @@ func (m *model) composePrompt() string {
 	if m.resume {
 		dir := sandbox.WSLWorkspace + "/" + m.engagement
 		fmt.Fprintf(&b, "RESUME the existing engagement %q. Its workspace is at %s.\n", m.engagement, dir)
-		b.WriteString("First rebuild the state of play: read 00-scope.md for the GOAL and prior context, and read the registers (assumptions.md, trust-zones.md, go-no-go.md, changes.md) and skim engagement-log.md. Do NOT redo completed work.\n")
+		if m.mode == config.ModeProgrammer {
+			b.WriteString("First rebuild the state of play: read 00-scope.md for the GOAL, spec, and prior decisions, and skim build-log.md for what was already built, provisioned, and tested. Do NOT redo completed work.\n")
+		} else {
+			b.WriteString("First rebuild the state of play: read 00-scope.md for the GOAL and prior context, and read the registers (assumptions.md, trust-zones.md, go-no-go.md, changes.md) and skim engagement-log.md. Do NOT redo completed work.\n")
+		}
 		switch m.mode {
 		case config.ModeExploiter:
 			fmt.Fprintf(&b, "CURRENT target application (analyze ONLY this; it may have changed since the saved run and SUPERSEDES any recorded earlier): %s\n", strings.TrimSpace(m.scopeIn.Value()))
@@ -2798,10 +2805,14 @@ func (m *model) composePrompt() string {
 	default:
 		b.WriteString(m.networkPolicyLine())
 	}
-	fmt.Fprintf(&b, "Your engagement workspace is %s/%s/ (also reachable as ~/engagements/%s/). Create it and keep 00-scope.md, the registers, and all artifacts there.\n",
-		sandbox.WSLWorkspace, m.engagement, m.engagement)
+	keep := "00-scope.md, the registers, and all artifacts"
+	if m.mode == config.ModeProgrammer {
+		keep = "00-scope.md, build-log.md, and all code and artifacts"
+	}
+	fmt.Fprintf(&b, "Your engagement workspace is %s/%s/ (also reachable as ~/engagements/%s/). Create it and keep %s there.\n",
+		sandbox.WSLWorkspace, m.engagement, m.engagement, keep)
 	b.WriteString(m.diagramWidthLine())
-	b.WriteString("All execution happens inside the sandbox. Begin by recording scope, then proceed per your workflow.")
+	b.WriteString("All execution happens inside the sandbox. Begin by recording the goal and plan, then proceed per your workflow.")
 	return b.String()
 }
 
