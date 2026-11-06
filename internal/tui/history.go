@@ -302,6 +302,7 @@ func (m *model) restoreLayout(wins []savedWindow, winIdx int) {
 // continues live with its full context; the subagents are shown as historical
 // (idle) so the user sees the prior conversation.
 func (m *model) restoreHistory(recs []engine.AgentRecord) {
+	var seedAgents []engine.AgentRecord
 	for _, r := range recs {
 		if r.ID == core.Main {
 			// The LLM requires every assistant tool_call to be followed by its tool
@@ -315,7 +316,12 @@ func (m *model) restoreHistory(recs []engine.AgentRecord) {
 		m.addAgent(r.ID)
 		m.states[r.ID] = core.Idle // restored subagents are historical
 		rebuildTranscript(m.tr(r.ID), r.History)
+		seedAgents = append(seedAgents, r)
 	}
+	// Keep the restored subagents in the engine's snapshot so the next saved history
+	// (and the backup bundle built from it) still contains their transcripts; without
+	// this they live only in the TUI and the first re-save would drop them.
+	m.sess.SeedAgents = seedAgents
 }
 
 // rebuildTranscript renders a saved message history into a transcript for display

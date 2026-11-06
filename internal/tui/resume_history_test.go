@@ -82,6 +82,45 @@ func TestFreshSandbox(t *testing.T) {
 	}
 }
 
+// TestPreserveResumeBackup: resuming an engagement moves its existing backup bundle
+// aside (never overwrites it), keeping the original bytes, and leaves the live target
+// name unchanged so the session writes a fresh complete bundle.
+func TestPreserveResumeBackup(t *testing.T) {
+	t.Setenv("OLINE_HOME", t.TempDir())
+	m := testModel(t)
+	m.engagement = "engagement-old"
+	m.resume = true
+
+	dir := m.store.BackupDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orig := filepath.Join(dir, "engagement-old.tar.gz")
+	content := []byte("ORIGINAL-ENGAGEMENT-BACKUP")
+	if err := os.WriteFile(orig, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m.preserveResumeBackup()
+
+	// The original slot must have been moved aside, not left to be overwritten.
+	if _, err := os.Stat(orig); !os.IsNotExist(err) {
+		t.Error("the original backup should be moved aside, not left in place to be overwritten")
+	}
+	// Exactly one preserved copy, holding the original bytes intact.
+	matches, _ := filepath.Glob(filepath.Join(dir, "engagement-old.pre-resume-*.tar.gz"))
+	if len(matches) != 1 {
+		t.Fatalf("want exactly one preserved backup, got %v", matches)
+	}
+	if got, _ := os.ReadFile(matches[0]); !bytes.Equal(got, content) {
+		t.Errorf("preserved backup lost the original content: got %q", got)
+	}
+	// The live session keeps writing <engagement>.tar.gz (preserve succeeded).
+	if got := m.backupBundlePath(); got != orig {
+		t.Errorf("live backup path should stay %s after a successful preserve, got %s", orig, got)
+	}
+}
+
 // TestExtractWorkspaceTar: the nested workspace.tar.gz is pulled out of a backup
 // bundle, and a bundle without one is an error (so the restore degrades gracefully).
 func TestExtractWorkspaceTar(t *testing.T) {

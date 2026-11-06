@@ -242,6 +242,12 @@ workspace files into the new sandbox from its host backup bundle
 artifacts and loot in place — as long as a backup exists (backups must have been
 enabled). Resuming onto a persisted QEMU VM instead keeps its own on-disk workspace.
 
+Resuming **never overwrites the previous engagement's backup**. Before the resumed
+session writes its first backup, oline moves the existing bundle aside to
+`<root>/backups/<engagement>.pre-resume-<timestamp>.tar.gz` and keeps writing the live
+`<engagement>.tar.gz` fresh. Restored subagent transcripts are also carried into the
+resumed session's saved history, so a re-save never drops an earlier session's work.
+
 ## Activity log
 
 Each engagement writes a human-readable log at `<root>/logs/<engagement>.log`: every

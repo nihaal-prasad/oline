@@ -397,6 +397,7 @@ type model struct {
 	quitArmedAt time.Time     // first Ctrl-c; a second within 3s confirms quit
 	log         *englog       // per-engagement host activity log
 	audit       *audit.Log    // per-engagement tamper-evident command audit log (host-side)
+	backupName  string        // basename for this session's backup bundle; "" = the engagement name (only differs if a resume could not preserve the prior bundle)
 	mcp         *mcp.Manager  // connected external MCP tool servers (host-side), closed at shutdown
 
 	budgetInput   bool         // the command line is entering a time budget
@@ -2164,8 +2165,13 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 
 	// Host-side backups (done by the program, not the agents). 0 disables.
 	if min := m.store.Effective().Backup.IntervalMinutes; min > 0 {
+		// On resume, move any existing bundle aside FIRST so a previous engagement's
+		// backup is never overwritten by this session's backups.
+		if m.resume {
+			m.preserveResumeBackup()
+		}
 		m.writeln(core.Main, styleMuted.Render(fmt.Sprintf("host backups: every %d min + at end → %s (full engagement export bundle: workspace, transcripts, findings, logs, report when produced; overwritten)",
-			min, filepath.Join(m.store.BackupDir(), m.engagement+".tar.gz"))))
+			min, m.backupBundlePath())))
 		go m.backupLoop(ctx, m.engagement, min)
 	} else {
 		m.writeln(core.Main, styleMuted.Render("host backups: disabled (backup.intervalMinutes = 0)"))
@@ -2205,6 +2211,49 @@ func (m *model) backupLoop(ctx context.Context, engagement string, minutes int) 
 	}
 }
 
+// backupBundlePath is the host path this session writes its backup bundle to. It is
+// normally <BackupDir>/<engagement>.tar.gz, but a resume that could not preserve a
+// prior engagement's bundle falls back to a distinct name (backupName) so the
+// previous engagement's backup is never overwritten.
+func (m *model) backupBundlePath() string {
+	name := m.backupName
+	if strings.TrimSpace(name) == "" {
+		name = m.engagement
+	}
+	return filepath.Join(m.store.BackupDir(), name+".tar.gz")
+}
+
+// preserveResumeBackup moves an existing backup bundle aside before a resumed
+// engagement starts, so a previous engagement's backup is NEVER overwritten by the
+// resume. The live session keeps writing <engagement>.tar.gz (now a complete, merged
+// bundle); the pre-resume copy is kept as <engagement>.pre-resume-<timestamp>.tar.gz.
+// Best-effort: if the file cannot be moved aside, this session's backups are written
+// under a separate name instead, so the original is still left intact.
+func (m *model) preserveResumeBackup() {
+	if m.engagement == "" {
+		return
+	}
+	cur := filepath.Join(m.store.BackupDir(), m.engagement+".tar.gz")
+	info, err := os.Stat(cur)
+	if err != nil {
+		return // nothing to preserve
+	}
+	ts := info.ModTime().Format("20060102-150405")
+	preserved := filepath.Join(m.store.BackupDir(), m.engagement+".pre-resume-"+ts+".tar.gz")
+	for i := 1; ; i++ {
+		if _, err := os.Stat(preserved); os.IsNotExist(err) {
+			break
+		}
+		preserved = filepath.Join(m.store.BackupDir(), fmt.Sprintf("%s.pre-resume-%s-%d.tar.gz", m.engagement, ts, i))
+	}
+	if err := os.Rename(cur, preserved); err != nil {
+		m.backupName = m.engagement + ".resumed-" + time.Now().Format("20060102-150405")
+		m.writeln(core.Main, styleWarn.Render("could not move the previous backup aside ("+err.Error()+"); this session's backups go to "+m.backupName+".tar.gz so the original is left untouched"))
+		return
+	}
+	m.writeln(core.Main, styleMuted.Render("preserved the previous engagement backup → "+preserved))
+}
+
 // runBackup writes THE one compressed backup for the engagement to the host
 // (overwriting any previous one) via the sandbox handle — works for any backend
 // (WSL now, QEMU when its lifecycle lands) — and reports via a notice.
@@ -2215,7 +2264,7 @@ func (m *model) runBackup(engagement string) {
 	// Flush the latest conversation to history.json first, so the bundle captures the
 	// most recent transcript (saveHistory is serialized by histMu, safe from here).
 	m.saveHistory()
-	dest := filepath.Join(m.store.BackupDir(), engagement+".tar.gz")
+	dest := m.backupBundlePath()
 	// Pause agent file writes for the duration of the backup so the workspace is never
 	// captured mid-write (agents get a "backup in progress, retry" error meanwhile);
 	// the closure guarantees writes resume even if the build panics.

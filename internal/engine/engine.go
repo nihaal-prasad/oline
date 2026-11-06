@@ -163,6 +163,12 @@ type Session struct {
 	// with full context, before the new resume prompt. Empty = a clean start.
 	SeedHistory []llm.Message
 
+	// SeedAgents are prior-session subagent records restored on resume. They are NOT
+	// re-run; they exist only so Snapshot (and thus the saved history / backup bundle)
+	// still includes every earlier subagent's transcript. A live agent with the same
+	// id shadows its seed record, so a respawned subagent is never double-counted.
+	SeedAgents []AgentRecord
+
 	// SummarizerLLM / SummarizerModel, when set, route context auto-compaction
 	// through the cheaper small-tier model (config ModelRoles.Small) instead of each
 	// agent's own (expensive) model. A big cost saving on long engagements, since
@@ -338,8 +344,27 @@ type AgentRecord struct {
 	History []llm.Message
 }
 
-// Snapshot returns a copy of every live agent's conversation, safe to serialize.
-func (s *Session) Snapshot() []AgentRecord { return s.router.snapshotAll() }
+// Snapshot returns a copy of every agent's conversation, safe to serialize: the live
+// agents, plus any SeedAgents restored on resume whose id is not currently live. This
+// way the saved history (and the backup bundle built from it) keeps earlier sessions'
+// subagent transcripts instead of dropping them the first time it is re-saved.
+func (s *Session) Snapshot() []AgentRecord {
+	live := s.router.snapshotAll()
+	if len(s.SeedAgents) == 0 {
+		return live
+	}
+	seen := make(map[core.AgentID]bool, len(live))
+	for _, r := range live {
+		seen[r.ID] = true
+	}
+	out := live
+	for _, r := range s.SeedAgents {
+		if !seen[r.ID] {
+			out = append(out, r)
+		}
+	}
+	return out
+}
 
 func (r *Router) snapshotAll() []AgentRecord {
 	r.mu.Lock()
