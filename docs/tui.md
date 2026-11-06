@@ -11,7 +11,7 @@ Force it with `OLINE_SIXEL=1` / `OLINE_SIXEL=0`.
 
 The wizard asks each setting in order, skipping steps that don't apply; Enter advances.
 
-1. **Mode**: pentester or exploiter.
+1. **Mode**: pentester, exploiter, or programmer.
 2. **Models**: on the first run (no provider yet), a form defining one: provider
    name, base URL, API key, and a model per tier (`big`, `medium`, `small`) with its
    id, context window, max tokens, reasoning flag, and prices. Fields are prefilled
@@ -46,7 +46,9 @@ The wizard asks each setting in order, skipping steps that don't apply; Enter ad
 7. **Scope**: pentester, the in-scope targets as free text (IPs, CIDRs, and domains
    parsed out; IPs and CIDRs drive the firewall, domains feed tool checks and
    reporting). Exploiter, the application to analyze (a local path, or a URL/name for
-   the installer to fetch); agents stay network-isolated either way.
+   the installer to fetch). Programmer, the project/source to work on (optional — the
+   goal can describe what to build); agents stay network-isolated in exploiter and
+   programmer modes either way.
 8. **Goal**: what the engagement should achieve. When resuming, the saved goal is
    kept and this step takes optional extra instructions instead (blank to skip).
 9. **VPN** (optional, WSL only): an OpenVPN config the sandbox connects through
@@ -79,7 +81,8 @@ The default layout tiles panes like tmux:
   - **Summary** (top): the orchestrator's state of play, in Markdown. `Ctrl-b s`
     refreshes it and the Diagram now.
   - **Diagram** (bottom): an ASCII map the orchestrator draws (a network map in
-    pentester mode, a component map in exploiter). `Ctrl-b d` refreshes just it.
+    pentester mode, a component map in exploiter, a module/dependency map in
+    programmer). `Ctrl-b d` refreshes just it.
     Shown verbatim in monospace; wide lines are clipped, so zoom (`Ctrl-b z`) to read
     a large map.
 

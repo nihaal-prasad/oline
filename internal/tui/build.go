@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"io/fs"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -32,10 +31,7 @@ func LaunchWith(mode config.Mode, opts Options) error {
 	if !mode.Valid() {
 		return fmt.Errorf("tui: unknown mode %q", mode)
 	}
-	var fsys fs.FS = assets.PentesterFS
-	if mode == config.ModeExploiter {
-		fsys = assets.ExploiterFS
-	}
+	fsys := assets.For(string(mode))
 	store, err := config.Load(mode, fsys)
 	if err != nil {
 		return fmt.Errorf("tui: load config: %w", err)

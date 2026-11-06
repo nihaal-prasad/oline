@@ -22,7 +22,7 @@ make dist                 # cross-compiled binaries into the project root (or: p
 OpenAI-compatible provider: a name, a base URL, an API key, and a model for each
 tier. It saves the provider and your tier choices to `~/oline/config/models.yml`
 and the key to `~/oline/config/secrets.yml`. Because that file is shared by every
-mode, you set this up once and both pentester and exploiter use it.
+mode, you set this up once and every mode (pentester, exploiter, programmer) uses it.
 
 A provider's key can instead come from an environment variable: set its `apiKeyRef`
 in `models.yml` to `env:NAME` and export `NAME`. See
@@ -33,6 +33,7 @@ in `models.yml` to `env:NAME` and export `NAME`. See
 ```bash
 oline -mode pentester     # launch the TUI with the setup wizard
 oline -mode exploiter
+oline -mode programmer
 oline -edit               # open the model/provider editor and exit
 oline -print              # print the resolved roster and exit
 oline -version
@@ -50,9 +51,9 @@ oline -mode pentester -env <wsl-distro> -scope "10.0.0.5, 10.0.0.0/24" -goal "pr
 
 | flag | meaning |
 |---|---|
-| `-mode pentester\|exploiter` | which roster to load (default `pentester`) |
+| `-mode pentester\|exploiter\|programmer` | which roster to load (default `pentester`) |
 | `-env <name>` | skip the wizard and start in this sandbox (for example a WSL distro name) |
-| `-scope "<targets>"` | pentester: in-scope IPs, CIDRs, and domains. exploiter: the application to analyze (a local path, or a URL/name to fetch) |
+| `-scope "<targets>"` | pentester: in-scope IPs, CIDRs, and domains. exploiter: the application to analyze (a local path, or a URL/name to fetch). programmer: the project/source to work on (optional) |
 | `-goal "<text>"` | engagement goal |
 | `-planner` | planner mode (AI proposes, you approve each step); default is automatic. `-manual` is a deprecated alias |
 | `-edit` | open the model/provider editor and exit |

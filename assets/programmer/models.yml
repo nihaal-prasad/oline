@@ -1,0 +1,26 @@
+# oline — provider / model definitions (Programmer mode).
+#
+# oline ships with NO default provider. Configure an OpenAI-compatible provider in
+# the first-run setup wizard, or add one here, under `providers`. The wizard writes
+# your choices to the shared ~/oline/config/models.yml, which every mode loads, so
+# configuring one mode configures them all.
+#
+# PUBLIC-REPO SAFE: this file never contains a literal API key. `apiKeyRef` names
+# where the key is resolved from at runtime:
+#   env:NAME          -> os.Getenv("NAME")
+#   secret:<provider> -> ~/oline/config/secrets.yml  (git-ignored, mode 0600)
+# The setup wizard and the in-app editor write keys to secrets.yml.
+#
+# Example of a provider you could add:
+#   providers:
+#     openai:
+#       baseUrl: https://api.openai.com/v1
+#       api: openai
+#       apiKeyRef: secret:openai
+#       models:
+#         - id: gpt-4o
+#           name: GPT-4o
+#           contextWindow: 128000
+#           maxTokens: 16384
+#           cost: { input: 0.0, output: 0.0, cacheRead: 0.0, cacheWrite: 0.0 }
+providers: {}

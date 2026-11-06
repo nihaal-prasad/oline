@@ -4,7 +4,7 @@ oline runs a fleet of AI agents. One is the orchestrator (Main). It does not run
 offensive tools itself; it delegates to specialized subagents, collects their
 results, and steers them.
 
-## The two modes
+## The three modes
 
 ### Pentester
 
@@ -53,6 +53,29 @@ never attack a remote host; only the installer (download) and judge/skeptic
 | skeptic | challenge the findings (internet access) |
 | summarizer | summarize progress |
 | reporter | write the final report |
+
+### Programmer
+
+Red-team **tool development**: generate new code from scratch, or modify existing
+source the operator copied into the workspace. The orchestrator coordinates 6
+subagents.
+
+The "scope" here is the project/source to work on (optional — the goal can describe
+what to build). There is no network target: the code agents are isolated and build
+**offline**, so toolchains and dependencies are provisioned by the installer first.
+Only the installer (install, runs as root) and the researcher (look-ups) reach the
+internet. Existing source is brought in with the "copy a host folder into the
+workspace" step; in this mode that copy is **writable** so agents can edit it — the
+operator's original host files are a separate copy and are never changed.
+
+| subagent | role |
+|---|---|
+| developer | write new code or modify the copied-in source |
+| reviewer | review code for correctness, security, and simplicity |
+| tester | build the code and run its tests (offline) |
+| installer | install toolchains/dependencies (runs as root; the only networked build agent) |
+| researcher | look up library APIs, specs, and reference implementations (internet access) |
+| reporter | write the build/usage docs and final summary |
 
 ## Orchestration
 

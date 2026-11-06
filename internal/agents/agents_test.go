@@ -17,6 +17,7 @@ func TestLoadRosters(t *testing.T) {
 	}{
 		{config.ModePentester, assets.PentesterFS, 18},
 		{config.ModeExploiter, assets.ExploiterFS, 8},
+		{config.ModeProgrammer, assets.ProgrammerFS, 6},
 	}
 	for _, c := range cases {
 		t.Run(string(c.mode), func(t *testing.T) {

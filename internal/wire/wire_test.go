@@ -28,10 +28,7 @@ func has(list []string, s string) bool {
 
 func load(t *testing.T, mode config.Mode) (*config.Store, *agents.Roster) {
 	t.Helper()
-	fsys := assets.PentesterFS
-	if mode == config.ModeExploiter {
-		fsys = assets.ExploiterFS
-	}
+	fsys := assets.For(string(mode))
 	store, err := config.Load(mode, fsys)
 	if err != nil {
 		t.Fatal(err)
@@ -330,6 +327,45 @@ func TestBuildExploiter(t *testing.T) {
 		case !internet[name]:
 			if cfg.Policy != sandbox.Isolated {
 				t.Errorf("%s policy = %v, want Isolated (exploiter exec agents are network-isolated)", name, cfg.Policy)
+			}
+		}
+	}
+}
+
+func TestBuildProgrammer(t *testing.T) {
+	store, roster := load(t, config.ModeProgrammer)
+	orch, resolver := wire.Build(config.ModeProgrammer, store, roster, false)
+	// Programmer uses the base orchestrator toolset — NOT the exploiter-only extras.
+	if has(orch.Tools, "runtime") || has(orch.Tools, "heartbeat") {
+		t.Error("programmer orchestrator should not have runtime/heartbeat (those are exploiter-only)")
+	}
+	// Installer is the only privileged agent and carries web_search.
+	inst, ok := resolver("installer")
+	if !ok {
+		t.Fatal("programmer roster has no installer")
+	}
+	if inst.Policy != sandbox.Privileged {
+		t.Errorf("programmer installer policy = %v, want Privileged", inst.Policy)
+	}
+	if !has(inst.Tools, "web_search") {
+		t.Error("installer should have web_search")
+	}
+	// Installer-only internet: installer is Privileged, researcher is InternetNoTarget
+	// (read-only lookups), every other agent is Isolated (offline tool development).
+	for _, name := range roster.Names() {
+		cfg, _ := resolver(name)
+		switch name {
+		case "installer":
+			if cfg.Policy != sandbox.Privileged {
+				t.Errorf("%s policy = %v, want Privileged", name, cfg.Policy)
+			}
+		case "researcher":
+			if cfg.Policy != sandbox.InternetNoTarget {
+				t.Errorf("%s policy = %v, want InternetNoTarget", name, cfg.Policy)
+			}
+		default:
+			if cfg.Policy != sandbox.Isolated {
+				t.Errorf("%s policy = %v, want Isolated (programmer code agents are offline)", name, cfg.Policy)
 			}
 		}
 	}

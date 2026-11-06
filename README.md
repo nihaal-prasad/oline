@@ -7,10 +7,11 @@
 **Offensive Line** runs a coordinated team of AI agents inside an isolated sandbox
 to attack an authorized target.
 
-Two modes:
+Three modes:
 
 - **Pentester**: Run a penetration test against a network using AI agents.
 - **Exploiter**: Develop fully-weaponized exploits using AI agents.
+- **Programmer**: Develop red-team tooling — generate new code or modify existing source — using AI agents.
 
 > **Authorized use only.** Run oline only against systems you own or have written
 > permission to test. The author is not responsible for illegal use.
@@ -60,6 +61,7 @@ make dist                 # cross-compiled binaries into the project root (or: p
 oline # Immediately get started. Opens up the engagement setup window.
 oline -mode pentester     # launch the TUI with the setup wizard
 oline -mode exploiter
+oline -mode programmer
 oline -edit               # open the model/provider editor and exit
 oline -init-config        # write the mode's default config and prompts to ~/oline/config/<mode>/
 oline -print              # print the resolved roster and exit

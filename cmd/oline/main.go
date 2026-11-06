@@ -8,7 +8,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -25,7 +24,7 @@ import (
 var version = "dev"
 
 func main() {
-	modeFlag := flag.String("mode", "pentester", "roster mode: pentester | exploiter")
+	modeFlag := flag.String("mode", "pentester", "roster mode: pentester | exploiter | programmer")
 	printFlag := flag.Bool("print", false, "print the resolved roster and exit (no TUI)")
 	envFlag := flag.String("env", "", "skip the wizard and start directly in this sandbox (e.g. a WSL distro name)")
 	scopeFlag := flag.String("scope", "", "in-scope targets (direct start)")
@@ -60,7 +59,7 @@ func main() {
 
 	mode := config.Mode(*modeFlag)
 	if !mode.Valid() {
-		fmt.Fprintf(os.Stderr, "unknown mode %q (want pentester or exploiter)\n", *modeFlag)
+		fmt.Fprintf(os.Stderr, "unknown mode %q (want pentester, exploiter, or programmer)\n", *modeFlag)
 		os.Exit(2)
 	}
 
@@ -84,10 +83,7 @@ func main() {
 // user can edit any of them (models, costs, token ceilings, time budgets, tools,
 // personalities, every agent prompt). Existing files are kept unless force is set.
 func initConfig(mode config.Mode, force bool) {
-	var fsys fs.FS = assets.PentesterFS
-	if mode == config.ModeExploiter {
-		fsys = assets.ExploiterFS
-	}
+	fsys := assets.For(string(mode))
 	written, err := config.WriteDefaults(mode, fsys, force)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "oline: init-config:", err)
@@ -106,10 +102,7 @@ func initConfig(mode config.Mode, force bool) {
 }
 
 func printRoster(mode config.Mode) {
-	var fsys fs.FS = assets.PentesterFS
-	if mode == config.ModeExploiter {
-		fsys = assets.ExploiterFS
-	}
+	fsys := assets.For(string(mode))
 	store, err := config.Load(mode, fsys)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "load config:", err)

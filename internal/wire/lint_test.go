@@ -41,11 +41,8 @@ func TestLintCatchesMistakes(t *testing.T) {
 	// registered, and no agent spawns an unknown child. This is a regression
 	// guard — the lint originally caught stale frontmatter (eval/lsp/debug/todo)
 	// that referenced tools the harness never implemented.
-	for _, mode := range []config.Mode{config.ModePentester, config.ModeExploiter} {
-		fsys := assets.PentesterFS
-		if mode == config.ModeExploiter {
-			fsys = assets.ExploiterFS
-		}
+	for _, mode := range []config.Mode{config.ModePentester, config.ModeExploiter, config.ModeProgrammer} {
+		fsys := assets.For(string(mode))
 		s, err := config.Load(mode, fsys)
 		if err != nil {
 			t.Fatalf("load %s config: %v", mode, err)

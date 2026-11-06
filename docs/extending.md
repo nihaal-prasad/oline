@@ -6,7 +6,7 @@ pure config; tools can be pure config (a shell command) or Go (for richer logic)
 ## Custom agents (config files, no rebuild)
 
 Drop a Markdown file at `~/oline/config/<mode>/agents/<name>.md` (`<mode>` is
-`pentester` or `exploiter`). oline discovers it at startup and adds it as a spawnable
+`pentester`, `exploiter`, or `programmer`). oline discovers it at startup and adds it as a spawnable
 subagent. The file is frontmatter plus a system prompt body, exactly like the
 built-in agents:
 

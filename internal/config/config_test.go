@@ -11,6 +11,26 @@ import (
 	"github.com/nihaal-prasad/oline/internal/config"
 )
 
+// TestProgrammerModeValidAndLoads checks the new Programmer mode is a recognized
+// mode and its embedded bundle loads like the others.
+func TestProgrammerModeValidAndLoads(t *testing.T) {
+	if !config.ModeProgrammer.Valid() {
+		t.Fatal("ModeProgrammer should be a valid mode")
+	}
+	if config.Mode("bogus").Valid() {
+		t.Error("an unknown mode must not be valid")
+	}
+	s, err := config.Load(config.ModeProgrammer, assets.ProgrammerFS)
+	if err != nil {
+		t.Fatalf("Load(programmer): %v", err)
+	}
+	// The embedded bundle has the standard tiers (blank until configured) and the
+	// shared orchestrator defaults — i.e. it parses as a normal mode config.
+	if mc := s.Effective().MaxConcurrency; mc <= 0 {
+		t.Errorf("programmer config maxConcurrency = %d, want > 0", mc)
+	}
+}
+
 // TestEnsureModel adds a model the provider's catalog doesn't list yet (inheriting
 // a sibling's shape, with zero cost), persists it to the user models.yml, keeps the
 // existing models, and is a no-op for a model already present.

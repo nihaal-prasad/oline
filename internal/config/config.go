@@ -31,12 +31,15 @@ import (
 type Mode string
 
 const (
-	ModePentester Mode = "pentester"
-	ModeExploiter Mode = "exploiter"
+	ModePentester  Mode = "pentester"
+	ModeExploiter  Mode = "exploiter"
+	ModeProgrammer Mode = "programmer"
 )
 
 // Valid reports whether m is a known mode.
-func (m Mode) Valid() bool { return m == ModePentester || m == ModeExploiter }
+func (m Mode) Valid() bool {
+	return m == ModePentester || m == ModeExploiter || m == ModeProgrammer
+}
 
 // Root is the fully-merged effective configuration.
 type Root struct {
@@ -466,7 +469,7 @@ func (s *Store) sharedModelsPath() string { return filepath.Join(s.configDir, "m
 
 // allModes lists the roster modes whose legacy per-mode config may hold model or
 // provider setup to migrate into the shared layer.
-func allModes() []Mode { return []Mode{ModePentester, ModeExploiter} }
+func allModes() []Mode { return []Mode{ModePentester, ModeExploiter, ModeProgrammer} }
 
 // migrateSharedModels promotes a one-time legacy per-mode model/provider setup
 // into the shared ~/oline/config/models.yml so every mode inherits it. Earlier

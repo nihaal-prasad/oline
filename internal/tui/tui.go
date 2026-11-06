@@ -497,21 +497,56 @@ const inputPromptReserve = 6
 // targets, exploiter takes the application to analyze (local path or an app to
 // fetch). applyModePlaceholders keeps them in step when the wizard's mode changes.
 const (
-	scopePlaceholderPentest = "in-scope only — e.g. 10.0.0.5, 10.0.0.0/24, app.example.com"
-	scopePlaceholderExploit = "application to analyze — a local path, or a name/URL for the installer to fetch (e.g. /opt/acme-server, or \"acmed 2.3.1\")"
-	goalPlaceholderPentest  = "goal — e.g. capture the flag at /root/flag.txt; prove RCE"
-	goalPlaceholderExploit  = "goal — e.g. find and prove an exploitable bug; build a working PoC"
+	scopePlaceholderPentest    = "in-scope only — e.g. 10.0.0.5, 10.0.0.0/24, app.example.com"
+	scopePlaceholderExploit    = "application to analyze — a local path, or a name/URL for the installer to fetch (e.g. /opt/acme-server, or \"acmed 2.3.1\")"
+	scopePlaceholderProgrammer = "project / source to work on (optional) — e.g. the copied-in repo, or a short name for the tool to build"
+	goalPlaceholderPentest     = "goal — e.g. capture the flag at /root/flag.txt; prove RCE"
+	goalPlaceholderExploit     = "goal — e.g. find and prove an exploitable bug; build a working PoC"
+	goalPlaceholderProgrammer  = "goal — e.g. build a custom C2 beacon in Go; add a SOCKS proxy to the copied-in tool"
 )
+
+// wizardModes is the ordered list of roster modes the setup wizard offers; its
+// index is what m.modeSel selects. Adding a mode here (plus its labels) is all the
+// picker needs.
+var wizardModes = []config.Mode{config.ModePentester, config.ModeExploiter, config.ModeProgrammer}
+
+// modeIndex returns mode's position in wizardModes (0 if not found).
+func modeIndex(mode config.Mode) int {
+	for i, x := range wizardModes {
+		if x == mode {
+			return i
+		}
+	}
+	return 0
+}
+
+// scopePlaceholderFor / goalPlaceholderFor return the input placeholder for a mode.
+func scopePlaceholderFor(mode config.Mode) string {
+	switch mode {
+	case config.ModeExploiter:
+		return scopePlaceholderExploit
+	case config.ModeProgrammer:
+		return scopePlaceholderProgrammer
+	default:
+		return scopePlaceholderPentest
+	}
+}
+
+func goalPlaceholderFor(mode config.Mode) string {
+	switch mode {
+	case config.ModeExploiter:
+		return goalPlaceholderExploit
+	case config.ModeProgrammer:
+		return goalPlaceholderProgrammer
+	default:
+		return goalPlaceholderPentest
+	}
+}
 
 // applyModePlaceholders sets the scope/goal input placeholders for the current mode.
 func (m *model) applyModePlaceholders() {
-	if m.mode == config.ModeExploiter {
-		m.scopeIn.Placeholder = scopePlaceholderExploit
-		m.goalIn.Placeholder = goalPlaceholderExploit
-	} else {
-		m.scopeIn.Placeholder = scopePlaceholderPentest
-		m.goalIn.Placeholder = goalPlaceholderPentest
-	}
+	m.scopeIn.Placeholder = scopePlaceholderFor(m.mode)
+	m.goalIn.Placeholder = goalPlaceholderFor(m.mode)
 }
 
 // Default VM sizing suggested in the wizard's disk/CPU/RAM steps for a new QEMU VM.
@@ -525,17 +560,11 @@ const (
 
 func newModel(mode config.Mode, store *config.Store, roster *agents.Roster) *model {
 	si := textinput.New()
-	si.Placeholder = scopePlaceholderPentest
-	if mode == config.ModeExploiter {
-		si.Placeholder = scopePlaceholderExploit
-	}
+	si.Placeholder = scopePlaceholderFor(mode)
 	si.CharLimit = 1024
 	si.Width = 64
 	gi := textinput.New()
-	gi.Placeholder = goalPlaceholderPentest
-	if mode == config.ModeExploiter {
-		gi.Placeholder = goalPlaceholderExploit
-	}
+	gi.Placeholder = goalPlaceholderFor(mode)
 	gi.Width = 64
 	di := textinput.New()
 	di.Placeholder = "GB for the new VM's disk (e.g. 25)"
@@ -602,9 +631,7 @@ func newModel(mode config.Mode, store *config.Store, roster *agents.Roster) *mod
 		autoSel:        1,     // planner mode is selected by default in the wizard (0 = automatic, 1 = planner, 2 = watcher)
 		mdCache:        map[int]*glamour.TermRenderer{},
 	}
-	if mode == config.ModeExploiter {
-		m.modeSel = 1
-	}
+	m.modeSel = modeIndex(mode)
 	return m
 }
 
@@ -998,15 +1025,18 @@ func (m *model) wizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case wMode:
 		switch k {
 		case "up", "k":
-			m.modeSel = 0
-		case "down", "j":
-			m.modeSel = 1
-		case "enter":
-			if m.modeSel == 1 {
-				m.mode = config.ModeExploiter
-			} else {
-				m.mode = config.ModePentester
+			if m.modeSel > 0 {
+				m.modeSel--
 			}
+		case "down", "j":
+			if m.modeSel < len(wizardModes)-1 {
+				m.modeSel++
+			}
+		case "enter":
+			if m.modeSel < 0 || m.modeSel >= len(wizardModes) {
+				m.modeSel = 0
+			}
+			m.mode = wizardModes[m.modeSel]
 			m.reloadForMode()
 			m.buildCatalog()
 			if !m.store.ModelsConfigured() {
@@ -2416,11 +2446,12 @@ func (m *model) ensureSocat(ctx context.Context) {
 // re-applies the per-agent firewall ON THE FLY and tells the orchestrator the
 // allowed scope changed; otherwise the new scope just takes effect at start.
 // egressScope is the scope text that feeds the per-agent egress firewall. In
-// exploiter mode "scope" names the application under analysis, not network targets,
-// and every exec agent is network-isolated anyway, so it yields no firewall targets.
-// In pentester mode it is the in-scope target list.
+// exploiter mode "scope" names the application under analysis, and in programmer mode
+// it names the project/source — neither is a network target, and every non-internet
+// agent is isolated anyway, so both yield no firewall targets. In pentester mode it
+// is the in-scope target list.
 func (m *model) egressScope() string {
-	if m.mode == config.ModeExploiter {
+	if m.mode == config.ModeExploiter || m.mode == config.ModeProgrammer {
 		return ""
 	}
 	return m.scopeIn.Value()
@@ -2433,16 +2464,20 @@ func (m *model) applyScopeLive(raw string) {
 	}
 	ec := m.sess.Sandbox.EgressController()
 	allowIPv6 := m.store.Effective().Network.AllowIPv6
-	if m.mode == config.ModeExploiter {
-		// The exploiter target is local; agents stay network-isolated regardless of
-		// scope. Treat the edit as a new application description, not a firewall change.
+	if m.mode == config.ModeExploiter || m.mode == config.ModeProgrammer {
+		// Exploiter (local target) and programmer (local tool dev) have no network
+		// target; agents stay network-isolated regardless of scope. Treat the edit as a
+		// new description, not a firewall change.
+		steer := fmt.Sprintf("TARGET UPDATE from the operator: the application under analysis is now %q. Agents remain network-isolated (local target only); never attack a remote host.", strings.TrimSpace(raw))
+		if m.mode == config.ModeProgrammer {
+			steer = fmt.Sprintf("PROJECT UPDATE from the operator: the project/source to work on is now %q. Agents remain offline (no network target); install anything needed via the installer.", strings.TrimSpace(raw))
+		}
 		go func() {
 			if err := ec.ApplyBaseline(sandbox.Scope{AllowIPv6: allowIPv6}); err != nil {
 				m.emitNotice("error", "live scope update: firewall re-apply failed: "+err.Error())
 				return
 			}
-			m.router.Send(engine.Envelope{From: "User", To: core.Main, Kind: engine.MsgSteer,
-				Body: fmt.Sprintf("TARGET UPDATE from the operator: the application under analysis is now %q. Agents remain network-isolated (local target only); never attack a remote host.", strings.TrimSpace(raw))})
+			m.router.Send(engine.Envelope{From: "User", To: core.Main, Kind: engine.MsgSteer, Body: steer})
 		}()
 		return
 	}
@@ -2621,18 +2656,28 @@ func (m *model) copyHostDataToWorkspace() {
 		ws = sandbox.WSLWorkspace + "/" + m.engagement
 	}
 	dest := ws + "/" + dataSubdirName(m.dataDir)
-	// Unpack as root into the workspace, then make the copy read-only to the
-	// unprivileged agents (root-owned, world-readable, not group/other-writable): they
-	// can READ the reference data but not alter it, and the host originals are untouched.
+	// Unpack as root into the workspace. Permissions depend on the mode:
+	//   - Programmer mode copies in source the agents must EDIT, so make it group
+	//     (oline) owned and group-writable — exactly like the resume/import path
+	//     (CopyWSLDirToWorkspace). The host originals are untouched: agents only ever
+	//     see this sandbox copy, so editing it never reaches the user's files.
+	//   - Every other mode treats it as READ-ONLY reference data (root-owned,
+	//     world-readable, not group/other-writable): agents can read but not alter it.
+	ownLine := "chown -R root:root " + shQuote(dest) + " 2>/dev/null || true"
+	permLine := "chmod -R a+rX,go-w " + shQuote(dest) + " 2>/dev/null || true"
+	if m.mode == config.ModeProgrammer {
+		ownLine = "getent group oline >/dev/null 2>&1 && chown -R root:oline " + shQuote(dest) + " 2>/dev/null || true"
+		permLine = "chmod -R g+rwX " + shQuote(dest) + " 2>/dev/null || true"
+	}
 	script := fmt.Sprintf(`set -e
 rm -rf %s
 mkdir -p %s
 tar --no-same-owner --no-same-permissions -xzf %s -C %s
 rm -f %s
-chown -R root:root %s 2>/dev/null || true
-chmod -R a+rX,go-w %s 2>/dev/null || true
+%s
+%s
 echo COPIED`,
-		shQuote(dest), shQuote(dest), shQuote(guestTgz), shQuote(dest), shQuote(guestTgz), shQuote(dest), shQuote(dest))
+		shQuote(dest), shQuote(dest), shQuote(guestTgz), shQuote(dest), shQuote(guestTgz), ownLine, permLine)
 
 	var out strings.Builder
 	if _, err := m.sess.Sandbox.Exec(ctx, core.AgentID("setup"),
@@ -2702,17 +2747,28 @@ func (m *model) composePrompt() string {
 		if ws == "" {
 			ws = sandbox.WSLWorkspace + "/" + m.engagement
 		}
-		fmt.Fprintf(&b, "The operator provided supporting data at %s/%s in the workspace — read-only reference material to consult before and during the work (you cannot modify it).\n", ws, dataSubdirName(m.dataDir))
+		if m.mode == config.ModeProgrammer {
+			fmt.Fprintf(&b, "The operator copied in source at %s/%s in the workspace — this is the WORKING TREE to modify (it is group-writable; edit it in place). It is a copy: the operator's original host files are never exposed and are never changed by your edits.\n", ws, dataSubdirName(m.dataDir))
+		} else {
+			fmt.Fprintf(&b, "The operator provided supporting data at %s/%s in the workspace — read-only reference material to consult before and during the work (you cannot modify it).\n", ws, dataSubdirName(m.dataDir))
+		}
 	}
 	if m.resume {
 		dir := sandbox.WSLWorkspace + "/" + m.engagement
 		fmt.Fprintf(&b, "RESUME the existing engagement %q. Its workspace is at %s.\n", m.engagement, dir)
 		b.WriteString("First rebuild the state of play: read 00-scope.md for the GOAL and prior context, and read the registers (assumptions.md, trust-zones.md, go-no-go.md, changes.md) and skim engagement-log.md. Do NOT redo completed work.\n")
-		if m.mode == config.ModeExploiter {
+		switch m.mode {
+		case config.ModeExploiter:
 			fmt.Fprintf(&b, "CURRENT target application (analyze ONLY this; it may have changed since the saved run and SUPERSEDES any recorded earlier): %s\n", strings.TrimSpace(m.scopeIn.Value()))
 			b.WriteString("Update 00-scope.md to reflect this target, then continue toward the goal.\n")
 			b.WriteString(exploiterLocalOnly)
-		} else {
+		case config.ModeProgrammer:
+			if s := strings.TrimSpace(m.scopeIn.Value()); s != "" {
+				fmt.Fprintf(&b, "CURRENT project / source to work on (authoritative; it may have changed since the saved run and SUPERSEDES any recorded earlier): %s\n", s)
+			}
+			b.WriteString("Update 00-scope.md to reflect the current project, then continue toward the goal.\n")
+			b.WriteString(programmerSandboxNote)
+		default:
 			fmt.Fprintf(&b, "CURRENT in scope (ONLY these — authoritative; they may have changed since the saved run, so they SUPERSEDE any scope recorded earlier): %s\n", strings.TrimSpace(m.scopeIn.Value()))
 			b.WriteString("Update 00-scope.md to reflect this current scope, then continue toward the goal.\n")
 			b.WriteString(m.networkPolicyLine())
@@ -2723,15 +2779,23 @@ func (m *model) composePrompt() string {
 		b.WriteString(m.diagramWidthLine())
 		return b.String()
 	}
-	if m.mode == config.ModeExploiter {
+	switch m.mode {
+	case config.ModeExploiter:
 		fmt.Fprintf(&b, "Target application (reverse engineer / analyze ONLY this): %s\n", strings.TrimSpace(m.scopeIn.Value()))
-	} else {
+	case config.ModeProgrammer:
+		if s := strings.TrimSpace(m.scopeIn.Value()); s != "" {
+			fmt.Fprintf(&b, "Project / source to work on: %s\n", s)
+		}
+	default:
 		fmt.Fprintf(&b, "In scope (ONLY these — never touch anything else): %s\n", strings.TrimSpace(m.scopeIn.Value()))
 	}
 	fmt.Fprintf(&b, "Goal: %s\n", strings.TrimSpace(m.goalIn.Value()))
-	if m.mode == config.ModeExploiter {
+	switch m.mode {
+	case config.ModeExploiter:
 		b.WriteString(exploiterLocalOnly)
-	} else {
+	case config.ModeProgrammer:
+		b.WriteString(programmerSandboxNote)
+	default:
 		b.WriteString(m.networkPolicyLine())
 	}
 	fmt.Fprintf(&b, "Your engagement workspace is %s/%s/ (also reachable as ~/engagements/%s/). Create it and keep 00-scope.md, the registers, and all artifacts there.\n",
@@ -2744,6 +2808,12 @@ func (m *model) composePrompt() string {
 // exploiterLocalOnly tells the orchestrator that the exploiter target is local and
 // no agent may reach a remote host; only the installer fetches the app from the net.
 const exploiterLocalOnly = "The target runs LOCALLY inside the sandbox. You are NOT authorized to attack, scan, or exploit any remote host or service: every exec agent is network-isolated and can reach only the local machine (loopback). If the application must be obtained from the internet, have the installer (the one agent with internet access) download and install it; every other agent works offline against the local build.\n"
+
+// programmerSandboxNote tells the orchestrator that programmer mode is local,
+// offline tool development: code agents have no network, so toolchains and
+// dependencies are provisioned by the installer first, and everything is built and
+// tested offline against that. Mirrors exploiterLocalOnly's role in composePrompt.
+const programmerSandboxNote = "All work is LOCAL inside the sandbox; there is no network target. Your code agents (developer, reviewer, tester, reporter) are network-isolated and build and test OFFLINE. To install a language, toolchain, build tool, package, or library, spawn the installer FIRST (it is the ONLY agent with network access and root) and have it provision what the build needs — then the developer and tester work against that offline. Keep every file inside the engagement workspace (never /tmp or anywhere outside it). Build engagement tooling to achieve the authorized goal; keep code transparent and documented.\n"
 
 // diagramWidthLine tells the orchestrator the exact current width of the Diagram
 // pane so its first map fits. The limit is also enforced by update_diagram (which
@@ -4206,7 +4276,7 @@ func (m *model) viewWizard() string {
 		return sb.String()
 	}
 
-	step(m.step == wMode, "1. Mode", radio(m.modeSel, "Pentester", "Exploiter"))
+	step(m.step == wMode, "1. Mode", radio(m.modeSel, "Pentester", "Exploiter", "Programmer"))
 	if m.step == wSetup {
 		step(true, "Models — set up your provider (first-run setup)", m.setupBodyView())
 	}
@@ -4237,9 +4307,13 @@ func (m *model) viewWizard() string {
 
 	scopeWord := "Scope"
 	scopeResumeLabel := "5. Scope (confirm — targets may have changed)"
-	if m.mode == config.ModeExploiter {
+	switch m.mode {
+	case config.ModeExploiter:
 		scopeWord = "Application"
 		scopeResumeLabel = "5. Application (confirm — it may have changed)"
+	case config.ModeProgrammer:
+		scopeWord = "Project"
+		scopeResumeLabel = "5. Project (confirm — it may have changed)"
 	}
 	if m.resume {
 		step(m.step == wResume, "4. Previous engagement", m.resumeBodyView(radio))
@@ -4266,8 +4340,12 @@ func (m *model) viewWizard() string {
 		step(true, "   OpenVPN config path", "    "+m.vpnIn.View())
 	}
 
+	dataHelp := "agents read a copy in the workspace; the original host files are never exposed and cannot be changed"
+	if m.mode == config.ModeProgrammer {
+		dataHelp = "copy in source to work on — agents EDIT this copy in the workspace; your original host files are never exposed and are never changed"
+	}
 	step(m.step == wData, "7. Copy a host folder into the workspace (optional)",
-		"    "+m.dataDirIn.View()+"\n    "+styleMuted.Render("agents read a copy in the workspace; the original host files are never exposed and cannot be changed"))
+		"    "+m.dataDirIn.View()+"\n    "+styleMuted.Render(dataHelp))
 
 	step(m.step == wAuto, "8. Automation", radio(m.autoSel,
 		"Automatic (AI runs end-to-end)",
@@ -4947,9 +5025,4 @@ func managedFirst(cs []sandbox.Candidate) []sandbox.Candidate {
 	return append(managed, other...)
 }
 
-func assetsFor(mode config.Mode) fs.FS {
-	if mode == config.ModeExploiter {
-		return assets.ExploiterFS
-	}
-	return assets.PentesterFS
-}
+func assetsFor(mode config.Mode) fs.FS { return assets.For(string(mode)) }

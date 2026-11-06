@@ -30,8 +30,11 @@ func (m *model) openEditor() {
 	// the orchestrator). With `oline -edit` there is no engagement, so it is omitted.
 	if !m.editorOnly {
 		scopeName := "in-scope targets"
-		if m.mode == config.ModeExploiter {
+		switch m.mode {
+		case config.ModeExploiter:
 			scopeName = "target application"
+		case config.ModeProgrammer:
+			scopeName = "project / source"
 		}
 		m.eItems = append(m.eItems, eItem{kind: "scope", name: scopeName})
 	}
@@ -100,8 +103,11 @@ func (m *model) buildFields() {
 	switch it.kind {
 	case "scope":
 		label := "in-scope targets (IPs / CIDRs / domains)"
-		if m.mode == config.ModeExploiter {
+		switch m.mode {
+		case config.ModeExploiter:
 			label = "target application (local path, or URL/name to fetch)"
+		case config.ModeProgrammer:
+			label = "project / source (optional — a path or short description)"
 		}
 		m.eFields = []textinput.Model{
 			mk(label, m.scopeIn.Value(), false),

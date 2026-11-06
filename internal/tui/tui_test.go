@@ -161,6 +161,32 @@ func TestWizardNewFlow(t *testing.T) {
 	}
 }
 
+// TestWizardProgrammerMode: the mode picker offers a third option (Programmer), and
+// selecting it (down, down, enter) switches the model to programmer mode and applies
+// the programmer scope/goal placeholders.
+func TestWizardProgrammerMode(t *testing.T) {
+	m, _ := tempHomeModel(t) // isolated empty home: models unconfigured
+	var tm tea.Model = m
+	tm, _ = tm.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	// The mode step renders all three options.
+	if v := tm.(*model).View(); !strings.Contains(v, "Pentester") || !strings.Contains(v, "Exploiter") || !strings.Contains(v, "Programmer") {
+		t.Fatalf("mode picker should list all three modes; view:\n%s", v)
+	}
+	// Move to the third option and select it.
+	tm, _ = tm.Update(down())
+	tm, _ = tm.Update(down())
+	tm, _ = tm.Update(enter())
+
+	mm := tm.(*model)
+	if mm.mode != config.ModeProgrammer {
+		t.Fatalf("after selecting the third option, mode = %q, want programmer", mm.mode)
+	}
+	if mm.scopeIn.Placeholder != scopePlaceholderProgrammer || mm.goalIn.Placeholder != goalPlaceholderProgrammer {
+		t.Errorf("programmer placeholders not applied: scope=%q goal=%q", mm.scopeIn.Placeholder, mm.goalIn.Placeholder)
+	}
+}
+
 // TestWizardDiskStep: the new-VM sizing steps parse valid values into
 // diskGB/cpus/memGB and chain disk -> CPUs -> RAM -> Scope, rejecting bad entries.
 func TestWizardDiskStep(t *testing.T) {

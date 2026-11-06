@@ -34,6 +34,9 @@ Each agent class runs as a distinct guest user:
 - Exploiter: the target runs locally, so agents are isolated (loopback only) and
   can never reach a remote host. Only `installer` (download) and `judge`/`skeptic`
   (research) get the internet.
+- Programmer: tool development is local and offline, so code agents (developer,
+  reviewer, tester, reporter) are isolated (loopback only). Only `installer`
+  (install toolchains/deps) and `researcher` (look-ups) get the internet.
 - The `installer` runs as root to install software.
 
 Changing scope while running re-applies these rules. See [tui.md](tui.md).

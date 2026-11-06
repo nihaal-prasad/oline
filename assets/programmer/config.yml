@@ -1,0 +1,82 @@
+# oline — Programmer mode harness config (defaults; override at ~/oline/config/programmer/config.yml).
+#
+# Programmer mode is for red-team TOOL DEVELOPMENT: generate new code from scratch,
+# or modify existing source copied into the sandbox. Main orchestrates; specialist
+# subagents (developer, reviewer, tester, installer, researcher, reporter) do the work.
+#
+# Three model tiers. Every agent runs on one of them; context compaction uses `small`.
+# There are NO defaults — you MUST choose a model for each tier the first time you run
+# oline (the setup wizard prompts you, or use `oline -edit`). The engagement will not
+# start until all three are set to a model in models.yml that has a usable API key.
+# Your choices are saved to ~/oline/config/<mode>/config.yml afterward.
+modelRoles:
+  big:    ""   # strongest: developer, reviewer, tester (and the orchestrator if you raise its tier)
+  medium: ""   # balanced, in-between work
+  small:  ""   # fastest/cheapest: summarizers, and context compaction
+  # decision: OPTIONAL System-1 decision model (leave blank to disable). When set and
+  # reachable it enables automatic finding triage/dedup, judge pre-screening, a subagent
+  # progress detector, and task routing. It answers typed questions, not free text.
+  decision: ""
+
+# Hard ceiling on concurrently-running subagents (enforced by a real semaphore in the engine).
+maxConcurrency: 5
+
+# The orchestrator (Main) runs on one of the three tiers, like any agent. Default:
+# the medium tier with a high thinking level — strong planning at a lower cost than
+# the big tier. maxContextTokens (0 = auto) is the ceiling at which Main compacts.
+orchestrator:
+  tier: medium
+  thinkingLevel: high
+  maxContextTokens: 0
+
+# Host-side compressed backups of the engagement workspace (the oline program does
+# these — the AI agents never write to the host). 0 disables backups entirely.
+# The host location is $OLINE_HOME (default ~/oline), under backups/.
+backup:
+  intervalMinutes: 10
+
+# Per-subagent time budget, ENFORCED BY THE ENGINE (not the AI): a subagent that
+# runs past its budget gets three escalating reminders and is terminated if it is
+# still running 5 minutes after the third. 0 = no default limit. Individual agents
+# may set `time-budget: <minutes>` (or `none`) in their frontmatter, and you can
+# change or remove any running agent's budget live from the TUI (Ctrl-b then b).
+budget:
+  defaultMinutes: 30
+  maxCostUSD: 100          # engagement-wide spend cap (USD); 0 disables
+  maxSummaryCostUSD: 25    # ceiling on the small-tier compaction/summarizer spend; 0 disables
+
+# Defense-in-depth bash deny patterns (ENFORCED by the engine: a bash/bash_bg command
+# matching any glob is blocked before it reaches the sandbox). The HARD boundary is still
+# the per-agent egress firewall + unprivileged guest user; these stop the obvious ways an
+# agent would reach the Windows host (the /mnt drive mounts and interop binaries).
+bash:
+  patterns:
+    - { match: "*/mnt/c*",         approval: deny }
+    - { match: "*/mnt/wsl*",       approval: deny }
+    - { match: "*cmd.exe*",        approval: deny }
+    - { match: "*powershell.exe*", approval: deny }
+    - { match: "*wsl.exe*",        approval: deny }
+    - { match: "*explorer.exe*",   approval: deny }
+
+# Per-agent overrides (model / thinking-level / tools / spawns). Empty by default —
+# each subagent's defaults live in its agents/<name>.md frontmatter. The in-app model
+# editor writes user overrides here.
+agents: {}
+
+# QEMU backend options (ignored for WSL).
+qemu:
+  # QEMU engagements PERSIST by default: the VM disk (workspace + installed tooling)
+  # is kept so the engagement can be resumed from the setup screen (needs a clean
+  # stop). Set disposable: true only if you want a throwaway VM discarded on each stop.
+  disposable: false
+  # Linux host only: run the guest behind a host-owned tap + nftables boundary the
+  # guest cannot change even as root. Needs root on the host (oline uses sudo);
+  # ignored on non-Linux hosts.
+  hostFirewall: false
+
+# Terminal-UI preferences (not engagement behavior).
+tui:
+  # Auto-close a subagent's pane on the Subagents tab when it goes idle/killed, and
+  # reopen one when a subagent (re)starts and fewer than four are open. Set to false
+  # to keep finished subagents' panes instead.
+  closeIdleSubagentPanes: true

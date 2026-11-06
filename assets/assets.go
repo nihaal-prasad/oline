@@ -3,7 +3,10 @@
 // ~/oline/config/<mode>/ override these defaults at load time.
 package assets
 
-import "embed"
+import (
+	"embed"
+	"io/fs"
+)
 
 // Logo is the oline mark rendered as a truecolor ANSI half-block image on a pure
 // black background. Shown on the start screen as the portable fallback when the
@@ -30,3 +33,24 @@ var PentesterFS embed.FS
 //
 //go:embed exploiter
 var ExploiterFS embed.FS
+
+// ProgrammerFS holds the full Programmer roster (red-team tool development):
+// SYSTEM_TEMPLATE.md, PERSONALITY.md, config.yml, models.yml, and agents/*.md.
+//
+//go:embed programmer
+var ProgrammerFS embed.FS
+
+// For returns the embedded defaults filesystem for a roster mode. It is the single
+// place that maps a mode name to its bundle; callers (cmd, tui) use it instead of
+// hand-written per-mode branches. An unknown mode falls back to the Pentester
+// bundle (the historical default), matching the prior inline behavior.
+func For(mode string) fs.FS {
+	switch mode {
+	case "exploiter":
+		return ExploiterFS
+	case "programmer":
+		return ProgrammerFS
+	default:
+		return PentesterFS
+	}
+}

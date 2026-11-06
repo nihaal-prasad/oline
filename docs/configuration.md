@@ -18,6 +18,8 @@ Everything oline keeps on the host lives under one root directory: `~/oline`, or
       agents/<name>.md        #   each subagent's prompt and frontmatter
     exploiter/
       ...                     #   same layout
+    programmer/
+      ...                     #   same layout
   backups/<engagement>.tar.gz
   logs/<engagement>.log
   audit/<engagement>.audit.jsonl  # tamper-evident, hash-chained command log
@@ -44,6 +46,7 @@ bash rules, per-agent overrides, and prompts) stays per-mode.
 ```bash
 oline -mode pentester -init-config
 oline -mode exploiter -init-config
+oline -mode programmer -init-config
 ```
 
 It does not overwrite files you have already edited; pass `-force` to replace them
