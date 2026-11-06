@@ -1,0 +1,61 @@
+name: CI
+
+# Runs the test suite on every push and pull request.
+#
+# Cost: this uses GitHub Actions, which is free for public repositories and draws
+# from the free monthly minutes allowance for private ones. The job is a single,
+# short Linux run (no matrix, no schedule), and superseded runs are cancelled, so it
+# uses as few minutes as possible.
+#
+# No money / no tokens: the workflow sets NO API keys and NO OLINE_TEST_* variables,
+# so every live test (real LLM provider, WSL, QEMU) hits its `t.Skip` guard and never
+# runs. Only the local suite executes — mocks, httptest servers, and pure unit tests —
+# which makes no outbound network or paid-API calls.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege: the job only needs to read the repository.
+permissions:
+  contents: read
+
+# Cancel an in-progress run when a newer commit lands on the same ref, so we don't
+# spend minutes finishing a run that is already stale.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt (must be clean)
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      # -race catches data races and the teardown/WaitGroup bug class automatically.
+      # The 5m timeout bounds a hung test so a stuck run can't burn minutes. No env
+      # vars are set, so all live/provider/sandbox tests skip (no network, no tokens).
+      - name: go test -race
+        run: go test -race -timeout 5m ./...
