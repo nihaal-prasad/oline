@@ -240,6 +240,71 @@ func extractWorkspaceTar(bundlePath string) (string, error) {
 	return "", fmt.Errorf("no workspace captured in the backup bundle")
 }
 
+// tarHostDirToTemp packs a host directory's CONTENTS into a gzip tar on the host and
+// returns its path (the caller removes it). Entry names are relative to dir, so
+// unpacking with `tar -C <dest>` lands the folder's contents directly under <dest>.
+// Only regular files and directories are archived — symlinks and special files are
+// skipped, so a link inside the folder can't smuggle in host paths from outside it.
+func tarHostDirToTemp(dir string) (string, error) {
+	out, err := os.CreateTemp("", ".oline-data-*.tgz")
+	if err != nil {
+		return "", err
+	}
+	gz := gzip.NewWriter(out)
+	tw := tar.NewWriter(gz)
+	walkErr := filepath.Walk(dir, func(p string, info os.FileInfo, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		rel, rerr := filepath.Rel(dir, p)
+		if rerr != nil {
+			return rerr
+		}
+		if rel == "." {
+			return nil
+		}
+		mode := info.Mode()
+		if !mode.IsRegular() && !mode.IsDir() {
+			return nil // skip symlinks, devices, sockets, …
+		}
+		hdr, herr := tar.FileInfoHeader(info, "")
+		if herr != nil {
+			return herr
+		}
+		hdr.Name = filepath.ToSlash(rel)
+		if mode.IsDir() {
+			hdr.Name += "/"
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			return err
+		}
+		if mode.IsDir() {
+			return nil
+		}
+		f, oerr := os.Open(p)
+		if oerr != nil {
+			return oerr
+		}
+		_, cerr := io.Copy(tw, f)
+		f.Close()
+		return cerr
+	})
+	if cerr := tw.Close(); cerr != nil && walkErr == nil {
+		walkErr = cerr
+	}
+	if cerr := gz.Close(); cerr != nil && walkErr == nil {
+		walkErr = cerr
+	}
+	if cerr := out.Close(); cerr != nil && walkErr == nil {
+		walkErr = cerr
+	}
+	if walkErr != nil {
+		os.Remove(out.Name())
+		return "", walkErr
+	}
+	return out.Name(), nil
+}
+
 // renderFindingsMarkdown renders the findings as a severity-ordered report section
 // for the bundle (the start of the eventual full report).
 func renderFindingsMarkdown(engagement string, fs []engine.Finding) string {

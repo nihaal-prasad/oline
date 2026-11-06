@@ -51,7 +51,10 @@ The wizard asks each setting in order, skipping steps that don't apply; Enter ad
    kept and this step takes optional extra instructions instead (blank to skip).
 9. **VPN** (optional, WSL only): an OpenVPN config the sandbox connects through
    before agents start.
-10. **Automation**: automatic, planner, or watcher (see [Modes](#modes)); switch
+10. **Data folder** (optional): a host folder to copy into the workspace for agents to
+    read (blank to skip). Its contents are copied in read-only; the original host
+    files are never exposed, so agents cannot change them.
+11. **Automation**: automatic, planner, or watcher (see [Modes](#modes)); switch
     later with `Ctrl-b m`.
 
 ## Running view

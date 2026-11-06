@@ -127,6 +127,11 @@ work there and never write to the host. oline copies that workspace out for back
 (see [configuration.md](configuration.md)). You can drop files into that directory
 yourself or point a resume at an existing one.
 
+The setup wizard's optional **Data folder** step copies a host folder into the
+workspace (as a read-only subdirectory) before agents start, so they can read
+supplied inputs. Only a copy enters the guest — the original host files are never
+exposed, so agents cannot modify them.
+
 ## VPN
 
 In pentester engagements (WSL only) you can reach a target over a VPN: in the

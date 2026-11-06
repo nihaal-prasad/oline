@@ -271,6 +271,7 @@ const (
 	wGoal
 	wVPN
 	wVPNInput
+	wData // optional: a host folder to copy into the workspace for agents to read
 	wAuto
 )
 
@@ -336,6 +337,10 @@ type model struct {
 	vpnSel  int
 	vpnMode string // none | running | envfile | hostfile
 	vpnIn   textinput.Model
+
+	// optional host data folder copied (read-only) into the workspace before start
+	dataDirIn textinput.Model
+	dataDir   string // host folder to copy in; "" = none (nothing is copied or searched for)
 
 	// api key (setup)
 	keyProvider string
@@ -571,6 +576,10 @@ func newModel(mode config.Mode, store *config.Store, roster *agents.Roster) *mod
 	vi.Placeholder = "path to the .ovpn file"
 	vi.CharLimit = 1024
 	vi.Width = 64
+	xi := textinput.New()
+	xi.Placeholder = "host folder to copy into the workspace (optional — Enter to skip)"
+	xi.CharLimit = 1024
+	xi.Width = 64
 	ki := textinput.New()
 	ki.Placeholder = "paste your API key (stored only in ~/oline/config/secrets.yml)"
 	ki.CharLimit = 512
@@ -589,6 +598,7 @@ func newModel(mode config.Mode, store *config.Store, roster *agents.Roster) *mod
 		input:          ci,
 		importIn:       ii,
 		vpnIn:          vi,
+		dataDirIn:      xi,
 		keyIn:          ki,
 		transcripts:    map[core.AgentID]*transcript{},
 		dirty:          map[core.AgentID]bool{},
@@ -885,10 +895,12 @@ func (m *model) wizardBack() (tea.Model, tea.Cmd) {
 // focusWizardStep focuses the text input (or form) a setup step edits, so returning
 // to it with Esc lands the cursor in the right field.
 func (m *model) focusWizardStep(s wizStep) {
-	for _, ti := range []*textinput.Model{&m.scopeIn, &m.goalIn, &m.diskIn, &m.cpusIn, &m.memIn, &m.wslRootfsIn, &m.importIn, &m.vpnIn, &m.keyIn} {
+	for _, ti := range []*textinput.Model{&m.scopeIn, &m.goalIn, &m.diskIn, &m.cpusIn, &m.memIn, &m.wslRootfsIn, &m.importIn, &m.vpnIn, &m.dataDirIn, &m.keyIn} {
 		ti.Blur()
 	}
 	switch s {
+	case wData:
+		m.dataDirIn.Focus()
 	case wScope:
 		m.scopeIn.Focus()
 	case wGoal:
@@ -910,6 +922,13 @@ func (m *model) focusWizardStep(s wizStep) {
 	case wSetup:
 		m.syncSetupFocus()
 	}
+}
+
+// gotoData advances to the optional "copy a host folder into the workspace" step,
+// focusing its input.
+func (m *model) gotoData() {
+	m.step = wData
+	m.dataDirIn.Focus()
 }
 
 // afterFreshSandboxConfig continues after a brand-new sandbox has been configured (a
@@ -1353,10 +1372,10 @@ func (m *model) wizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			switch m.vpnSel {
 			case 0:
 				m.vpnMode = "none"
-				m.step = wAuto
+				m.gotoData()
 			case 1:
 				m.vpnMode = "running"
-				m.step = wAuto
+				m.gotoData()
 			case 2:
 				m.vpnMode = "envfile"
 				m.vpnIn.Placeholder = "path to the .ovpn file inside the environment"
@@ -1380,11 +1399,35 @@ func (m *model) wizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.vpnIn.Blur()
-			m.step = wAuto
+			m.gotoData()
 			return m, nil
 		}
 		var cmd tea.Cmd
 		m.vpnIn, cmd = m.vpnIn.Update(msg)
+		return m, cmd
+
+	case wData:
+		if k == "enter" {
+			p := strings.TrimSpace(m.dataDirIn.Value())
+			if p == "" { // optional — skip, and never go looking for a folder
+				m.dataDir = ""
+				m.dataDirIn.Blur()
+				m.step = wAuto
+				return m, nil
+			}
+			info, err := os.Stat(p)
+			if err != nil || !info.IsDir() {
+				m.wizErr = "not a readable folder on this host (leave blank to skip)"
+				return m, nil
+			}
+			m.dataDir = filepath.Clean(p)
+			m.wizErr = ""
+			m.dataDirIn.Blur()
+			m.step = wAuto
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.dataDirIn, cmd = m.dataDirIn.Update(msg)
 		return m, cmd
 
 	case wAuto:
@@ -2146,6 +2189,10 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// Optional operator-provided data: copy a host folder into the workspace (read-only)
+	// so agents can read it. No-op unless a folder was chosen in setup.
+	m.copyHostDataToWorkspace()
+
 	// VPN to reach the target, if requested.
 	m.setupVPN(cand.ID)
 
@@ -2491,6 +2538,81 @@ echo RESTORED`,
 	m.writeln(core.Main, styleMuted.Render("restored previous workspace files for "+engagement+" → "+ws))
 }
 
+// dataSubdirName is the workspace subdirectory the operator-provided data folder is
+// copied into: the source folder's base name, sanitized to a safe single path
+// segment, falling back to "provided-data".
+func dataSubdirName(hostDir string) string {
+	base := filepath.Base(filepath.Clean(hostDir))
+	var b strings.Builder
+	for _, r := range base {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	s := strings.Trim(b.String(), "._-")
+	if s == "" {
+		return "provided-data"
+	}
+	return s
+}
+
+// copyHostDataToWorkspace copies the operator-provided host folder (m.dataDir) into
+// the engagement workspace as a READ-ONLY subdirectory, so agents can read the data
+// while the original host files stay completely out of reach — they are never mounted
+// or exposed to the guest, so agents cannot write to or modify them. No-op when the
+// operator specified no folder (nothing is copied, and no folder is searched for).
+// Best-effort: a failure is reported and the engagement continues.
+func (m *model) copyHostDataToWorkspace() {
+	if m.sess == nil || m.sess.Sandbox == nil || strings.TrimSpace(m.dataDir) == "" {
+		return
+	}
+	tgz, err := tarHostDirToTemp(m.dataDir)
+	if err != nil {
+		m.writeln(core.Main, styleErr.Render("could not read the provided data folder "+m.dataDir+": "+err.Error()))
+		return
+	}
+	defer os.Remove(tgz)
+
+	ctx := context.Background()
+	const guestTgz = "/tmp/.oline-data.tgz"
+	if err := m.sess.Sandbox.CopyIn(ctx, tgz, guestTgz); err != nil {
+		m.writeln(core.Main, styleErr.Render("provided data: copy into the sandbox failed: "+err.Error()))
+		return
+	}
+	ws := strings.TrimSpace(m.sess.Workspace)
+	if ws == "" {
+		ws = sandbox.WSLWorkspace + "/" + m.engagement
+	}
+	dest := ws + "/" + dataSubdirName(m.dataDir)
+	// Unpack as root into the workspace, then make the copy read-only to the
+	// unprivileged agents (root-owned, world-readable, not group/other-writable): they
+	// can READ the reference data but not alter it, and the host originals are untouched.
+	script := fmt.Sprintf(`set -e
+rm -rf %s
+mkdir -p %s
+tar --no-same-owner --no-same-permissions -xzf %s -C %s
+rm -f %s
+chown -R root:root %s 2>/dev/null || true
+chmod -R a+rX,go-w %s 2>/dev/null || true
+echo COPIED`,
+		shQuote(dest), shQuote(dest), shQuote(guestTgz), shQuote(dest), shQuote(guestTgz), shQuote(dest), shQuote(dest))
+
+	var out strings.Builder
+	if _, err := m.sess.Sandbox.Exec(ctx, core.AgentID("setup"),
+		sandbox.Cmd{Argv: []string{"bash", "-lc", script}, Policy: sandbox.Privileged}, &out); err != nil || !strings.Contains(out.String(), "COPIED") {
+		detail := strings.TrimSpace(out.String())
+		if err != nil {
+			detail = err.Error() + " " + detail
+		}
+		m.writeln(core.Main, styleErr.Render("provided data: unpack failed: "+strings.TrimSpace(detail)))
+		return
+	}
+	m.writeln(core.Main, styleMuted.Render("copied provided data (read-only) → "+dest))
+}
+
 // setupVPN brings up (or confirms) the OpenVPN tunnel per the wizard choice.
 func (m *model) setupVPN(distro string) {
 	ctx := context.Background()
@@ -2540,6 +2662,13 @@ func (m *model) composePrompt() string {
 	}
 	if m.vpnMode != "" && m.vpnMode != "none" {
 		b.WriteString("The in-scope target is reached through a VPN tunnel (a tun/tap interface is up in the sandbox); route to it normally.\n")
+	}
+	if strings.TrimSpace(m.dataDir) != "" {
+		ws := strings.TrimSpace(m.sess.Workspace)
+		if ws == "" {
+			ws = sandbox.WSLWorkspace + "/" + m.engagement
+		}
+		fmt.Fprintf(&b, "The operator provided supporting data at %s/%s in the workspace — read-only reference material to consult before and during the work (you cannot modify it).\n", ws, dataSubdirName(m.dataDir))
 	}
 	if m.resume {
 		dir := sandbox.WSLWorkspace + "/" + m.engagement
@@ -4084,7 +4213,10 @@ func (m *model) viewWizard() string {
 		step(true, "   OpenVPN config path", "    "+m.vpnIn.View())
 	}
 
-	step(m.step == wAuto, "7. Automation", radio(m.autoSel,
+	step(m.step == wData, "7. Copy a host folder into the workspace (optional)",
+		"    "+m.dataDirIn.View()+"\n    "+styleMuted.Render("agents read a copy in the workspace; the original host files are never exposed and cannot be changed"))
+
+	step(m.step == wAuto, "8. Automation", radio(m.autoSel,
 		"Automatic (AI runs end-to-end)",
 		"Planner (AI proposes, you approve each step)",
 		"Watcher (you run everything; AI only watches and advises)"))
@@ -4189,9 +4321,8 @@ func (m *model) envBodyView() string {
 	// rather than leaving an empty "previous engagement" selection.
 	if m.resume && !anyResumable {
 		sb.WriteString(styleWarn.Render("    No previous engagement is available to resume — every entry above starts a NEW one.\n"))
-		sb.WriteString(styleMuted.Render("    A QEMU engagement is resumable only if its disk was persisted; a VM from before persistence became the default was discarded when it stopped and cannot be recovered.\n"))
 	}
-	sb.WriteString(styleMuted.Render("    (r to rescan · pick a saved QEMU VM to resume it, or \"Create a new … QEMU VM\" for a fresh disk from the base; QEMU engagements persist by default, so a cleanly-stopped VM shows up here)"))
+	sb.WriteString(styleMuted.Render("    (r to rescan)"))
 	return sb.String()
 }
 

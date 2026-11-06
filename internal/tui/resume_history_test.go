@@ -121,6 +121,52 @@ func TestPreserveResumeBackup(t *testing.T) {
 	}
 }
 
+// TestDataStepOptional: the optional data-folder step accepts a real folder, rejects
+// a non-existent one, and treats blank as "skip" (no folder recorded, no search).
+func TestDataStepOptional(t *testing.T) {
+	dir := t.TempDir()
+
+	// A valid folder is accepted and advances to Automation.
+	m := testModel(t)
+	m.step = wData
+	m.dataDirIn.SetValue(dir)
+	tm, _ := m.updateWizard(enter())
+	if mm := tm.(*model); mm.step != wAuto || mm.dataDir != filepath.Clean(dir) {
+		t.Fatalf("valid folder: step=%v dataDir=%q, want wAuto and the folder", mm.step, mm.dataDir)
+	}
+
+	// A path that is not a folder is rejected: stay on the step with an error, nothing recorded.
+	m2 := testModel(t)
+	m2.step = wData
+	m2.dataDirIn.SetValue(filepath.Join(dir, "nope"))
+	tm2, _ := m2.updateWizard(enter())
+	if mm := tm2.(*model); mm.step != wData || mm.dataDir != "" || mm.wizErr == "" {
+		t.Fatalf("bad folder should stay on wData with an error: step=%v dataDir=%q err=%q", mm.step, mm.dataDir, mm.wizErr)
+	}
+
+	// Blank skips with no folder recorded (the system never goes looking for one).
+	m3 := testModel(t)
+	m3.step = wData
+	tm3, _ := m3.updateWizard(enter())
+	if mm := tm3.(*model); mm.step != wAuto || mm.dataDir != "" {
+		t.Fatalf("blank should skip to wAuto with no folder: step=%v dataDir=%q", mm.step, mm.dataDir)
+	}
+}
+
+// TestDataSubdirName: the workspace subdirectory name is the sanitized folder base,
+// with a stable fallback.
+func TestDataSubdirName(t *testing.T) {
+	if got := dataSubdirName(filepath.Join("home", "me", "loot")); got != "loot" {
+		t.Errorf("base name: got %q, want loot", got)
+	}
+	if got := dataSubdirName("My Data"); got != "My_Data" {
+		t.Errorf("spaces sanitized: got %q, want My_Data", got)
+	}
+	if got := dataSubdirName("."); got != "provided-data" {
+		t.Errorf("empty base should fall back: got %q, want provided-data", got)
+	}
+}
+
 // TestExtractWorkspaceTar: the nested workspace.tar.gz is pulled out of a backup
 // bundle, and a bundle without one is an error (so the restore degrades gracefully).
 func TestExtractWorkspaceTar(t *testing.T) {

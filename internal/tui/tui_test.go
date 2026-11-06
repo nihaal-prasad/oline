@@ -146,10 +146,15 @@ func TestWizardNewFlow(t *testing.T) {
 	if tm.(*model).step != wVPN {
 		t.Fatalf("after goal: step=%v, want wVPN", tm.(*model).step)
 	}
-	// VPN=none -> Auto
+	// VPN=none -> optional data folder
 	tm, _ = tm.Update(enter())
-	if tm.(*model).step != wAuto || tm.(*model).vpnMode != "none" {
-		t.Fatalf("after vpn: step=%v vpnMode=%q", tm.(*model).step, tm.(*model).vpnMode)
+	if tm.(*model).step != wData || tm.(*model).vpnMode != "none" {
+		t.Fatalf("after vpn: step=%v vpnMode=%q, want wData", tm.(*model).step, tm.(*model).vpnMode)
+	}
+	// Skip the optional data folder -> Automation
+	tm, _ = tm.Update(enter())
+	if tm.(*model).step != wAuto || tm.(*model).dataDir != "" {
+		t.Fatalf("after data step: step=%v dataDir=%q, want wAuto", tm.(*model).step, tm.(*model).dataDir)
 	}
 	if tm.(*model).View() == "" {
 		t.Error("empty wizard view")
@@ -271,11 +276,16 @@ func TestWizardResumeImportAndVPN(t *testing.T) {
 	}
 	tm, _ = tm.Update(key("/home/me/target.ovpn"))
 	tm, _ = tm.Update(enter())
-	if tm.(*model).step != wAuto {
-		t.Fatalf("after vpn input: step=%v, want wAuto", tm.(*model).step)
+	if tm.(*model).step != wData {
+		t.Fatalf("after vpn input: step=%v, want wData (optional data folder)", tm.(*model).step)
 	}
 	if tm.(*model).vpnIn.Value() != "/home/me/target.ovpn" {
 		t.Errorf("vpn path = %q", tm.(*model).vpnIn.Value())
+	}
+	// Optional data folder: leave blank to skip -> Automation, with nothing to copy.
+	tm, _ = tm.Update(enter())
+	if mm := tm.(*model); mm.step != wAuto || mm.dataDir != "" {
+		t.Fatalf("after skipping the data step: step=%v dataDir=%q, want wAuto and no folder", mm.step, mm.dataDir)
 	}
 }
 
