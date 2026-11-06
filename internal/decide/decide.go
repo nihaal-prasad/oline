@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -17,6 +18,24 @@ import (
 	"strings"
 	"time"
 )
+
+// TransientError marks a failure that is likely temporary — a request timeout
+// (including a cold model that did not warm up within the deadline), a network
+// error, an HTTP 429, or a 5xx — as opposed to a definitive rejection (a 4xx, or a
+// response that is not a decisions API at all). A caller probing the model at
+// startup can use this to proceed optimistically on a transient failure (the model
+// warms up on first real use) while still disabling the feature for a definitive one
+// (a provider that does not actually serve /decisions).
+type TransientError struct{ Err error }
+
+func (e *TransientError) Error() string { return e.Err.Error() }
+func (e *TransientError) Unwrap() error { return e.Err }
+
+// IsTransient reports whether err (from any decide call) is a TransientError.
+func IsTransient(err error) bool {
+	var t *TransientError
+	return errors.As(err, &t)
+}
 
 // sharedTransport pools connections across decision clients (mirrors internal/llm).
 var sharedTransport = &http.Transport{
@@ -184,7 +203,7 @@ func (c *Client) ask(ctx context.Context, input string, q question) (apiAnswer, 
 			select {
 			case <-time.After(c.backoff * time.Duration(attempt-1)):
 			case <-ctx.Done():
-				return apiAnswer{}, ctx.Err()
+				return apiAnswer{}, &TransientError{ctx.Err()}
 			}
 		}
 		a, retryable, err := c.once(ctx, raw)
@@ -193,13 +212,14 @@ func (c *Client) ask(ctx context.Context, input string, q question) (apiAnswer, 
 		}
 		lastErr = err
 		if ctx.Err() != nil {
-			return apiAnswer{}, ctx.Err()
+			return apiAnswer{}, &TransientError{ctx.Err()}
 		}
 		if !retryable {
-			return apiAnswer{}, err
+			return apiAnswer{}, err // a definitive rejection (4xx / bad response shape)
 		}
 	}
-	return apiAnswer{}, lastErr
+	// Retries exhausted on a retryable (429 / 5xx / network) error: transient.
+	return apiAnswer{}, &TransientError{lastErr}
 }
 
 func (c *Client) once(ctx context.Context, raw []byte) (apiAnswer, bool, error) {

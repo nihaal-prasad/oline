@@ -550,6 +550,18 @@ func (s *Session) emitAsync(ev event.Event) {
 	}()
 }
 
+// notifyLive delivers a low-frequency liveness/progress notice — a stream-stall
+// warning, a long-running-tool heartbeat, a compaction notice, or a fatal-error
+// line — so that it is NEITHER dropped NOR allowed to block the agent loop. Plain
+// emit() drops a non-mustDeliver Notice the instant the event buffer is full, which
+// is exactly when an agent is most likely to look frozen (a slow UI falling behind),
+// so the one message that would explain the freeze never reaches the operator. These
+// go through emitAsync instead: a non-blocking send, with delivery completed from a
+// goroutine (bounded by the engagement context) if the buffer is momentarily full.
+// They are rate-limited by their callers (at most one per stall interval per agent),
+// so the async fallback can never pile up.
+func (s *Session) notifyLive(ev event.Event) { s.emitAsync(ev) }
+
 // mustDeliver reports whether an event is authoritative lifecycle state that
 // must not be dropped (as opposed to droppable streaming output).
 func mustDeliver(ev event.Event) bool {
@@ -1403,7 +1415,7 @@ func (a *Agent) Run(parent context.Context) Result {
 			case <-stall.C:
 				if time.Since(time.Unix(0, a.streamActivity.Load())) >= streamStallWarn {
 					if !warnedStall {
-						a.s.emit(event.Notice{Agent: a.id, Level: "info",
+						a.s.notifyLive(event.Notice{Agent: a.id, Level: "info",
 							Text: string(a.id) + ": still waiting for the model to respond (no output yet)…"})
 						warnedStall = true
 					}
@@ -1438,7 +1450,7 @@ func (a *Agent) Run(parent context.Context) Result {
 		}
 		if serr != nil {
 			cancel()
-			a.s.emit(event.Notice{Agent: a.id, Level: "error", Text: fmt.Sprintf("%s: %v", a.id, serr)})
+			a.s.notifyLive(event.Notice{Agent: a.id, Level: "error", Text: fmt.Sprintf("%s: %v", a.id, serr)})
 			return Result{Agent: a.id, Err: serr, Text: text}
 		}
 
@@ -1507,7 +1519,7 @@ func (a *Agent) Run(parent context.Context) Result {
 				a.emitState(core.Killed)
 				return Result{Agent: a.id, Killed: true}
 			}
-			content, _ := a.dispatch(stepCtx, tc)
+			content, _ := a.dispatchWatched(stepCtx, tc)
 			a.appendHistory(toolMessage(tc, content))
 			if st := a.sm.State(); st == core.Killed || st == core.Paused || parent.Err() != nil {
 				// Stopping mid-batch leaves the assistant's remaining tool_calls
@@ -1606,6 +1618,42 @@ func (a *Agent) toolDefs() []llm.FunctionDef {
 		}
 	}
 	return defs
+}
+
+// dispatchWatched runs one tool call and, while it is running, posts a periodic
+// liveness heartbeat if it takes longer than streamStallWarn. The stream-stall
+// watchdog only covers the LLM turn; once the agent moves on to executing tool
+// calls it is still marked Running but produces no thoughts or tokens, so a slow or
+// wedged tool (a long bash command, an MCP call, a sandbox exec, a decision-model
+// gate, …) would otherwise leave the agent looking frozen with nothing on screen to
+// explain it. The tool still runs under the same ctx as before (no new deadline is
+// imposed — a tool may legitimately run for a long time); this only makes that
+// visible. Heartbeats go through notifyLive so a congested UI never drops them.
+func (a *Agent) dispatchWatched(ctx context.Context, tc llm.ToolCall) (content string, isErr bool) {
+	type res struct {
+		content string
+		isErr   bool
+	}
+	done := make(chan res, 1)
+	go func() {
+		c, e := a.dispatch(ctx, tc)
+		done <- res{c, e}
+	}()
+	// The Run goroutine parks on this select while dispatch runs, so there is no
+	// concurrent access to agent state — this is equivalent to the old inline call,
+	// plus a heartbeat ticker.
+	t := time.NewTicker(streamStallWarn)
+	defer t.Stop()
+	start := time.Now()
+	for {
+		select {
+		case r := <-done:
+			return r.content, r.isErr
+		case <-t.C:
+			a.s.notifyLive(event.Notice{Agent: a.id, Level: "info",
+				Text: fmt.Sprintf("%s: %s still running (%ds elapsed, no result yet)…", a.id, tc.Name, int(time.Since(start).Seconds()))})
+		}
+	}
 }
 
 // dispatch executes one tool call: engine primitives directly, everything else

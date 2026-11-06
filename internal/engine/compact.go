@@ -114,7 +114,7 @@ func (a *Agent) compact(ctx context.Context) {
 	// agent's transcript, so without this notice the pane shows no thoughts or tokens
 	// for however long summarization takes and looks frozen. A matching notice is
 	// emitted at the end (success or failure).
-	a.s.emit(event.Notice{Agent: a.id, Level: "info",
+	a.s.notifyLive(event.Notice{Agent: a.id, Level: "info",
 		Text: fmt.Sprintf("%s: compacting context to stay within the %d-token limit (summarizing ~%d tokens; no output until this finishes)…", a.id, ceil, before)})
 
 	// Bound the summarize LLM call so a hung stream can't stall the agent loop
@@ -165,7 +165,7 @@ func (a *Agent) compact(ctx context.Context) {
 		if lastErr != nil {
 			reason = lastErr.Error()
 		}
-		a.s.emit(event.Notice{Agent: a.id, Level: "warn",
+		a.s.notifyLive(event.Notice{Agent: a.id, Level: "warn",
 			Text: fmt.Sprintf("%s: context compaction failed (%s); continuing without it", a.id, reason)})
 		return
 	}
@@ -178,7 +178,7 @@ func (a *Agent) compact(ctx context.Context) {
 	a.history = newHist
 	a.tokensEst = after // reset the running estimate to the compacted history
 	a.mu.Unlock()
-	a.s.emit(event.Notice{Agent: a.id, Level: "info",
+	a.s.notifyLive(event.Notice{Agent: a.id, Level: "info",
 		Text: fmt.Sprintf("%s: auto-compacted context (~%d → ~%d tokens, ceiling %d)", a.id, before, after, ceil)})
 }
 

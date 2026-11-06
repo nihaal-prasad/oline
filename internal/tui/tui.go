@@ -27,6 +27,7 @@ import (
 	"github.com/nihaal-prasad/oline/internal/audit"
 	"github.com/nihaal-prasad/oline/internal/config"
 	"github.com/nihaal-prasad/oline/internal/core"
+	"github.com/nihaal-prasad/oline/internal/decide"
 	"github.com/nihaal-prasad/oline/internal/engine"
 	"github.com/nihaal-prasad/oline/internal/event"
 	"github.com/nihaal-prasad/oline/internal/mcp"
@@ -76,25 +77,15 @@ func listEngagementsCmd(cand sandbox.Candidate) tea.Cmd {
 	}
 }
 
-func listen(ch chan event.Event) tea.Cmd {
+// listen takes the next batch of engine events from the funnel (which a goroutine
+// keeps continuously drained off the engine's channel, so the engine never blocks on
+// a slow UI). It returns one engineBatchMsg so the whole burst is applied and
+// rendered in a single Update pass; a nil msg stops the pump once the source closed.
+func listen(f *funnel) tea.Cmd {
 	return func() tea.Msg {
-		ev, ok := <-ch
+		batch, ok := f.take()
 		if !ok {
 			return nil
-		}
-		// Block for the first event, then greedily drain whatever else is already
-		// queued (bounded) so a burst is applied + rendered in one pass.
-		batch := []event.Event{ev}
-		for len(batch) < 512 {
-			select {
-			case e, ok := <-ch:
-				if !ok {
-					return engineBatchMsg{batch}
-				}
-				batch = append(batch, e)
-			default:
-				return engineBatchMsg{batch}
-			}
 		}
 		return engineBatchMsg{batch}
 	}
@@ -350,6 +341,7 @@ type model struct {
 	sess           *engine.Session
 	router         *engine.Router
 	events         chan event.Event
+	funnel         *funnel // drains events off the goroutine, decoupled from Update
 	cancel         context.CancelFunc
 	resultCh       chan engine.Result
 	transcripts    map[core.AgentID]*transcript
@@ -1979,9 +1971,15 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	reg := wire.BuildRegistry(m.store)
 	llmFor := wire.NewLLMResolver(m.store)
 
-	// Optional System-1 decision model: enabled only when it is configured, valid, AND
-	// reachable (probed now). Otherwise the decision features stay off and the
-	// orchestrator is never told they exist.
+	// Optional System-1 decision model: enabled when it is configured and valid. It is
+	// also probed now, but a probe that only fails TRANSIENTLY (a timeout — common for
+	// a cold decision model that has not warmed up yet — or a network/5xx blip) does
+	// NOT disable it: the config is valid and every runtime gate fails open, so the
+	// model simply warms up on first real use instead of the feature being lost for the
+	// whole engagement over a slow first call. Only a definitive rejection (a provider
+	// that does not actually serve /decisions: a 4xx or a non-decisions response) keeps
+	// it off. Otherwise the decision features stay off and the orchestrator is never
+	// told they exist.
 	decisionEnabled := false
 	var decClient engine.Decider
 	var decModel string
@@ -1994,14 +1992,20 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 			if cl, mid, ctxTok, err := wire.DecisionClient(m.store, sel); err != nil {
 				m.writeln(core.Main, styleWarn.Render("decision model setup failed — decision features disabled: "+err.Error()))
 			} else {
-				pctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				pctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 				perr := cl.Ping(pctx)
 				cancel()
-				if perr != nil {
-					m.writeln(core.Main, styleWarn.Render("decision model unreachable — decision features disabled: "+perr.Error()))
-				} else {
+				switch {
+				case perr == nil:
 					decClient, decModel, decCtx = cl, mid, ctxTok
 					decisionEnabled = true
+				case decide.IsTransient(perr):
+					// Valid config, slow/transient probe: enable anyway (warms up on first use).
+					decClient, decModel, decCtx = cl, mid, ctxTok
+					decisionEnabled = true
+					m.writeln(core.Main, styleWarn.Render("decision model slow to respond at startup ("+perr.Error()+") — enabling it anyway; it will warm up on first use (every decision gate fails open if it stays unreachable)"))
+				default:
+					m.writeln(core.Main, styleWarn.Render("decision model unreachable — decision features disabled: "+perr.Error()))
 				}
 			}
 		}
@@ -2022,7 +2026,8 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	m.events = make(chan event.Event, 4096) // generous buffer; the TUI batch-drains it
+	m.events = make(chan event.Event, 4096) // generous buffer; a goroutine keeps it drained
+	m.funnel = newFunnel(m.events)          // decouple draining from the Update/render loop
 	m.sess = engine.NewSession(reg, h, llmFor, resolver, m.events, m.store.Effective().MaxConcurrency)
 	m.sess.Mode = runModeFromSel(m.autoSel)
 	// Custom tools (config command tools, Go extension tools, and MCP tools) execute,
@@ -2269,7 +2274,7 @@ func (m *model) beginSession(h sandbox.Handle) (tea.Model, tea.Cmd) {
 	prompt := m.composePrompt()
 	go func() { m.resultCh <- m.sess.Run(ctx, orch, prompt) }()
 
-	return m, tea.Batch(listen(m.events), waitResult(m.resultCh), listenShell(m.shellCh), listenTerm(m.termCh), tickCmd(), textinput.Blink)
+	return m, tea.Batch(listen(m.funnel), waitResult(m.resultCh), listenShell(m.shellCh), listenTerm(m.termCh), tickCmd(), textinput.Blink)
 }
 
 // backupLoop periodically backs up the engagement workspace to the host until
@@ -2780,7 +2785,7 @@ func (m *model) updateRunning(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.mutate(ev) // update state without rendering
 		}
 		m.flushDirty() // render each touched pane exactly once for the whole batch
-		return m, listen(m.events)
+		return m, listen(m.funnel)
 	case resultMsg:
 		m.writeln(core.Main, "")
 		m.writeln(core.Main, styleAccent.Render("── engagement finished ──"))
