@@ -192,8 +192,17 @@ func (a *Agent) revOpen(name string, port int) (string, bool) {
 
 	// Hold the Exec open for the listener's whole life on the engagement context, so
 	// it keeps catching shells across the opening agent's turns. Cancelling ctx
-	// (close / engagement end) stops nc, the holder, and the loop together.
-	a.s.router.wg.Add(1)
+	// (close / engagement end) stops nc, the holder, and the loop together. Refuse to
+	// start it if the engagement is already tearing down (trackEmitter == false).
+	if !a.s.router.trackEmitter() {
+		cancel()
+		a.s.chMu.Lock()
+		if cur := a.s.channels[name]; cur == ch {
+			delete(a.s.channels, name)
+		}
+		a.s.chMu.Unlock()
+		return "revshell open: engagement is shutting down", true
+	}
 	go func() {
 		defer a.s.router.wg.Done()
 		w := &bgWriter{}

@@ -647,7 +647,7 @@ func (s *Session) Run(ctx context.Context, orch AgentConfig, userPrompt string) 
 	// background jobs) to exit before returning, so the caller can safely stop
 	// reading / close the event channel without racing a late emit.
 	cancel()
-	s.router.wg.Wait()
+	s.router.drainEmitters()
 	return res
 }
 
@@ -663,6 +663,42 @@ type Router struct {
 	// orchestrator returns, so once Run returns nothing emits — the caller can then
 	// close the event channel without racing a late emit.
 	wg sync.WaitGroup
+	// wgmu serializes registering a new emitter on wg against the teardown wait.
+	// Dynamic emitters (subagent spawns, progress checks, background bash jobs, a
+	// revshell listener) call trackEmitter from goroutines whose lifetime is NOT
+	// strictly before Run's wait — e.g. an orphaned dispatch goroutine can still try
+	// to spawn after Run returned. A bare wg.Add racing wg.Wait panics
+	// ("WaitGroup is reused before previous Wait has returned") and, worse, could let
+	// an emit land on a closed channel. drainEmitters sets draining under this lock
+	// before waiting, so any later registration is refused instead.
+	wgmu     sync.Mutex
+	draining bool
+}
+
+// trackEmitter registers one background emitter on wg and returns true. It returns
+// false once the engagement has begun tearing down (drainEmitters has run): the
+// caller must then NOT start the goroutine, because the engagement context is already
+// cancelled and a fresh emitter would only race the event-channel shutdown. Every
+// caller that gets true must pair it with exactly one wg.Done() in the goroutine.
+func (r *Router) trackEmitter() bool {
+	r.wgmu.Lock()
+	defer r.wgmu.Unlock()
+	if r.draining {
+		return false
+	}
+	r.wg.Add(1)
+	return true
+}
+
+// drainEmitters blocks any further emitter registration, then waits for the in-flight
+// ones to finish. Called once by Session.Run after the orchestrator returns and the
+// engagement context is cancelled, so the caller can stop reading Events without
+// racing a late emit or tripping WaitGroup reuse.
+func (r *Router) drainEmitters() {
+	r.wgmu.Lock()
+	r.draining = true
+	r.wgmu.Unlock()
+	r.wg.Wait()
 }
 
 func (r *Router) register(a *Agent) {
@@ -768,6 +804,12 @@ func (r *Router) spawn(parent core.AgentID, role, prompt string) (core.AgentID, 
 	if err != nil {
 		return "", err
 	}
+	// Register the child's goroutine on the emitter wg BEFORE starting it. If the
+	// engagement is already tearing down, refuse the spawn rather than racing Run's
+	// teardown wait (an orphaned dispatch goroutine can reach here after Run returned).
+	if !r.trackEmitter() {
+		return "", fmt.Errorf("engagement is shutting down")
+	}
 	base := r.sess.base()
 	if base == nil {
 		base = context.Background()
@@ -776,7 +818,6 @@ func (r *Router) spawn(parent core.AgentID, role, prompt string) (core.AgentID, 
 	child := newAgent(id, cfg, client, modelID, r.sess, parent, prompt)
 	r.register(child)
 	r.sess.emit(event.Spawned{Parent: parent, Child: id, Role: core.CanonRole(role), Prompt: prompt})
-	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
 		// Acquire the concurrency slot here, in the child's own goroutine. When the
@@ -1288,9 +1329,11 @@ func (a *Agent) checkBudget() {
 		if spiral >= 0 {
 			// Track it in the router wg: progressCheck can emit (a Notice / a peer
 			// message), and Session.Run waits on wg before the caller closes Events, so
-			// an untracked emitter could send on a closed channel and panic.
-			a.s.router.wg.Add(1)
-			go func() { defer a.s.router.wg.Done(); a.progressCheck() }()
+			// an untracked emitter could send on a closed channel and panic. Skip it once
+			// the engagement is draining (trackEmitter == false).
+			if a.s.router.trackEmitter() {
+				go func() { defer a.s.router.wg.Done(); a.progressCheck() }()
+			}
 		}
 	}
 
@@ -1996,7 +2039,11 @@ func (a *Agent) doBash(tc llm.ToolCall) (string, bool) {
 	a.mu.Unlock()
 
 	inline := make(chan cmdResult, 1)
-	a.s.router.wg.Add(1)
+	if !a.s.router.trackEmitter() {
+		cancel()
+		a.clearFg(id)
+		return "bash: engagement is shutting down", true
+	}
 	go func() {
 		defer a.s.router.wg.Done()
 		// Release the per-command context when the command truly ends (this goroutine
@@ -2111,7 +2158,11 @@ func (a *Agent) doBashBg(tc llm.ToolCall) (string, bool) {
 	a.jobs[id] = job
 	a.mu.Unlock()
 
-	a.s.router.wg.Add(1)
+	if !a.s.router.trackEmitter() {
+		cancel()
+		a.forgetJob(id)
+		return "bash_bg: engagement is shutting down", true
+	}
 	go func() {
 		defer a.s.router.wg.Done()
 		// Release the job's context when it ends naturally (StopCommands/engagement-end
