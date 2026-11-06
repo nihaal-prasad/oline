@@ -54,8 +54,15 @@ jobs:
       - name: go build
         run: go build ./...
 
-      # -race catches data races and the teardown/WaitGroup bug class automatically.
-      # The 5m timeout bounds a hung test so a stuck run can't burn minutes. No env
-      # vars are set, so all live/provider/sandbox tests skip (no network, no tokens).
+      # Run the FULL suite (every package, every test). No env vars are set, so the
+      # live provider/WSL/QEMU tests skip (no network, no tokens); everything else
+      # runs. -count=1 disables the test cache so results are always fresh.
+      - name: go test (all tests)
+        run: go test -count=1 -timeout 5m ./...
+
+      # Second pass with the race detector to catch data races (e.g. the teardown /
+      # WaitGroup class). A couple of terminal-teardown tests skip under -race because
+      # of a known upstream race in charmbracelet/x/vt@v0.1.0 — they run in the pass
+      # above. The 5m timeout bounds a hung test so a stuck run can't burn minutes.
       - name: go test -race
-        run: go test -race -timeout 5m ./...
+        run: go test -race -count=1 -timeout 5m ./...

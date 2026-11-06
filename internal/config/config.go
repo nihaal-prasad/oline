@@ -940,11 +940,26 @@ func (s *Store) SaveModeFile(rel, content string) error {
 	return atomicWriteFile(dest, []byte(content), 0o644)
 }
 
-// Providers returns the provider names in the effective config.
-func (s *Store) Providers() map[string]Provider { return s.eff.Providers }
+// Providers returns a snapshot of the providers in the effective config. It copies
+// the map under the read lock so a caller iterating it never races a concurrent
+// writer (DefineProvider / SaveProvider / …) mutating s.eff.Providers.
+func (s *Store) Providers() map[string]Provider {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	m := make(map[string]Provider, len(s.eff.Providers))
+	for k, v := range s.eff.Providers {
+		m[k] = v
+	}
+	return m
+}
 
-// ModelRoles returns the effective tier->model mapping.
-func (s *Store) ModelRoles() ModelRoles { return s.eff.ModelRoles }
+// ModelRoles returns the effective tier->model mapping (a value copy under the read
+// lock, so it never races a concurrent SetModelRoles / SaveModelRole writer).
+func (s *Store) ModelRoles() ModelRoles {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.eff.ModelRoles
+}
 
 // SetModelRoles sets the in-memory tier->model mapping without persisting it
 // (used by the setup wizard before it saves, and by tests).
@@ -956,7 +971,9 @@ func (s *Store) SetModelRoles(big, medium, small string) {
 
 // ModelsConfigured reports whether all three tiers are set to something.
 func (s *Store) ModelsConfigured() bool {
+	s.mu.RLock()
 	r := s.eff.ModelRoles
+	s.mu.RUnlock()
 	return strings.TrimSpace(r.Big) != "" && strings.TrimSpace(r.Medium) != "" && strings.TrimSpace(r.Small) != ""
 }
 
@@ -1029,8 +1046,13 @@ func (s *Store) SaveTUICloseIdleSubagentPanes(v bool) error {
 	})
 }
 
-// Orchestrator returns the effective orchestrator model configuration.
-func (s *Store) Orchestrator() OrchestratorConfig { return s.eff.Orchestrator }
+// Orchestrator returns the effective orchestrator model configuration (a value copy
+// under the read lock, so it never races a concurrent SaveOrchestrator writer).
+func (s *Store) Orchestrator() OrchestratorConfig {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.eff.Orchestrator
+}
 
 // SaveOrchestrator persists the orchestrator's model config (tier / thinking level
 // / max context tokens) into the user config layer and applies it in memory.
