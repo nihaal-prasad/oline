@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -396,5 +397,71 @@ func TestWriteDefaults(t *testing.T) {
 		t.Fatal(err)
 	} else if len(forced) == 0 {
 		t.Error("force should rewrite the files")
+	}
+}
+
+// TestSaveRefusesToClobberUnparseableConfig: a save must NOT overwrite a config file
+// that exists but has a YAML syntax error (e.g. a hand-edit typo) — doing so would
+// wipe the user's providers, keys, and overrides and replace them with just the one
+// key being written. The save fails and the file is left byte-for-byte unchanged.
+func TestSaveRefusesToClobberUnparseableConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("OLINE_HOME", home)
+	s, err := config.Load(config.ModePentester, assets.PentesterFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Shared models.yml (providers + tier roles): on disk but unparseable.
+	sharedPath := filepath.Join(home, "config", "models.yml")
+	if err := os.MkdirAll(filepath.Dir(sharedPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bad := []byte("providers:\n  openai:\n    baseUrl: \"unterminated\n")
+	if err := os.WriteFile(sharedPath, bad, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveModelRole("big", "openai/gpt-4o"); err == nil {
+		t.Error("SaveModelRole should refuse to overwrite an unparseable models.yml")
+	}
+	if got, _ := os.ReadFile(sharedPath); !bytes.Equal(got, bad) {
+		t.Errorf("models.yml was modified despite the parse error:\n%s", got)
+	}
+
+	// Same guarantee for the per-mode user config.yml.
+	userCfg := filepath.Join(home, "config", "pentester", "config.yml")
+	if err := os.MkdirAll(filepath.Dir(userCfg), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	badCfg := []byte("agents:\n  recon: [this is not valid\n")
+	if err := os.WriteFile(userCfg, badCfg, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveOrchestrator(config.OrchestratorConfig{Tier: "medium", ThinkingLevel: "high"}); err == nil {
+		t.Error("SaveOrchestrator should refuse to overwrite an unparseable config.yml")
+	}
+	if got, _ := os.ReadFile(userCfg); !bytes.Equal(got, badCfg) {
+		t.Errorf("config.yml was modified despite the parse error:\n%s", got)
+	}
+}
+
+// TestSaveSecretPreservesOthers: saving a second provider's key must not drop the
+// first (the on-disk secrets map is read-modify-written, not clobbered).
+func TestSaveSecretPreservesOthers(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("OLINE_HOME", home)
+	s, err := config.Load(config.ModePentester, assets.PentesterFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveSecret("openai", "KEY-A"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveSecret("fireworks", "KEY-B"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(filepath.Join(home, "config", "secrets.yml"))
+	if !strings.Contains(string(got), "KEY-A") || !strings.Contains(string(got), "KEY-B") {
+		t.Errorf("secrets.yml should keep both provider keys, got:\n%s", got)
 	}
 }

@@ -343,10 +343,7 @@ func WriteDefaults(mode Mode, defaultsFS fs.FS, force bool) ([]string, error) {
 		if readErr != nil {
 			return readErr
 		}
-		if mkErr := os.MkdirAll(filepath.Dir(dest), 0o700); mkErr != nil {
-			return mkErr
-		}
-		if wErr := os.WriteFile(dest, data, 0o644); wErr != nil {
+		if wErr := atomicWriteFile(dest, data, 0o644); wErr != nil {
 			return wErr
 		}
 		written = append(written, dest)
@@ -512,11 +509,8 @@ func migrateSharedModels(configDir string, current Mode) {
 	if roles != nil {
 		promoted["modelRoles"] = roles
 	}
-	if err := os.MkdirAll(configDir, 0o700); err != nil {
-		return
-	}
 	if data, err := yaml.Marshal(promoted); err == nil {
-		_ = os.WriteFile(shared, data, 0o600)
+		_ = atomicWriteFile(shared, data, 0o600)
 	}
 }
 
@@ -556,24 +550,80 @@ func hasNonEmptyValue(m map[string]any) bool {
 	return false
 }
 
-// editSharedModels read-modify-writes the shared models.yml (0600), passing the
-// decoded top-level map (created when the file is absent) to mutate. This is the
-// single write path for the user's global provider and tier-role setup.
-func (s *Store) editSharedModels(mutate func(root map[string]any)) error {
-	path := s.sharedModelsPath()
-	root := readYAMLMap(path)
-	if root == nil {
-		root = map[string]any{}
+// readYAMLRoot reads a YAML config file into a top-level map for a read-modify-write
+// save. A missing file yields an empty map. A file that EXISTS but cannot be parsed
+// returns an error, so the caller aborts the save rather than overwriting good data
+// (providers, API keys, agent overrides) with just the one key it meant to change —
+// e.g. after the user hand-edits the file and leaves a YAML typo.
+func readYAMLRoot(path string) (map[string]any, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]any{}, nil
+		}
+		return nil, err
+	}
+	root := map[string]any{}
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return nil, fmt.Errorf("config: %s is not valid YAML; refusing to overwrite it and lose its contents — fix the file and retry: %w", path, err)
+	}
+	return root, nil
+}
+
+// atomicWriteFile writes data to path via a temp file in the same directory followed
+// by a rename, so a crash, power loss, or full disk mid-write can never truncate or
+// corrupt the existing file (which would lose the user's providers, keys, or config).
+func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("config: creating %s: %w", filepath.Dir(path), err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".oline-cfg-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return nil
+}
+
+// editYAMLFile read-modify-writes a YAML config file (0600): it loads the existing
+// top-level map (aborting if it exists but is unparseable, so nothing is clobbered),
+// applies mutate, and writes the result back ATOMICALLY. This is the single safe
+// write path for the user's provider/model setup and per-mode overrides.
+func (s *Store) editYAMLFile(path string, mutate func(root map[string]any)) error {
+	root, err := readYAMLRoot(path)
+	if err != nil {
+		return err
 	}
 	mutate(root)
-	if err := os.MkdirAll(s.configDir, 0o700); err != nil {
-		return fmt.Errorf("config: creating %s: %w", s.configDir, err)
-	}
 	data, err := yaml.Marshal(root)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o600)
+	return atomicWriteFile(path, data, 0o600)
+}
+
+// editSharedModels read-modify-writes the shared models.yml. It is the single write
+// path for the user's global provider and tier-role setup.
+func (s *Store) editSharedModels(mutate func(root map[string]any)) error {
+	return s.editYAMLFile(s.sharedModelsPath(), mutate)
 }
 
 // Effective returns the merged configuration.
@@ -660,14 +710,11 @@ func (s *Store) SaveSecret(provider, key string) error {
 		s.secrets = map[string]string{}
 	}
 	s.secrets[provider] = key
-	if err := os.MkdirAll(s.configDir, 0o700); err != nil {
-		return fmt.Errorf("config: creating %s: %w", s.configDir, err)
-	}
-	data, err := yaml.Marshal(s.secrets)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(s.configDir, "secrets.yml"), data, 0o600)
+	// Read-modify-write the on-disk secrets map so other providers' keys are preserved
+	// (and never clobbered on a parse error), written atomically.
+	return s.editYAMLFile(filepath.Join(s.configDir, "secrets.yml"), func(root map[string]any) {
+		root[provider] = key
+	})
 }
 
 // SaveProvider persists a provider's baseURL into the shared models.yml override
@@ -826,10 +873,7 @@ func (s *Store) SaveModeFile(rel, content string) error {
 	if rp, err := filepath.Rel(s.userDir, dest); err != nil || rp == ".." || strings.HasPrefix(rp, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("config: invalid mode-file path %q", rel)
 	}
-	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
-		return fmt.Errorf("config: creating %s: %w", filepath.Dir(dest), err)
-	}
-	return os.WriteFile(dest, []byte(content), 0o644)
+	return atomicWriteFile(dest, []byte(content), 0o644)
 }
 
 // Providers returns the provider names in the effective config.
@@ -880,28 +924,14 @@ func (s *Store) SaveModelRole(tier, selector string) error {
 // user config layer (~/oline/config/<mode>/config.yml) and applies it in memory.
 func (s *Store) SaveTUICustomizablePanes(v bool) error {
 	s.eff.TUI.CustomizablePanes = v
-	userCfgPath := filepath.Join(s.userDir, "config.yml")
-	var userRoot map[string]any
-	if data, err := os.ReadFile(userCfgPath); err == nil {
-		_ = yaml.Unmarshal(data, &userRoot)
-	}
-	if userRoot == nil {
-		userRoot = map[string]any{}
-	}
-	tui, _ := userRoot["tui"].(map[string]any)
-	if tui == nil {
-		tui = map[string]any{}
-	}
-	tui["customizablePanes"] = v
-	userRoot["tui"] = tui
-	if err := os.MkdirAll(s.userDir, 0o700); err != nil {
-		return fmt.Errorf("config: creating %s: %w", s.userDir, err)
-	}
-	data, err := yaml.Marshal(userRoot)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(userCfgPath, data, 0o600)
+	return s.editYAMLFile(filepath.Join(s.userDir, "config.yml"), func(root map[string]any) {
+		tui, _ := root["tui"].(map[string]any)
+		if tui == nil {
+			tui = map[string]any{}
+		}
+		tui["customizablePanes"] = v
+		root["tui"] = tui
+	})
 }
 
 // SetTUICloseIdleSubagentPanes applies the close-idle-panes setting in memory only
@@ -913,28 +943,14 @@ func (s *Store) SetTUICloseIdleSubagentPanes(v bool) { s.eff.TUI.CloseIdleSubage
 // memory. Mirrors SaveTUICustomizablePanes.
 func (s *Store) SaveTUICloseIdleSubagentPanes(v bool) error {
 	s.eff.TUI.CloseIdleSubagentPanes = v
-	userCfgPath := filepath.Join(s.userDir, "config.yml")
-	var userRoot map[string]any
-	if data, err := os.ReadFile(userCfgPath); err == nil {
-		_ = yaml.Unmarshal(data, &userRoot)
-	}
-	if userRoot == nil {
-		userRoot = map[string]any{}
-	}
-	tui, _ := userRoot["tui"].(map[string]any)
-	if tui == nil {
-		tui = map[string]any{}
-	}
-	tui["closeIdleSubagentPanes"] = v
-	userRoot["tui"] = tui
-	if err := os.MkdirAll(s.userDir, 0o700); err != nil {
-		return fmt.Errorf("config: creating %s: %w", s.userDir, err)
-	}
-	data, err := yaml.Marshal(userRoot)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(userCfgPath, data, 0o600)
+	return s.editYAMLFile(filepath.Join(s.userDir, "config.yml"), func(root map[string]any) {
+		tui, _ := root["tui"].(map[string]any)
+		if tui == nil {
+			tui = map[string]any{}
+		}
+		tui["closeIdleSubagentPanes"] = v
+		root["tui"] = tui
+	})
 }
 
 // Orchestrator returns the effective orchestrator model configuration.
@@ -944,30 +960,16 @@ func (s *Store) Orchestrator() OrchestratorConfig { return s.eff.Orchestrator }
 // / max context tokens) into the user config layer and applies it in memory.
 func (s *Store) SaveOrchestrator(oc OrchestratorConfig) error {
 	s.eff.Orchestrator = oc
-	userCfgPath := filepath.Join(s.userDir, "config.yml")
-	var userRoot map[string]any
-	if data, err := os.ReadFile(userCfgPath); err == nil {
-		_ = yaml.Unmarshal(data, &userRoot)
-	}
-	if userRoot == nil {
-		userRoot = map[string]any{}
-	}
-	orch := map[string]any{
-		"tier":          oc.Tier,
-		"thinkingLevel": oc.ThinkingLevel,
-	}
-	if oc.MaxContextTokens > 0 {
-		orch["maxContextTokens"] = oc.MaxContextTokens
-	}
-	userRoot["orchestrator"] = orch
-	if err := os.MkdirAll(s.userDir, 0o700); err != nil {
-		return fmt.Errorf("config: creating %s: %w", s.userDir, err)
-	}
-	data, err := yaml.Marshal(userRoot)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(userCfgPath, data, 0o600)
+	return s.editYAMLFile(filepath.Join(s.userDir, "config.yml"), func(root map[string]any) {
+		orch := map[string]any{
+			"tier":          oc.Tier,
+			"thinkingLevel": oc.ThinkingLevel,
+		}
+		if oc.MaxContextTokens > 0 {
+			orch["maxContextTokens"] = oc.MaxContextTokens
+		}
+		root["orchestrator"] = orch
+	})
 }
 
 // ValidateModels checks every tier is configured, each resolves to a known
@@ -1062,28 +1064,13 @@ func (s *Store) SaveAgent(name string, ov AgentOverride) error {
 	ov = merged
 	s.eff.Agents[name] = ov
 
-	// Load the existing user config.yml (if any) so we only rewrite its agents map.
-	userCfgPath := filepath.Join(s.userDir, "config.yml")
-	var userRoot map[string]any
-	if data, err := os.ReadFile(userCfgPath); err == nil {
-		_ = yaml.Unmarshal(data, &userRoot)
-	}
-	if userRoot == nil {
-		userRoot = map[string]any{}
-	}
-	agentsMap, _ := userRoot["agents"].(map[string]any)
-	if agentsMap == nil {
-		agentsMap = map[string]any{}
-	}
-	agentsMap[name] = ov
-	userRoot["agents"] = agentsMap
-
-	if err := os.MkdirAll(s.userDir, 0o700); err != nil {
-		return fmt.Errorf("config: creating %s: %w", s.userDir, err)
-	}
-	data, err := yaml.Marshal(userRoot)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(userCfgPath, data, 0o600)
+	// Rewrite only this agent's entry in the user config.yml, preserving everything else.
+	return s.editYAMLFile(filepath.Join(s.userDir, "config.yml"), func(root map[string]any) {
+		agentsMap, _ := root["agents"].(map[string]any)
+		if agentsMap == nil {
+			agentsMap = map[string]any{}
+		}
+		agentsMap[name] = ov
+		root["agents"] = agentsMap
+	})
 }

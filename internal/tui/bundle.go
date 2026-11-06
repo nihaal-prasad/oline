@@ -190,6 +190,16 @@ func (m *model) buildExportBundle(engagement, dest string) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
+	// If the workspace couldn't be captured this round, don't replace an existing
+	// complete backup with this workspace-less one — a transient sandbox hiccup would
+	// otherwise destroy the artifacts/loot in the last good bundle. Keep the old one
+	// (the host-side state — history, logs, findings — is persisted separately anyway).
+	// With no previous bundle, a host-side-only bundle is still better than nothing.
+	if !workspaceOK {
+		if _, statErr := os.Stat(dest); statErr == nil {
+			return fmt.Errorf("workspace capture failed; kept the previous complete backup at %s", dest)
+		}
+	}
 	return os.Rename(tmpName, dest)
 }
 
