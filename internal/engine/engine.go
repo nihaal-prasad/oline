@@ -407,17 +407,28 @@ func (s *Session) Snapshot() []AgentRecord {
 func (r *Router) snapshotAll() []AgentRecord {
 	r.mu.Lock()
 	ags := make([]*Agent, 0, len(r.agents))
+	live := make(map[core.AgentID]bool, len(r.agents))
 	for _, a := range r.agents {
 		ags = append(ags, a)
+		live[a.id] = true
+	}
+	// Finished agents (not currently live) carried from unregister, so the snapshot
+	// keeps a finished orchestrator/subagent's transcript.
+	retired := make([]AgentRecord, 0, len(r.retired))
+	for id, rec := range r.retired {
+		if !live[id] {
+			retired = append(retired, rec)
+		}
 	}
 	r.mu.Unlock()
-	recs := make([]AgentRecord, 0, len(ags))
+	recs := make([]AgentRecord, 0, len(ags)+len(retired))
 	for _, a := range ags {
 		a.mu.Lock()
 		h := append([]llm.Message(nil), a.history...)
 		a.mu.Unlock()
 		recs = append(recs, AgentRecord{ID: a.id, Role: a.cfg.Role, Parent: a.parent, State: a.sm.State(), History: h})
 	}
+	recs = append(recs, retired...)
 	return recs
 }
 
@@ -655,9 +666,17 @@ func (s *Session) Run(ctx context.Context, orch AgentConfig, userPrompt string) 
 type Router struct {
 	mu     sync.Mutex
 	agents map[core.AgentID]*Agent
-	sem    chan struct{}
-	counts map[string]int
-	sess   *Session
+	// retired holds the final record (transcript + role + state) of every agent that
+	// has unregistered — a finished subagent, or the orchestrator when Run returns.
+	// Snapshot merges these with the live agents so the saved history and the backup
+	// bundle keep a finished agent's conversation instead of dropping it. Without this
+	// the shutdown-time history save (which runs AFTER Run returns and unregisters
+	// Main) would overwrite the saved conversation with an empty agent list, so a
+	// resumed engagement would come back blank.
+	retired map[core.AgentID]AgentRecord
+	sem     chan struct{}
+	counts  map[string]int
+	sess    *Session
 	// wg tracks every background goroutine that can emit events (subagents, the
 	// budget monitor, background bash jobs). Session.Run waits on it after the
 	// orchestrator returns, so once Run returns nothing emits — the caller can then
@@ -709,7 +728,23 @@ func (r *Router) register(a *Agent) {
 
 func (r *Router) unregister(id core.AgentID) {
 	r.mu.Lock()
+	a := r.agents[id]
 	delete(r.agents, id)
+	r.mu.Unlock()
+	if a == nil {
+		return
+	}
+	// Retain the agent's final record so Snapshot (and thus the saved history / backup
+	// bundle) still includes it after it finishes. Snapshot taken under a.mu only (not
+	// holding r.mu), matching snapshotAll's lock discipline.
+	a.mu.Lock()
+	rec := AgentRecord{ID: a.id, Role: a.cfg.Role, Parent: a.parent, State: a.sm.State(), History: append([]llm.Message(nil), a.history...)}
+	a.mu.Unlock()
+	r.mu.Lock()
+	if r.retired == nil {
+		r.retired = map[core.AgentID]AgentRecord{}
+	}
+	r.retired[id] = rec
 	r.mu.Unlock()
 }
 

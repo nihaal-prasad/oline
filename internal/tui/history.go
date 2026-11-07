@@ -79,10 +79,19 @@ func (m *model) saveHistory() {
 	}
 	m.histMu.Lock()
 	defer m.histMu.Unlock()
+	agents := m.sess.Snapshot()
+	// Never overwrite a good saved history with an empty agent list. A live engagement
+	// always has at least the orchestrator; an empty snapshot means this save raced the
+	// teardown (agents already unregistered), and writing it would wipe the conversation
+	// so a later resume comes back blank. The engine retains finished agents so this is
+	// belt-and-suspenders, not the primary guard.
+	if len(agents) == 0 {
+		return
+	}
 	data, err := json.MarshalIndent(engagementHistory{
 		Engagement: m.engagement,
 		SavedAt:    time.Now(),
-		Agents:     m.sess.Snapshot(),
+		Agents:     agents,
 		Windows:    m.savedLayout, // last UI-goroutine layout snapshot (see refreshLayoutSnapshot)
 		WinIdx:     m.savedWinIdx,
 	}, "", "  ")
