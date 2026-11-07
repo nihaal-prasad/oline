@@ -10,7 +10,7 @@
 # start until all three are set to a model in models.yml that has a usable API key.
 # Your choices are saved to ~/oline/config/<mode>/config.yml afterward.
 modelRoles:
-  big:    ""   # strongest: developer, reviewer, tester (and the orchestrator if you raise its tier)
+  big:    ""   # strongest: developer, reviewer, tester, and the orchestrator (Main) by default
   medium: ""   # balanced, in-between work
   small:  ""   # fastest/cheapest: summarizers, and context compaction
   # decision: OPTIONAL System-1 decision model (leave blank to disable). When set and
@@ -22,10 +22,11 @@ modelRoles:
 maxConcurrency: 5
 
 # The orchestrator (Main) runs on one of the three tiers, like any agent. Default:
-# the medium tier with a high thinking level — strong planning at a lower cost than
-# the big tier. maxContextTokens (0 = auto) is the ceiling at which Main compacts.
+# the big tier with a high thinking level — the strongest planning, which gives the
+# best orchestration results. Lower it to medium if you want to trade some quality
+# for cost. maxContextTokens (0 = auto) is the ceiling at which Main compacts.
 orchestrator:
-  tier: medium
+  tier: big
   thinkingLevel: high
   maxContextTokens: 0
 

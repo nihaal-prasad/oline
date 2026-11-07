@@ -128,10 +128,10 @@ func TestBuildPentester(t *testing.T) {
 	if !orch.IsOrchestrator {
 		t.Error("orchestrator not flagged")
 	}
-	// The orchestrator defaults to the MEDIUM tier (GLM) at a HIGH thinking level
+	// The orchestrator defaults to the BIG tier (DeepSeek) at a HIGH thinking level
 	// (config.OrchestratorConfig defaults in the embedded config.yml).
-	if !strings.Contains(orch.Model, "glm-5p3-flash") {
-		t.Errorf("orchestrator model = %q (want the medium-tier GLM by default)", orch.Model)
+	if !strings.Contains(orch.Model, "deepseek-v4p1-flash") {
+		t.Errorf("orchestrator model = %q (want the big-tier DeepSeek by default)", orch.Model)
 	}
 	if orch.Effort != "high" {
 		t.Errorf("orchestrator effort = %q (want high by default)", orch.Effort)
@@ -329,6 +329,74 @@ func TestBuildExploiter(t *testing.T) {
 				t.Errorf("%s policy = %v, want Isolated (exploiter exec agents are network-isolated)", name, cfg.Policy)
 			}
 		}
+	}
+}
+
+// TestExploiterDecisionSeverityAutomatic: in exploiter mode with the decision model
+// on, the decision model owns severity. The JUDGE has its severity-assignment wording
+// surgically stripped (it reports the facts that determine severity instead); every
+// OTHER agent — the orchestrator and the remaining subagents — gets the appended
+// override. With the decision model off, the judge keeps rating severity as before.
+func TestExploiterDecisionSeverityAutomatic(t *testing.T) {
+	const marker = "Severity is assigned automatically"
+	const judgeCVSSStep = "Assign a CVSS-based severity: CRITICAL / HIGH / MEDIUM / LOW"
+	store, roster := load(t, config.ModeExploiter)
+
+	// Decision ON.
+	orchOn, resolverOn := wire.Build(config.ModeExploiter, store, roster, true)
+	if !strings.Contains(orchOn.System, marker) {
+		t.Error("decision-on exploiter orchestrator should be told severity is automatic")
+	}
+	for _, name := range roster.Names() {
+		cfg, _ := resolverOn(name)
+		if strings.EqualFold(name, "judge") {
+			continue // the judge is stripped, not appended-to; checked below
+		}
+		if !strings.Contains(cfg.System, marker) {
+			t.Errorf("decision-on exploiter subagent %q missing the severity override", name)
+		}
+	}
+
+	// The judge's CVSS-assignment step must be GONE and replaced with a report-the-
+	// facts instruction — and it must NOT carry the appended override (it was stripped,
+	// so there is nothing left to override).
+	judge, ok := resolverOn("judge")
+	if !ok {
+		t.Fatal("exploiter roster has no judge")
+	}
+	if strings.Contains(judge.System, judgeCVSSStep) {
+		t.Error("decision-on judge still tells it to assign a CVSS severity — the wording was not stripped")
+	}
+	if !strings.Contains(judge.System, "do NOT assign a severity rating yourself") {
+		t.Error("decision-on judge should be told to report the facts and not rate severity")
+	}
+	if !strings.Contains(judge.System, "automated decision model assigns the") {
+		t.Error("decision-on judge should say the decision model assigns the rating")
+	}
+	if strings.Contains(judge.System, marker) {
+		t.Error("decision-on judge should be stripped, not carry the appended override")
+	}
+
+	// Decision OFF: the judge keeps its CVSS-assignment step verbatim; nobody gets the
+	// override.
+	orchOff, resolverOff := wire.Build(config.ModeExploiter, store, roster, false)
+	if strings.Contains(orchOff.System, marker) {
+		t.Error("decision-off exploiter orchestrator must not get the severity override")
+	}
+	judgeOff, _ := resolverOff("judge")
+	if !strings.Contains(judgeOff.System, judgeCVSSStep) {
+		t.Error("decision-off judge must keep assigning the CVSS severity (unchanged fallback)")
+	}
+	if strings.Contains(judgeOff.System, marker) {
+		t.Error("decision-off judge must not get the severity override")
+	}
+
+	// Exploiter-specific: a pentester run with the decision model on must NOT carry the
+	// override (pentester has no judge / CVSS pipeline).
+	pstore, proster := load(t, config.ModePentester)
+	pOrch, _ := wire.Build(config.ModePentester, pstore, proster, true)
+	if strings.Contains(pOrch.System, marker) {
+		t.Error("pentester orchestrator must not get the exploiter-only severity override")
 	}
 }
 

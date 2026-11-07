@@ -90,7 +90,7 @@ modelRoles:                  # no defaults: set the first three before the first
 maxConcurrency: 5            # cap on agents running at once (orchestrator included)
 
 orchestrator:                # the orchestrator (Main) runs on its own tier
-  tier: medium               # which tier backs it (default medium)
+  tier: big                  # which tier backs it (default big)
   thinkingLevel: high        # its reasoning effort (default high)
   maxContextTokens: 0        # compaction ceiling (0 = auto, a fraction of the window)
 
@@ -133,9 +133,10 @@ tui:                         # interface preferences (not engagement behavior)
   so at the default of 5 up to 4 subagents run alongside it. Background `bash_bg`
   jobs are not counted.
 - **orchestrator** sets the tier, thinking level, and context ceiling for the
-  orchestrator (Main). It defaults to the `medium` tier at `high` thinking: strong
-  planning at a lower cost than `big`. `maxContextTokens: 0` auto-sizes the
-  compaction ceiling to a fraction of the model's window.
+  orchestrator (Main). It defaults to the `big` tier at `high` thinking: the
+  strongest planning, for the best orchestration (lower it to `medium` to trade some
+  quality for cost). `maxContextTokens: 0` auto-sizes the compaction ceiling to a
+  fraction of the model's window.
 - **budget.maxCostUSD** caps engagement spend in US dollars. At the cap, oline
   pauses all agents; raise the value or resume with `Ctrl-b R`. 0 disables it.
 - **budget.maxSummaryCostUSD** caps the spend of the `small`-tier model used for

@@ -114,11 +114,25 @@ func Build(mode config.Mode, store *config.Store, roster *agents.Roster, decisio
 		if ctxTokens <= 0 {
 			ctxTokens = contextForTier(eff, model, tier)
 		}
+		// Severity ownership in the decision-on exploiter run. The judge gets its
+		// severity-assignment wording surgically stripped (it instead reports the
+		// facts that determine severity; the decision model rates it when the judge
+		// records the finding). Every other agent gets the appended override. If the
+		// judge prompt has been customized so the strip anchors no longer match, fall
+		// back to the override so the no-self-rating guarantee still holds.
+		severityAutomatic := mode == config.ModeExploiter && decisionEnabled
+		body := def.Prompt
+		appendOverride := severityAutomatic
+		if severityAutomatic && strings.EqualFold(def.Name, "judge") {
+			if stripped, ok := stripJudgeSeverity(def.Prompt); ok {
+				body, appendOverride = stripped, false
+			}
+		}
 		return engine.AgentConfig{
 			Role:             def.Name,
 			Model:            model,
 			Effort:           effortFor(eff, model, def.ThinkingLevel),
-			System:           subagentSystem(def.Prompt, budget, containsStr(tools, "bash")),
+			System:           subagentSystem(body, budget, containsStr(tools, "bash"), appendOverride),
 			Tools:            tools,
 			Spawns:           []string(def.Spawns),
 			Policy:           policyFor(mode, def.Name),
@@ -149,7 +163,7 @@ func Build(mode config.Mode, store *config.Store, roster *agents.Roster, decisio
 	if mode == config.ModeExploiter {
 		orchTools = append(orchTools, "runtime", "heartbeat")
 	}
-	// The orchestrator runs on a configurable tier (default medium) at a configurable
+	// The orchestrator runs on a configurable tier (default big) at a configurable
 	// thinking level (default high) — see config.OrchestratorConfig.
 	orchTier := tierOf(eff.Orchestrator.Tier)
 	orchModel := eff.ModelForTier(orchTier)
@@ -167,6 +181,13 @@ func Build(mode config.Mode, store *config.Store, roster *agents.Roster, decisio
 		sys += capabilityRoster(roster) + decisionGatesPrompt()
 	} else {
 		sys += tierRoster(roster, orchTier)
+	}
+	// In exploiter mode the decision model assigns severity itself when it is on
+	// (see engine/decision_gates.go: triageFinding), so the orchestrator must not
+	// route findings/exploits for a human-style CRITICAL/HIGH/MEDIUM/LOW rating by a
+	// subagent. This comes last so it overrides the template's "have it judged" steps.
+	if decisionEnabled && mode == config.ModeExploiter {
+		sys += severityAutomaticPrompt()
 	}
 	orch := engine.AgentConfig{
 		Role:             "Main",
@@ -321,7 +342,7 @@ func grantCoordination(toolset []string) []string {
 // reverse-shell tool (only when the agent has bash), and output format. This is
 // the single source of truth for that boilerplate, so individual agent prompts do
 // not repeat it. body is the agent's own role/task definition.
-func subagentSystem(body string, budgetMinutes int, hasBash bool) string {
+func subagentSystem(body string, budgetMinutes int, hasBash, severityAutomatic bool) string {
 	var sb strings.Builder
 
 	sb.WriteString("# Reporting to the orchestrator\n")
@@ -415,7 +436,82 @@ func subagentSystem(body string, budgetMinutes int, hasBash bool) string {
 		"tables, and fenced code blocks for commands, code, file paths, and tool output.\n\n")
 
 	sb.WriteString(strings.TrimSpace(body))
+
+	// When the decision model owns severity (exploiter mode + decision enabled), no
+	// subagent should also rate criticality. Appended LAST so it authoritatively
+	// overrides any earlier instruction in the role body (e.g. the judge's CVSS step).
+	if severityAutomatic {
+		sb.WriteString(severityAutomaticPrompt())
+	}
 	return sb.String()
+}
+
+// severityAutomaticPrompt is appended to every exploiter-mode agent's system prompt —
+// the orchestrator and all subagents — when the decision model is enabled. In that
+// configuration the decision model assigns severity itself (engine/decision_gates.go:
+// triageFinding always sets the finding's severity when the Decider is on), so no
+// agent should also judge criticality: two raters would conflict and the decision
+// model's rating is the one that is kept. It is appended LAST so it overrides any
+// earlier instruction — most importantly the judge's "assign a CVSS severity" step —
+// that tells an agent to rate a finding itself.
+// stripJudgeSeverity rewrites the judge's prompt body for the decision-on exploiter
+// case: it removes the two passages that tell the judge to assign a CVSS severity
+// rating and replaces them with instructions to report the facts that DETERMINE
+// severity. The decision model assigns the final rating from those facts when the
+// judge records its finding (engine/decision_gates.go: triageFinding). It returns the
+// rewritten body and true only when every expected passage was found; if the judge
+// prompt has been customized so an anchor no longer matches, it returns ("", false)
+// and the caller appends severityAutomaticPrompt() instead, so the no-self-rating
+// guarantee holds regardless.
+func stripJudgeSeverity(body string) (string, bool) {
+	repls := []struct{ old, new string }{
+		{
+			old: "5. **Assign a CVSS-based severity: CRITICAL / HIGH / MEDIUM / LOW.** Rate the exploit's real-world\n" +
+				"   severity in line with CVSS reasoning (impact on confidentiality/integrity/availability, attack\n" +
+				"   vector, complexity, privileges and user interaction required). **An exploit that only works under\n" +
+				"   unrealistic conditions or in rare/atypical deployments must not be rated CRITICAL** — the rating\n" +
+				"   must reflect how exploitable real deployments actually are, not the best-case lab scenario. Briefly\n" +
+				"   justify the rating (you may cite an approximate CVSS vector/score if helpful).",
+			new: "5. **Report the factors that determine severity — do NOT assign a severity rating yourself.** Lay\n" +
+				"   out the CVSS-style inputs needed to rate this exploit: the impact on confidentiality / integrity /\n" +
+				"   availability, the attack vector, attack complexity, the privileges required, and any user\n" +
+				"   interaction required — grounded in what you observed while reproducing. Make clear how exploitable\n" +
+				"   **typical real-world deployments** actually are versus the best-case lab scenario (e.g. whether the\n" +
+				"   required conditions are rare or atypical in practice), since that bounds the severity. **An\n" +
+				"   automated decision model assigns the final CRITICAL / HIGH / MEDIUM / LOW rating from the facts you\n" +
+				"   report** immediately after you return, so make those facts complete and honest rather than picking\n" +
+				"   a label yourself.",
+		},
+		{
+			old: "- the **severity: CRITICAL / HIGH / MEDIUM / LOW**, with a brief CVSS-based justification;",
+			new: "- the **severity-determining factors** (CVSS-style: impact on confidentiality/integrity/availability,\n" +
+				"  attack vector, attack complexity, privileges required, user interaction, and how exploitable typical\n" +
+				"  real-world deployments are) — the inputs needed to rate it; **do not assign the CRITICAL / HIGH /\n" +
+				"  MEDIUM / LOW rating yourself — that is determined automatically from these facts**;",
+		},
+	}
+	out := body
+	for _, r := range repls {
+		if !strings.Contains(out, r.old) {
+			return "", false
+		}
+		out = strings.Replace(out, r.old, r.new, 1)
+	}
+	return out, true
+}
+
+func severityAutomaticPrompt() string {
+	return "\n\n# Severity is assigned automatically — do not rate criticality\n" +
+		"An automated decision model owns severity in this run. Do NOT assign, rate, score, or otherwise " +
+		"judge the **CRITICAL / HIGH / MEDIUM / LOW** severity — the criticality — of any specific finding, " +
+		"exploit, crash, or leak yourself, and disregard any instruction elsewhere in this prompt that tells " +
+		"you to produce a CVSS score or a severity rating for a result: that rating is derived automatically " +
+		"from the facts you report. Your job is to establish and report those facts — what the issue is, " +
+		"whether it reproduces from a clean state, the exact conditions it requires, and how realistic those " +
+		"conditions are in real-world deployments — and to leave the rating to the decision model. This does " +
+		"not change which work to prioritize: you may still reason about likely impact and focus your effort " +
+		"on the highest-impact classes of issue; you simply never stamp a severity label on an individual " +
+		"result. When you would otherwise state a severity, report the underlying facts instead.\n"
 }
 
 func containsStr(list []string, s string) bool {

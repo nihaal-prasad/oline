@@ -180,9 +180,10 @@ starts.
 Set an agent's tier in its frontmatter (`tier:`), in `config.yml`
 (`agents.<name>.tier`), or in the editor.
 
-The orchestrator (Main) runs on a configurable tier too, by default the `medium`
-tier at a high thinking level: strong planning at a lower cost than `big`. Change
-it with the `orchestrator:` block in `config.yml` or the editor's **Main** section
+The orchestrator (Main) runs on a configurable tier too, by default the `big`
+tier at a high thinking level: the strongest planning, for the best orchestration.
+Lower it to `medium` in the `orchestrator:` block of `config.yml` or the editor's
+**Main** section if you want to trade some quality for cost
 (see [configuration.md](configuration.md)).
 
 ## Decision model (optional)
