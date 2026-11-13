@@ -27,6 +27,7 @@ const (
 	segThink                // reasoning (dim; toggleable)
 	segTool                 // a tool call: one-line header + its (collapsed) output
 	segLine                 // a discrete line (pre-styled, or styled+wrapped)
+	segMsg                  // a received prompt or inter-agent message: one-line header + (collapsed) body, expanded on click — like segTool but with a 🗨️ header
 )
 
 type segment struct {
@@ -106,6 +107,18 @@ func (t *transcript) appendToolOut(s string) {
 	seg.out = ""
 }
 
+// startMsg appends a collapsed message/prompt segment: a received prompt (from the
+// user or an agent) or an inter-agent message. It shows as a single 🗨️ header line
+// with a click-to-expand hint — exactly like a tool call — and reveals the full body
+// only when the user clicks it. header is the one-line summary (carry the 🗨️ emoji in
+// it); body is the full text shown when expanded.
+func (t *transcript) startMsg(header, body string) {
+	t.finalizeOpen()
+	s := &segment{kind: segMsg, header: header, full: header, done: true}
+	s.raw.WriteString(body)
+	t.segs = append(t.segs, s)
+}
+
 // addRich appends a short, already-styled line (not re-wrapped).
 func (t *transcript) addRich(pre string) {
 	t.finalizeOpen()
@@ -141,8 +154,8 @@ func (t *transcript) render(w int, showThoughts bool, md *glamour.TermRenderer) 
 		var piece string
 		switch s.kind {
 		case segText:
-			// A blank line separates a tool call from the LLM's following text.
-			if prev == segTool {
+			// A blank line separates a tool call or a message from the LLM's following text.
+			if prev == segTool || prev == segMsg {
 				b.WriteByte('\n')
 				cur++
 			}
@@ -155,7 +168,7 @@ func (t *transcript) render(w int, showThoughts bool, md *glamour.TermRenderer) 
 			piece = s.renderCached(w, func(raw string) string {
 				return styleThink.Render(wrapPlain(raw, w))
 			})
-		case segTool:
+		case segTool, segMsg:
 			piece = renderTool(s, w)
 		case segLine:
 			if s.style == nil {
@@ -180,10 +193,10 @@ func (t *transcript) render(w int, showThoughts bool, md *glamour.TermRenderer) 
 	return b.String()
 }
 
-// renderTool renders a tool call as a single header line (truncated to the pane
-// width, with a click hint when it has output). When expanded, the full output
-// follows below the header. The header is indented to match the LLM text (both
-// start at column 0).
+// renderTool renders a collapsible segment — a tool call (segTool) or a received
+// prompt/message (segMsg) — as a single header line (truncated to the pane width,
+// with a click hint). When expanded, the full body follows below the header. The
+// header is indented to match the LLM text (both start at column 0).
 func renderTool(s *segment, w int) string {
 	out := strings.TrimRight(s.raw.String(), "\n")
 	hasOut := strings.TrimSpace(out) != ""
@@ -286,7 +299,7 @@ func (t *transcript) plainText(showThoughts bool) string {
 				continue
 			}
 			b.WriteString(s.raw.String())
-		case segTool:
+		case segTool, segMsg:
 			h := s.full
 			if h == "" {
 				h = s.header

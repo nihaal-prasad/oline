@@ -41,6 +41,42 @@ func TestExpandedToolCallStaysWithinWidth(t *testing.T) {
 	}
 }
 
+// TestMessageSegmentCollapsesAndExpands checks that a received prompt/message renders
+// as a single collapsed 🗨️ line with a click-to-expand hint, hides the body until
+// expanded, and shows the full body (not the gear emoji) once expanded.
+func TestMessageSegmentCollapsesAndExpands(t *testing.T) {
+	const w = 60
+	body := "line one of the prompt\nline two of the prompt\nline three"
+	tr := &transcript{}
+	tr.startMsg("🗨️  message from Recon#1", body)
+
+	collapsed := tr.render(w, true, nil)
+	if strings.Count(strings.TrimRight(collapsed, "\n"), "\n") != 0 {
+		t.Errorf("collapsed message should be a single line, got:\n%s", collapsed)
+	}
+	if !strings.Contains(collapsed, "🗨") {
+		t.Error("collapsed message should carry the chat-bubble emoji")
+	}
+	if strings.Contains(collapsed, "⚙") {
+		t.Error("message must NOT use the gear emoji")
+	}
+	if !strings.Contains(collapsed, "click to expand") {
+		t.Error("collapsed message should show the click-to-expand hint")
+	}
+	if strings.Contains(collapsed, "line two of the prompt") {
+		t.Error("collapsed message must hide the body until expanded")
+	}
+
+	tr.last().expanded = true
+	expanded := tr.render(w, true, nil)
+	if !strings.Contains(expanded, "line two of the prompt") {
+		t.Errorf("expanded message should reveal the full body:\n%s", expanded)
+	}
+	if !strings.Contains(expanded, "click to collapse") {
+		t.Error("expanded message should show the collapse hint")
+	}
+}
+
 // TestStyledLineStaysWithinWidth checks a long unbroken token in a styled transcript
 // line (e.g. a recorded-finding line) is hard-wrapped to the pane width too.
 func TestStyledLineStaysWithinWidth(t *testing.T) {

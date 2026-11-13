@@ -3220,7 +3220,7 @@ func (m *model) toggleToolAt(p *pane, x, y int) {
 	}
 	line := p.vp.YOffset + (y - contentY0)
 	for _, s := range t.segs {
-		if s.kind == segTool && s.nLines > 0 && line >= s.startLine && line < s.startLine+s.nLines {
+		if (s.kind == segTool || s.kind == segMsg) && s.nLines > 0 && line >= s.startLine && line < s.startLine+s.nLines {
 			s.expanded = !s.expanded
 			// Re-render every pane showing this agent so they stay consistent (the
 			// expanded flag is shared across panes of the same agent).
@@ -3537,7 +3537,9 @@ func (m *model) handleRunningKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.log.userMsg(to, text)
-			m.tr(to).addStyled("you → "+string(to)+": "+text, styleAccent)
+			// Show the sent prompt as a single collapsed 🗨️ line (expands on click, like
+			// a tool call), so a long prompt doesn't fill the pane.
+			m.tr(to).startMsg("🗨️  you → "+string(to), text)
 			m.refreshFor(to)
 			m.input.SetValue("")
 		}
@@ -4165,26 +4167,19 @@ func (m *model) mutate(ev event.Event) {
 		m.tr(core.Main).addRich(styleAccent.Render("→ spawned ") + string(e.Child) + styleMuted.Render(" ("+e.Role+")"))
 		m.markDirty(core.Main)
 		// Put the orchestrator's task prompt at the TOP of the new subagent's pane so
-		// the user can scroll up to see exactly what it was told to do.
+		// the user can scroll up to see exactly what it was told to do. It shows as a
+		// single collapsed 🗨️ line and expands to the full prompt only when clicked
+		// (like a tool call), so a long prompt doesn't dominate the pane.
 		if strings.TrimSpace(e.Prompt) != "" {
-			t := m.tr(e.Child)
-			t.addStyled("task from the orchestrator:", styleAccent)
-			// Render the prompt body as markdown (segText → glamour), like assistant
-			// text, so an orchestrator's markdown instructions aren't shown as raw text.
-			t.appendText(e.Prompt)
-			t.finalizeOpen()
+			m.tr(e.Child).startMsg("🗨️  task from the orchestrator", e.Prompt)
 			m.markDirty(e.Child)
 		}
 	case event.Message:
 		// An inbound peer message (send_message from another agent). Show it in the
-		// RECIPIENT's pane as a styled line and render the body as markdown, so a
-		// delivered message is visible instead of silently folded into history.
-		t := m.tr(e.To)
-		t.addStyled("← message from "+string(e.From)+":", styleAccent)
-		if strings.TrimSpace(e.Body) != "" {
-			t.appendText(e.Body)
-			t.finalizeOpen()
-		}
+		// RECIPIENT's pane as a single collapsed 🗨️ line; the body is revealed only when
+		// the user clicks it (like a tool call), so a delivered message is visible
+		// without a long body taking over the pane.
+		m.tr(e.To).startMsg("🗨️  message from "+string(e.From), e.Body)
 		m.markDirty(e.To)
 	case event.UserQuestion:
 		// Track this agent as awaiting an answer. Additive (not a reset) so that

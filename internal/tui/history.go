@@ -340,8 +340,10 @@ func rebuildTranscript(t *transcript, hist []llm.Message) {
 	for _, msg := range hist {
 		switch msg.Role {
 		case llm.RoleUser:
+			// A received prompt/message folded into this agent's history. Show it the
+			// same way the live view does: a single collapsed 🗨️ line, expanded on click.
 			if s := strings.TrimSpace(msg.Content); s != "" {
-				t.addStyled("in: "+s, styleAccent)
+				t.startMsg("🗨️  received message", s)
 			}
 		case llm.RoleAssistant:
 			if s := strings.TrimSpace(msg.Content); s != "" {

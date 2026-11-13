@@ -43,8 +43,8 @@ func waitNotice(t *testing.T, c *collector, sub string) {
 func TestOrchestratorSurvivesProviderErrorAndResumes(t *testing.T) {
 	payment := errors.New("llm: provider returned 402 Payment Required: insufficient credits")
 	mock := &mockLLM{steps: []step{
-		{err: payment},                  // turn 1: provider is out of cash
-		{text: "resumed after reload"},  // turn 2 (after the user reprompts): continues
+		{err: payment},                 // turn 1: provider is out of cash
+		{text: "resumed after reload"}, // turn 2 (after the user reprompts): continues
 	}}
 	llmFor := func(string) (engine.LLM, string, error) { return mock, "m", nil }
 	cfgFor := func(string) (engine.AgentConfig, bool) { return engine.AgentConfig{}, false }

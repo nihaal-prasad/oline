@@ -161,24 +161,27 @@ func TestCloseIdleGatedByConfig(t *testing.T) {
 	}
 }
 
-// TestSpawnPromptRendersAsMarkdown checks the orchestrator's task prompt shown at
-// the top of a subagent pane is a markdown (segText) segment, not a plain line, so
-// markdown in the prompt is rendered through glamour like assistant text.
-func TestSpawnPromptRendersAsMarkdown(t *testing.T) {
+// TestSpawnPromptCollapsesToOneLine checks the orchestrator's task prompt shown at
+// the top of a subagent pane is a collapsed 🗨️ message segment (segMsg) — a single
+// line that expands only on click, like a tool call — not an always-expanded block.
+func TestSpawnPromptCollapsesToOneLine(t *testing.T) {
 	m := runningModel(t)
 	m.apply(event.Spawned{Parent: core.Main, Child: core.AgentID("recon#1"), Role: "recon", Prompt: "# Recon plan\n\n- scan ports\n- enumerate services"})
 	tr := m.tr(core.AgentID("recon#1"))
 	var seg *segment
 	for _, s := range tr.segs {
-		if s.kind == segText && strings.Contains(s.raw.String(), "Recon plan") {
+		if s.kind == segMsg && strings.Contains(s.raw.String(), "Recon plan") {
 			seg = s
 		}
 	}
 	if seg == nil {
-		t.Fatal("the task prompt should be a markdown (segText) segment, not a plain line")
+		t.Fatal("the task prompt should be a collapsed message (segMsg) segment")
 	}
-	if !seg.done {
-		t.Error("the prompt segment should be finalized so it renders as markdown")
+	if !strings.Contains(seg.header, "🗨") {
+		t.Errorf("the prompt header should carry the chat-bubble emoji, got %q", seg.header)
+	}
+	if seg.expanded {
+		t.Error("the prompt should start collapsed, not expanded")
 	}
 }
 
