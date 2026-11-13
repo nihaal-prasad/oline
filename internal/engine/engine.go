@@ -1579,6 +1579,29 @@ func (a *Agent) Run(parent context.Context) Result {
 		if serr != nil {
 			cancel()
 			a.s.notifyLive(event.Notice{Agent: a.id, Level: "error", Text: fmt.Sprintf("%s: %v", a.id, serr)})
+			// The interactive orchestrator must SURVIVE a failed turn so the engagement
+			// can be resumed by a reprompt. A non-retryable provider error — most often
+			// a 402 when the inference provider runs out of cash, or a rejected API key
+			// — would otherwise end Main's loop and tear down the whole run. Instead of
+			// returning, Main goes idle and waits for the user: no assistant message was
+			// appended for this failed turn, so the conversation is intact, and once the
+			// user fixes the problem (reloads credits / fixes the key) and sends any
+			// message, the loop re-issues the SAME turn (drainMailbox folds the new
+			// message in) and the engagement continues from exactly where it stopped.
+			// Subagents and non-interactive runs keep returning the error as before (a
+			// dying subagent already reports "[error] …" to Main via MsgResult).
+			if a.cfg.IsOrchestrator && a.s.Interactive {
+				a.s.notifyLive(event.Notice{Agent: a.id, Level: "warn", Text: string(a.id) +
+					": turn failed — see the error above (e.g. the inference provider is out of cash, or the API key was rejected). Fix it (reload credits / fix the key), then send any message to resume; the engagement continues from here."})
+				a.sm.setIdle()
+				a.emitState(core.Idle)
+				if !a.awaitInput(parent, 0) { // wait indefinitely for the user to reprompt
+					return Result{Agent: a.id, Killed: a.sm.State() == core.Killed, Text: text}
+				}
+				a.sm.setRunning()
+				a.emitState(core.Running)
+				continue // re-issue the failed turn with the user's message folded in
+			}
 			return Result{Agent: a.id, Err: serr, Text: text}
 		}
 

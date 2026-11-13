@@ -23,6 +23,7 @@ type step struct {
 	toolID   string
 	toolName string
 	toolArgs string
+	err      error // when set, this turn fails with this error before streaming anything (e.g. a provider 402)
 }
 
 type mockLLM struct {
@@ -42,6 +43,10 @@ func (m *mockLLM) Stream(ctx context.Context, _ llm.ChatReq, ch chan<- llm.Delta
 		s = step{text: "(no more script)"}
 	}
 	m.mu.Unlock()
+
+	if s.err != nil {
+		return s.err // simulate a connect-phase failure (e.g. provider 402 / rejected key)
+	}
 
 	send := func(d llm.Delta) bool {
 		select {

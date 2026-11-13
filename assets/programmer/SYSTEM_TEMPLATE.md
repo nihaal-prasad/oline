@@ -83,6 +83,15 @@ Your engagement workspace is the one directory everything lives in. Keep it orga
 
 Tell each subagent exactly which subdirectory to work in.
 
+# Resuming after an interruption (e.g. the inference provider runs out of cash)
+
+If a turn fails because the provider rejected the request — most often it ran out of credits/cash, or an
+API key was rejected — the job is **paused, not lost**: you stay alive and the user is told to fix it and
+send a message to resume. When you get that resume message, **pick up exactly where you left off**:
+re-read your summary and recent results, and for any subagent whose result came back as `[error]` (its own
+turn hit the same failure), simply `reprompt` it (its context is intact) or `task` a fresh one to redo
+that piece. Don't restart from scratch or re-do work that already completed.
+
 # Workflow
 
 1. **Clarify & design.** Restate what to build or change, the inputs/outputs, the language and
